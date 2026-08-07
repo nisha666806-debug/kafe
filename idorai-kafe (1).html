@@ -1,0 +1,2589 @@
+<!DOCTYPE html>
+<html lang="tg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Идораи Кафе</title>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;0,700;1,500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root{
+    --ink:#2A2118;
+    --paper:#F3ECDD;
+    --paper-dim:#E9DFC8;
+    --card:#FBF7EE;
+    --brick:#A8402A;
+    --brick-dim:#8C331F;
+    --olive:#6B7A4F;
+    --gold:#C99A3E;
+    --line:#D8CBAE;
+    --green:#5C7A4A;
+    --amber:#C08A2E;
+    --white:#FFFDF8;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'IBM Plex Sans', system-ui, sans-serif;
+    min-height:100vh;
+  }
+  .mono{font-family:'IBM Plex Mono','Courier New',monospace;}
+  .display{font-family:'Fraunces', Georgia, serif;}
+
+  #app{max-width:1100px;margin:0 auto;padding:0 0 60px;}
+
+  /* ---------- Header ---------- */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 20px;border-bottom:2px solid var(--ink);
+    background:var(--paper);position:sticky;top:0;z-index:20;
+  }
+  .brand{display:flex;align-items:baseline;gap:10px;}
+  .brand .name{font-family:'Fraunces',Georgia,serif;font-weight:700;font-size:22px;letter-spacing:.3px;}
+  .brand .tag{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--brick);font-weight:600;}
+  .top-right{display:flex;align-items:center;gap:12px;}
+  .clock{font-family:'IBM Plex Mono',monospace;font-size:13px;color:#6b5f4d;display:none;}
+  @media(min-width:560px){.clock{display:block;}}
+  .role-pill{
+    font-size:12px;font-weight:600;padding:6px 12px;border-radius:20px;
+    background:var(--ink);color:var(--paper);letter-spacing:.3px;
+  }
+  .btn-ghost{
+    background:transparent;border:1.5px solid var(--ink);color:var(--ink);
+    padding:7px 14px;border-radius:20px;font-size:13px;font-weight:600;cursor:pointer;
+    font-family:inherit;
+  }
+  .btn-ghost:hover{background:var(--ink);color:var(--paper);}
+
+  /* ---------- Generic ---------- */
+  .container{padding:24px 20px;}
+  .section-title{
+    font-family:'Fraunces',Georgia,serif;font-size:20px;font-weight:600;margin:0 0 16px;
+    display:flex;align-items:center;gap:10px;
+  }
+  .section-title .num{font-family:'IBM Plex Mono',monospace;color:var(--brick);font-size:14px;}
+
+  button{cursor:pointer;}
+
+  /* ---------- Role select ---------- */
+  .role-select{
+    min-height:calc(100vh - 0px);display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:40px 20px;text-align:center;gap:28px;
+  }
+  .role-select h1{font-family:'Fraunces',Georgia,serif;font-size:34px;margin:0;font-weight:700;}
+  .role-select p{color:#6b5f4d;margin:0;font-size:15px;}
+  .role-cards{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin-top:10px;}
+  .login-box{display:flex;flex-direction:column;gap:14px;width:260px;margin-top:10px;text-align:left;}
+  .login-box .field label{font-size:12px;color:#6b5f4d;font-weight:600;margin-bottom:4px;display:block;}
+  .login-box .field input{width:100%;padding:11px 12px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;background:var(--white);}
+  .login-error{color:var(--brick);font-size:13px;font-weight:600;}
+  .role-card{
+    width:190px;padding:28px 18px;border:2px solid var(--ink);border-radius:14px;
+    background:var(--card);display:flex;flex-direction:column;align-items:center;gap:10px;
+    transition:transform .15s ease, box-shadow .15s ease;
+  }
+  .role-card:hover{transform:translateY(-4px);box-shadow:6px 6px 0 var(--ink);}
+  .role-card .icon{font-size:32px;}
+  .role-card .label{font-weight:700;font-size:16px;font-family:'Fraunces',Georgia,serif;}
+  .role-card .desc{font-size:12px;color:#6b5f4d;}
+
+  /* ---------- Table grid (waiter) ---------- */
+  .table-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:14px;
+  }
+  .table-card{
+    border:2px solid var(--ink);border-radius:12px;padding:16px 14px;background:var(--card);
+    display:flex;flex-direction:column;gap:8px;text-align:left;font-family:inherit;
+  }
+  .table-card:hover{box-shadow:5px 5px 0 var(--ink);transform:translateY(-2px);}
+  .table-card .row1{display:flex;justify-content:space-between;align-items:center;}
+  .table-card .tnum{font-family:'Fraunces',Georgia,serif;font-size:17px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px;}
+  .dot{width:10px;height:10px;border-radius:50%;flex:none;}
+  .dot.free{background:var(--green);}
+  .dot.occupied{background:var(--amber);}
+  .dot.reserved{background:var(--gold);}
+  .table-card.reserved-table{border-style:dashed;border-color:var(--gold);}
+  .table-card.locked-table{opacity:.55;}
+  .reserve-note{font-size:10px;color:var(--gold-dim,#8a6a1f);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+  .reserve-detail{font-size:9px;color:#9c8f78;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-family:'IBM Plex Mono',monospace;}
+  .table-card .status{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;}
+  .table-card .total{font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:var(--brick);}
+
+  /* ---------- Ticket / order builder ---------- */
+  .overlay{
+    position:fixed;inset:0;background:rgba(42,33,24,.55);z-index:30;
+    display:flex;align-items:flex-end;justify-content:center;
+  }
+  @media(min-width:760px){.overlay{align-items:center;}}
+  .ticket-wrap{
+    background:var(--paper);width:100%;max-width:720px;max-height:92vh;overflow-y:auto;
+    border-radius:16px 16px 0 0;border:2px solid var(--ink);border-bottom:none;
+  }
+  @media(min-width:760px){.ticket-wrap{border-radius:16px;border-bottom:2px solid var(--ink);max-height:88vh;}}
+  .ticket-head{
+    display:flex;justify-content:space-between;align-items:center;padding:16px 20px;
+    border-bottom:2px solid var(--ink);position:sticky;top:0;background:var(--paper);z-index:2;
+  }
+  .ticket-head h2{font-family:'Fraunces',Georgia,serif;margin:0;font-size:20px;}
+  .close-x{background:none;border:none;font-size:22px;color:var(--ink);line-height:1;}
+
+  .cat-tabs{display:flex;gap:8px;overflow-x:auto;padding:14px 20px 4px;}
+  .cat-tab{
+    flex:none;padding:6px 14px;border-radius:16px;border:1.5px solid var(--ink);background:transparent;
+    font-size:12px;font-weight:600;font-family:inherit;white-space:nowrap;
+  }
+  .cat-tab.active{background:var(--ink);color:var(--paper);}
+
+  .menu-list{padding:8px 20px 4px;display:flex;flex-direction:column;gap:8px;}
+  .menu-row{
+    display:flex;justify-content:space-between;align-items:center;padding:10px 12px;
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+  }
+  .menu-row .mname{font-weight:600;font-size:14px;}
+  .menu-row .mprice{font-family:'IBM Plex Mono',monospace;font-size:13px;color:#6b5f4d;margin-top:2px;}
+  .add-btn{
+    background:var(--olive);color:var(--white);border:none;width:32px;height:32px;border-radius:50%;
+    font-size:18px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;
+  }
+
+  .receipt{
+    margin:18px 20px 20px;background:var(--white);border:1px solid var(--line);border-radius:2px;
+    padding:18px 18px 26px;
+    clip-path:polygon(0% 0%,100% 0%,100% 96%,95% 100%,90% 96%,85% 100%,80% 96%,75% 100%,70% 96%,65% 100%,60% 96%,55% 100%,50% 96%,45% 100%,40% 96%,35% 100%,30% 96%,25% 100%,20% 96%,15% 100%,10% 96%,5% 100%,0% 96%);
+    box-shadow:0 2px 8px rgba(42,33,24,.12);
+  }
+  .receipt-title{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#6b5f4d;text-align:center;margin-bottom:10px;border-bottom:1px dashed var(--line);padding-bottom:10px;}
+  .receipt-line{display:flex;justify-content:space-between;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:13px;padding:5px 0;}
+  .receipt-line .qty-ctrl{display:flex;align-items:center;gap:6px;}
+  .qty-btn{width:20px;height:20px;border:1px solid var(--ink);background:none;border-radius:4px;font-size:12px;line-height:1;font-family:inherit;}
+  .receipt-empty{text-align:center;color:#9c8f78;font-size:13px;padding:14px 0;font-family:'IBM Plex Mono',monospace;}
+  .receipt-total{display:flex;justify-content:space-between;border-top:1px dashed var(--line);margin-top:8px;padding-top:10px;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:16px;}
+
+  .ticket-actions{display:flex;gap:10px;padding:0 20px 24px;}
+  .btn-primary{
+    flex:1;background:var(--ink);color:var(--paper);border:none;border-radius:10px;padding:13px;
+    font-weight:700;font-size:14px;font-family:inherit;
+  }
+  .btn-primary:disabled{opacity:.4;}
+  .btn-pay{
+    flex:1;background:var(--brick);color:var(--white);border:none;border-radius:10px;padding:13px;
+    font-weight:700;font-size:14px;font-family:inherit;
+  }
+  .btn-pay:disabled{opacity:.4;}
+
+  /* ---------- Admin ---------- */
+  .admin-tabs{display:flex;gap:8px;padding:0 20px;border-bottom:2px solid var(--ink);}
+  .admin-tab{
+    padding:12px 6px;background:none;border:none;font-family:'Fraunces',Georgia,serif;font-size:15px;
+    font-weight:600;color:#8a7c64;position:relative;top:2px;
+  }
+  .admin-tab.active{color:var(--ink);border-bottom:3px solid var(--brick);}
+
+  .stat-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:22px;}
+  .stat-card{
+    flex:1;min-width:150px;background:var(--card);border:2px solid var(--ink);border-radius:12px;padding:16px 18px;
+  }
+  .stat-card .label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#6b5f4d;font-weight:600;}
+  .stat-card .value{font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:700;color:var(--brick);margin-top:4px;}
+
+  .item-row{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;
+    background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;
+  }
+  .item-row .info .nm{font-weight:600;font-size:14px;}
+  .item-row .info .cat{font-size:11px;color:var(--olive);text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-top:2px;}
+  .item-row .price{font-family:'IBM Plex Mono',monospace;font-weight:700;}
+  .icon-btn{background:none;border:1.5px solid var(--ink);border-radius:8px;width:30px;height:30px;font-size:13px;}
+  .icon-btn.danger{border-color:var(--brick);color:var(--brick);}
+
+  .cat-group{margin-bottom:20px;}
+  .cat-group h3{font-family:'Fraunces',Georgia,serif;font-size:15px;margin:0 0 10px;color:var(--olive);}
+
+  .form-box{
+    background:var(--card);border:2px dashed var(--line);border-radius:12px;padding:16px;margin-bottom:20px;
+    display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
+  }
+  .field{display:flex;flex-direction:column;gap:4px;}
+  .field label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;}
+  .field input, .field select{
+    font-family:inherit;font-size:14px;padding:8px 10px;border:1.5px solid var(--ink);border-radius:8px;background:var(--white);
+  }
+  .field input{width:150px;}
+  .field.small input{width:90px;}
+
+  .receipt-item-row{
+    display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:var(--card);
+    border:1px solid var(--line);border-radius:10px;margin-bottom:8px;font-family:'IBM Plex Mono',monospace;font-size:13px;
+  }
+  .receipt-item-row .l1{font-weight:600;font-family:'IBM Plex Sans',sans-serif;}
+  .receipt-item-row .l2{color:#8a7c64;font-size:12px;margin-top:3px;}
+
+  .empty-state{
+    text-align:center;padding:50px 20px;color:#9c8f78;
+  }
+  .empty-state .big{font-size:34px;margin-bottom:8px;}
+
+  .toast{
+    position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--paper);
+    padding:10px 20px;border-radius:20px;font-size:13px;font-weight:600;z-index:50;
+    opacity:0;transition:opacity .25s ease;pointer-events:none;
+  }
+  .toast.show{opacity:1;}
+
+  .chef-osh-line{font-weight:700;font-family:'IBM Plex Mono',monospace;font-size:13px;padding:3px 0;color:var(--ink);}
+  .chef-other-line{font-size:12px;color:#8a7c64;font-family:'IBM Plex Mono',monospace;padding:3px 0;}
+  .osh-banner{
+    display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 20px;
+    background:var(--card);border-bottom:1px solid var(--line);font-size:12px;color:#6b5f4d;
+  }
+  .settings-form{display:flex;flex-direction:column;gap:16px;max-width:340px;}
+  .salary-row{
+    display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 14px;
+    background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;
+  }
+  .salary-row .salary-name{min-width:110px;}
+  .salary-row .salary-name .nm{font-weight:600;font-size:14px;}
+  .salary-row .salary-name .cat{font-size:11px;color:var(--olive);text-transform:uppercase;letter-spacing:.5px;font-weight:600;}
+  .salary-select{padding:7px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:12px;background:var(--white);}
+  .salary-input{width:100px;padding:7px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;}
+  .salary-computed{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#6b5f4d;margin-left:auto;}
+  .xls-table{width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px;margin-top:10px;}
+  .xls-table th, .xls-table td{border:1px solid var(--line);padding:8px 10px;text-align:right;}
+  .xls-table th{background:var(--paper-dim);font-family:'IBM Plex Sans',sans-serif;font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:#6b5f4d;font-weight:700;}
+  .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-family:'IBM Plex Sans',sans-serif;font-weight:600;}
+  .xls-table tr:nth-child(even) td{background:var(--card);}
+  .xls-table td.total-cell{font-weight:700;color:var(--brick);}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============ FIREBASE SETUP ============ */
+const firebaseConfig = {
+  apiKey: "AIzaSyCVgddT7ycblQxi1DWjJ6zQ92ArRIP8PgM",
+  authDomain: "oshi-foram.firebaseapp.com",
+  projectId: "oshi-foram",
+  storageBucket: "oshi-foram.firebasestorage.app",
+  messagingSenderId: "564752367082",
+  appId: "1:564752367082:web:6fd330f414cd7afef48693"
+};
+let db = null;
+try{
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+}catch(e){ console.error('Firebase init failed', e); }
+
+async function fsGet(key){
+  try{
+    const snap = await db.collection('cafeData').doc(key).get();
+    return snap.exists ? snap.data().value : null;
+  }catch(e){ console.error('fsGet failed', key, e); return null; }
+}
+async function fsSet(key, value){
+  try{
+    await db.collection('cafeData').doc(key).set({value, updatedAt: Date.now()});
+    return true;
+  }catch(e){ console.error('fsSet failed', key, e); return false; }
+}
+
+/* ============ STORAGE HELPERS ============ */
+async function loadAll(){
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null};
+  try{
+    const m = await fsGet('menu');
+    out.menu = m ? JSON.parse(m) : null;
+  }catch(e){ out.menu = null; }
+  try{
+    const o = await fsGet('orders');
+    out.orders = o ? JSON.parse(o) : null;
+  }catch(e){ out.orders = null; }
+  try{
+    const s = await fsGet('settings');
+    out.settings = s ? JSON.parse(s) : null;
+  }catch(e){ out.settings = null; }
+  try{
+    const r = await fsGet('reservations');
+    out.reservations = r ? JSON.parse(r) : null;
+  }catch(e){ out.reservations = null; }
+  try{
+    const tb = await fsGet('tables');
+    out.tables = tb ? JSON.parse(tb) : null;
+  }catch(e){ out.tables = null; }
+  try{
+    const os = await fsGet('oshStock');
+    out.oshStock = os ? JSON.parse(os) : null;
+  }catch(e){ out.oshStock = null; }
+  try{
+    const ac = await fsGet('accounts');
+    out.accounts = ac ? JSON.parse(ac) : null;
+  }catch(e){ out.accounts = null; }
+  return out;
+}
+async function saveMenu(menu){
+  const ok = await fsSet('menu', JSON.stringify(menu));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveOrders(orders){
+  const ok = await fsSet('orders', JSON.stringify(orders));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveSettings(settings){
+  const ok = await fsSet('settings', JSON.stringify(settings));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveReservations(reservations){
+  const ok = await fsSet('reservations', JSON.stringify(reservations));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveTables(tables){
+  const ok = await fsSet('tables', JSON.stringify(tables));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveOshStock(data){
+  const ok = await fsSet('oshStock', JSON.stringify(data));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveAccounts(accounts){
+  const ok = await fsSet('accounts', JSON.stringify(accounts));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+
+const DEFAULT_MENU = [
+  {id:'m1', name:'Оши палов (порсия)', price:25, category:'Ош', unit:'dona'},
+  {id:'m2', name:'Оши палов', price:80, category:'Ош', unit:'kg'},
+  {id:'m3', name:'Чойи сиёҳ', price:10, category:'Нӯшокиҳо', unit:'dona'},
+  {id:'m4', name:'Чойи сабз', price:10, category:'Нӯшокиҳо', unit:'dona'},
+  {id:'m5', name:'Оби маъданӣ', price:8, category:'Нӯшокиҳо', unit:'dona'},
+  {id:'m6', name:'Афшура', price:15, category:'Нӯшокиҳо', unit:'dona'},
+  {id:'m7', name:'Кока-кола', price:12, category:'Нӯшокиҳо', unit:'dona'},
+  {id:'m8', name:'Себ', price:15, category:'Мевагиҳо', unit:'kg'},
+  {id:'m9', name:'Ангур', price:25, category:'Мевагиҳо', unit:'kg'},
+  {id:'m10', name:'Тарбуз', price:12, category:'Мевагиҳо', unit:'kg'},
+  {id:'m11', name:'Банан', price:20, category:'Мевагиҳо', unit:'kg'},
+];
+const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120};
+
+/* ============ STATE ============ */
+let state = {
+  loaded:false,
+  role:null,               // null | 'waiter' | 'admin'
+  menu:[],
+  orders:[],
+  settings:{...DEFAULT_SETTINGS},
+  reservations:{},          // tableNumber -> {note, bookedAt}
+  bookingPreOrder:{},       // menuId -> qty (while building a table booking's pre-order)
+  tables:[],                // [{id, name, seats}]
+  oshStock:{date:'', kg:0}, // admin-entered total osh cooked today
+  accounts:[],              // [{id, username, password, role}]
+  currentUser:null,         // {username, role}
+  loginError:null,
+  showAddAccountForm:false,
+  editingAccountId:null,
+  confirmDeleteAccountId:null,
+  activeTable:null,        // table number currently open in ticket
+  draftItems:{},           // menuId -> qty  (for open ticket)
+  activeCat:null,
+  adminTab:'tables',
+  showAddForm:false,
+  editingId:null,
+  confirmDeleteId:null,
+  confirmResetMenu:false,
+  showAddTableForm:false,
+  takeawayOpen:false,
+  takeawayItems:{},
+  takeawayCat:null,
+  scheduledOpen:false,
+  scheduledItems:{},
+  scheduledCat:null,
+  scheduledName:'',
+  scheduledPhone:'',
+  scheduledTime:'',
+  viewingOrderId:null,
+  viewingMode:null,
+  previewUsername:null,     // when admin is previewing AS a specific staff account
+  editingTableId:null,
+  confirmDeleteTableId:null,
+  formOpen:false,           // prevents polling refresh while typing
+  formOpenAt:null,          // safety timeout for stuck forms
+};
+
+function uid(prefix){ return prefix + '_' + Date.now() + '_' + Math.floor(Math.random()*1000); }
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+function fmtMoney(n){
+  return (Math.round(n*100)/100).toString().replace(/\.00$/,'') + ' смн';
+}
+function fmtTime(ts){
+  const d = new Date(ts);
+  return d.toLocaleTimeString('tg-TJ',{hour:'2-digit',minute:'2-digit'});
+}
+function isToday(ts){
+  const d = new Date(ts), n = new Date();
+  return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
+}
+function todayKey(){
+  const d = new Date();
+  return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+}
+function oshOrderedKgToday(){
+  let kgTotal = 0;
+  const porsiyaKg = (Number(state.settings.porsiyaGrams) || 120) / 1000;
+  state.orders.filter(o=>isToday(o.createdAt)).forEach(o=>{
+    o.items.forEach(it=>{
+      if(getItemCategory(it)==='Ош'){
+        if(it.unit==='kg') kgTotal += it.qty/1000;
+        else kgTotal += it.qty * porsiyaKg;
+      }
+    });
+  });
+  return kgTotal;
+}
+
+/* ============ INIT ============ */
+async function init(){
+  render(); // loading state
+  const {menu, orders, settings, reservations, tables, oshStock, accounts} = await loadAll();
+  if(menu && menu.length){ state.menu = menu; } else { state.menu = DEFAULT_MENU; await saveMenu(state.menu); }
+  state.orders = orders || [];
+  state.settings = settings || {...DEFAULT_SETTINGS};
+  state.reservations = reservations || {};
+  state.oshStock = oshStock || {date:'', kg:0};
+  if(tables && tables.length){
+    state.tables = tables;
+  } else {
+    const tc = (settings && settings.tableCount) || 8;
+    state.tables = Array.from({length:tc}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
+    await saveTables(state.tables);
+  }
+  if(accounts && accounts.length){
+    state.accounts = accounts;
+  } else {
+    state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
+    await saveAccounts(state.accounts);
+  }
+  state.loaded = true;
+  render();
+  setInterval(pollRefresh, 6000);
+}
+
+async function pollRefresh(){
+  if(!state.role) return; // don't wipe the login form while the person is typing
+  if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
+  if(state.formOpen) state.formOpen = false; // safety: don't let a stuck form block sync forever
+  const {menu, orders, settings, reservations, tables, oshStock, accounts} = await loadAll();
+  if(menu) state.menu = menu;
+  if(orders) state.orders = orders;
+  if(settings) state.settings = settings;
+  if(reservations) state.reservations = reservations;
+  if(tables) state.tables = tables;
+  if(oshStock) state.oshStock = oshStock;
+  if(accounts) state.accounts = accounts;
+  render();
+}
+
+/* ============ ORDER HELPERS ============ */
+function activeOrderForTable(t){
+  return state.orders.find(o=>o.table===t && o.status==='active');
+}
+function openTable(t){
+  const existing = activeOrderForTable(t);
+  const tbl = state.tables.find(x=>x.id===t);
+  const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
+  const actingName = actingUsername();
+  if(state.role==='waiter' && tbl && tbl.assignedTo && actingName && tbl.assignedTo!==actingName){
+    if(isRealAdmin && !state.previewUsername){
+      // admin viewing the generic waiter screen (no specific waiter chosen) — full access
+    } else {
+      showToast('Ин миз ба официанти дигар тахсис дода шудааст');
+      return;
+    }
+  }
+  if(state.role==='cashier' && !existing){ showToast('Ин миз озод аст — фармоише нест'); return; }
+  if(state.role==='admin' && !existing){ showToast('Ин миз озод аст'); return; }
+  state.ticketMode = state.role==='waiter' ? 'edit' : (state.role==='cashier' ? 'pay' : 'view');
+  state.activeTable = t;
+  state.draftItems = {};
+  if(existing){
+    existing.items.forEach(it=>{ state.draftItems[it.menuId] = it.qty; });
+  } else if(state.role==='waiter' && state.reservations && state.reservations[t] && state.reservations[t].preOrder && state.reservations[t].preOrder.length){
+    state.reservations[t].preOrder.forEach(it=>{
+      state.draftItems[it.menuId] = (state.draftItems[it.menuId]||0) + it.qty;
+    });
+    showToast('Пешфармоиши брон худкор илова шуд');
+  }
+  state.activeCat = (state.menu[0] && state.menu[0].category) || null;
+  render();
+}
+function closeTicket(){
+  state.activeTable = null;
+  state.draftItems = {};
+  render();
+}
+function draftTotal(){
+  let total = 0;
+  Object.keys(state.draftItems).forEach(mid=>{
+    const item = state.menu.find(m=>m.id===mid);
+    if(item) total += lineTotal(item, state.draftItems[mid]);
+  });
+  return total;
+}
+function lineTotal(menuItem, amount){
+  return menuItem.unit==='kg' ? menuItem.price * (amount/1000) : menuItem.price * amount;
+}
+function changeQty(mid, delta){
+  const cur = state.draftItems[mid] || 0;
+  const next = Math.max(0, cur + delta);
+  if(next === 0) delete state.draftItems[mid];
+  else state.draftItems[mid] = next;
+  render();
+}
+function addGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) return;
+  const cur = state.draftItems[mid] || 0;
+  state.draftItems[mid] = cur + g;
+  render();
+}
+function setGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) delete state.draftItems[mid];
+  else state.draftItems[mid] = g;
+  render();
+}
+function removeDraftItem(mid){
+  delete state.draftItems[mid];
+  render();
+}
+async function saveTicket(){
+  let order = activeOrderForTable(state.activeTable);
+  const prevItems = order ? order.items : [];
+  const items = Object.keys(state.draftItems).map(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    const prev = prevItems.find(p=>p.menuId===mid);
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
+  });
+  const total = draftTotal();
+  let isNew = false;
+  if(!order){
+    isNew = true;
+    order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
+      createdBy: actingUsername()};
+    state.orders.push(order);
+  }
+  order.items = items;
+  order.total = total;
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+  if(isNew && state.reservations && state.reservations[state.activeTable]){
+    delete state.reservations[state.activeTable];
+    await saveReservations(state.reservations);
+  }
+  showToast('Фармоиш захира шуд');
+  closeTicket();
+}
+async function payTicket(){
+  const order = activeOrderForTable(state.activeTable);
+  if(!order) return;
+  order.status = 'paid';
+  order.paidAt = Date.now();
+  order.paidBy = actingUsername();
+  await saveOrders(state.orders);
+  showToast('Чек пардохт шуд');
+  closeTicket();
+}
+function actingUsername(){
+  return state.previewUsername || (state.currentUser ? state.currentUser.username : null);
+}
+function orderLabel(o){
+  if(o.type==='takeaway') return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?');
+  if(o.type==='scheduled') return '🕐 '+(o.readyTime||'?')+' — '+(o.customerName||'мизожон');
+  const tbl = state.tables.find(t=>t.id===o.table);
+  return tbl ? tbl.name : ('Мизи №'+o.table);
+}
+async function bookTable(t, name, phone, preOrder){
+  state.reservations = state.reservations || {};
+  state.reservations[t] = {name: name||'', phone: phone||'', bookedAt: Date.now(), preOrder: preOrder||[]};
+  await saveReservations(state.reservations);
+  showToast('Миз брон шуд');
+}
+async function cancelBooking(t){
+  if(state.reservations) delete state.reservations[t];
+  await saveReservations(state.reservations);
+  showToast('Брон бекор шуд');
+}
+function addToBookingPreOrder(mid, qty){
+  const q = Math.max(0, Number(qty)||0);
+  if(q<=0) return;
+  const m = state.menu.find(x=>x.id===mid);
+  if(!m) return;
+  const cur = state.bookingPreOrder[mid] || 0;
+  state.bookingPreOrder[mid] = cur + q;
+  render();
+}
+function removeFromBookingPreOrder(mid){
+  delete state.bookingPreOrder[mid];
+  render();
+}
+function bookingPreOrderList(){
+  return Object.keys(state.bookingPreOrder).map(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    if(!m) return null;
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.bookingPreOrder[mid]};
+  }).filter(Boolean);
+}
+function preOrderSummary(reservation){
+  if(!reservation || !reservation.preOrder || !reservation.preOrder.length) return '';
+  return reservation.preOrder.map(it=>formatQtyLabel(it)).join(', ');
+}
+async function addTableConfig(name, seats, assignedTo){
+  const newId = state.tables.length ? Math.max(...state.tables.map(t=>t.id))+1 : 1;
+  state.tables.push({id:newId, name: name || ('Мизи '+newId), seats: Math.max(1, Number(seats)||4), assignedTo: assignedTo||null});
+  await saveTables(state.tables);
+  showToast('Миз илова шуд');
+}
+async function updateTableConfig(id, name, seats, assignedTo){
+  const t = state.tables.find(x=>x.id===id);
+  if(t){ t.name = name || t.name; t.seats = Math.max(1, Number(seats)||4); t.assignedTo = assignedTo||null; }
+  await saveTables(state.tables);
+  showToast('Тағйирот сабт шуд');
+}
+async function deleteTableConfig(id){
+  if(activeOrderForTable(id)){ showToast('Аввал чеки ин мизро пӯшонед'); return; }
+  state.tables = state.tables.filter(t=>t.id!==id);
+  await saveTables(state.tables);
+  if(state.reservations && state.reservations[id]){
+    delete state.reservations[id];
+    await saveReservations(state.reservations);
+  }
+  showToast('Миз нест шуд');
+}
+async function addAccount(username, password, role){
+  if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(state.accounts.some(a=>a.username.toLowerCase()===username.toLowerCase())){
+    showToast('Ин логин аллакай истифода шудааст'); return false;
+  }
+  const id = 'acc_'+Date.now()+'_'+Math.floor(Math.random()*1000);
+  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
+  await saveAccounts(state.accounts);
+  showToast('Корманд илова шуд');
+  return true;
+}
+async function updateAccountFn(id, username, password, role){
+  const acc = state.accounts.find(a=>a.id===id);
+  if(!acc) return false;
+  if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
+    showToast('Ин логин аллакай истифода шудааст'); return false;
+  }
+  if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
+    showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
+  }
+  acc.username=username; acc.password=password; acc.role=role;
+  await saveAccounts(state.accounts);
+  showToast('Тағйирот сабт шуд');
+  return true;
+}
+async function deleteAccount(id){
+  const acc = state.accounts.find(a=>a.id===id);
+  if(acc && acc.role==='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
+    showToast('Ин ягона ҳисоби админ аст — нест карда намешавад'); return;
+  }
+  state.accounts = state.accounts.filter(a=>a.id!==id);
+  await saveAccounts(state.accounts);
+  showToast('Корманд нест шуд');
+}
+async function saveWage(id, wageType, wageAmount){
+  const acc = state.accounts.find(a=>a.id===id);
+  if(!acc) return;
+  acc.wageType = (wageType==='monthly'||wageType==='commission') ? wageType : 'daily';
+  acc.wageAmount = Math.max(0, Number(wageAmount)||0);
+  await saveAccounts(state.accounts);
+  showToast('Маош сабт шуд');
+}
+function isThisMonth(ts){
+  const d = new Date(ts), n = new Date();
+  return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth();
+}
+function orderCommission(order){
+  let oshGrams = 0, oshValue = 0;
+  order.items.forEach(it=>{
+    if(getItemCategory(it)==='Ош' && it.unit==='kg'){
+      oshGrams += it.qty;
+      oshValue += lineTotal({unit:'kg', price:it.price}, it.qty);
+    }
+  });
+  const oshCommission = oshGrams >= 500 ? 12 : oshValue*0.05;
+  const otherValue = Math.max(0, (order.total||0) - oshValue);
+  const otherCommission = otherValue*0.05;
+  return oshCommission + otherCommission;
+}
+function staffCommissionBreakdown(username, role, scope){
+  const orders = state.orders.filter(o=>{
+    if(o.status!=='paid') return false;
+    const ts = o.paidAt || o.updatedAt || o.createdAt;
+    if(scope==='today' && !isToday(ts)) return false;
+    if(scope==='month' && !isThisMonth(ts)) return false;
+    return (role==='waiter' && o.createdBy===username) || (role==='cashier' && o.paidBy===username);
+  });
+  let countHigh=0, countLow=0, countNoOsh=0, oshSum=0, otherSum=0;
+  orders.forEach(o=>{
+    let oshGrams=0, oshValue=0;
+    o.items.forEach(it=>{
+      if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=it.qty; oshValue+=lineTotal({unit:'kg',price:it.price}, it.qty); }
+    });
+    if(oshGrams>=500){ countHigh++; oshSum+=12; }
+    else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; }
+    else { countNoOsh++; }
+    const otherValue = Math.max(0, (o.total||0)-oshValue);
+    otherSum += otherValue*0.05;
+  });
+  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total: oshSum+otherSum};
+}
+function staffCommission(username, role, scope){
+  return staffCommissionBreakdown(username, role, scope).total;
+}
+function computeWages(acc){
+  if(acc.wageType==='commission'){
+    return {
+      daily: staffCommission(acc.username, acc.role, 'today'),
+      monthly: staffCommission(acc.username, acc.role, 'month')
+    };
+  }
+  const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
+  const amount = Number(acc.wageAmount) || 0;
+  if(acc.wageType==='monthly'){
+    return {daily: amount/days, monthly: amount};
+  }
+  return {daily: amount, monthly: amount*days};
+}
+function formatQtyLabel(it){
+  if(it.unit==='kg'){
+    const g = it.qty;
+    const label = g>=1000 ? (Math.round((g/1000)*100)/100)+' кг' : Math.round(g)+' г';
+    return label+' '+it.name;
+  }
+  return it.qty+'× '+it.name;
+}
+function getItemCategory(it){
+  if(it.category) return it.category;
+  const m = state.menu.find(x=>x.id===it.menuId);
+  return m ? m.category : '';
+}
+
+/* ============ ADMIN: MENU CRUD ============ */
+async function addMenuItem(name, price, category, unit){
+  const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona'};
+  state.menu.push(item);
+  await saveMenu(state.menu);
+  showToast('Хӯрок илова шуд');
+}
+async function updateMenuItem(id, name, price, category, unit){
+  const item = state.menu.find(m=>m.id===id);
+  if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; }
+  await saveMenu(state.menu);
+  showToast('Тағйирот сабт шуд');
+}
+async function deleteMenuItem(id){
+  state.menu = state.menu.filter(m=>m.id!==id);
+  await saveMenu(state.menu);
+  showToast('Хӯрок нест шуд');
+  render();
+}
+
+/* ============ RENDER ============ */
+function render(){
+  const app = document.getElementById('app');
+  if(!state.loaded){
+    app.innerHTML = `<div class="empty-state"><div class="big">☕</div><div class="mono">Бор карда истодааст…</div></div>`;
+    return;
+  }
+  if(!state.role){
+    app.innerHTML = renderLogin();
+    attachLoginEvents();
+    return;
+  }
+  let html = renderTopbar();
+  if(state.role==='waiter'){
+    html += renderWaiter();
+  } else if(state.role==='cashier'){
+    html += renderCashier();
+  } else if(state.role==='chef'){
+    html += renderChef();
+  } else {
+    html += renderAdmin();
+  }
+  app.innerHTML = html;
+  attachCommonEvents();
+  if(state.role==='waiter') attachWaiterEvents();
+  if(state.role==='cashier'){
+    attachTableGridEvents();
+    const openBtn = document.getElementById('openTakeawayBtn');
+    if(openBtn) openBtn.addEventListener('click', openTakeaway);
+    const openSchedBtn = document.getElementById('openScheduledBtn');
+    if(openSchedBtn) openSchedBtn.addEventListener('click', openScheduled);
+    document.querySelectorAll('[data-vieworder]').forEach(el=>{
+      el.addEventListener('click', ()=> openOrderView(el.dataset.vieworder, el.dataset.viewmode||'pay'));
+    });
+  }
+  if(state.role==='chef') attachChefEvents();
+  if(state.role==='admin') attachAdminEvents();
+
+  if(state.activeTable !== null){
+    const overlayHtml = renderTicketOverlay();
+    const div = document.createElement('div');
+    div.innerHTML = overlayHtml;
+    app.appendChild(div.firstElementChild);
+    attachTicketEvents();
+  }
+  if(state.takeawayOpen){
+    const twHtml = renderTakeawayOverlay();
+    const div2 = document.createElement('div');
+    div2.innerHTML = twHtml;
+    app.appendChild(div2.firstElementChild);
+    attachTakeawayEvents();
+  }
+  if(state.scheduledOpen){
+    const swHtml = renderScheduledOverlay();
+    const div3 = document.createElement('div');
+    div3.innerHTML = swHtml;
+    app.appendChild(div3.firstElementChild);
+    attachScheduledEvents();
+  }
+  if(state.viewingOrderId){
+    const vwHtml = renderOrderViewOverlay();
+    if(vwHtml){
+      const div4 = document.createElement('div');
+      div4.innerHTML = vwHtml;
+      app.appendChild(div4.firstElementChild);
+      attachOrderViewEvents();
+    }
+  }
+}
+
+function renderTopbar(){
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const timeStr = now.toLocaleTimeString('tg-TJ',{hour:'2-digit',minute:'2-digit'});
+  const isAdmin = state.currentUser && state.currentUser.role==='admin';
+  const previewing = isAdmin && state.role!=='admin';
+  const nameLabel = previewing && state.previewUsername
+    ? `<span style="font-size:12px;color:var(--brick);font-weight:700;">👁 ${escapeHtml(state.previewUsername)} (пешнамоиш)</span>`
+    : (state.currentUser ? `<span style="font-size:12px;color:#6b5f4d;">${escapeHtml(state.currentUser.username)}</span>` : '');
+  return `
+  <div class="topbar">
+    <div class="brand">
+      <span class="name">${escapeHtml(state.settings.cafeName||'Кафе')}</span>
+      <span class="tag">${state.role==='waiter'?'Официант':state.role==='cashier'?'Кассир':state.role==='chef'?'Ошпаз':'Идора'}</span>
+    </div>
+    <div class="top-right">
+      <span class="clock">${dateStr} · ${timeStr}</span>
+      ${nameLabel}
+      <span class="role-pill">${state.role==='waiter'?'👤 Официант':state.role==='cashier'?'💰 Кассир':state.role==='chef'?'👨‍🍳 Ошпаз':'🛠 Админ'}</span>
+      ${previewing ? `<button class="btn-ghost" id="backToAdminBtn">🛠 Бозгашт ба Админ</button>` : ''}
+      <button class="btn-ghost" id="logoutBtn">Баромадан</button>
+    </div>
+  </div>`;
+}
+
+function renderLogin(){
+  return `
+  <div class="role-select">
+    <h1>☕ Идораи Кафе</h1>
+    <p>Логин ва пароли худро ворид кунед</p>
+    <div class="login-box">
+      <div class="field"><label>Логин</label><input type="text" id="loginUsername" autocomplete="username"></div>
+      <div class="field"><label>Парол</label><input type="password" id="loginPassword" autocomplete="current-password"></div>
+      ${state.loginError ? `<div class="login-error">${escapeHtml(state.loginError)}</div>` : ''}
+      <button class="btn-primary" style="padding:12px;" id="loginSubmitBtn">Ворид шудан</button>
+    </div>
+  </div>`;
+}
+function attachLoginEvents(){
+  const submit = ()=>{
+    const u = (document.getElementById('loginUsername').value||'').trim();
+    const p = document.getElementById('loginPassword').value||'';
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===p);
+    if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
+    state.currentUser = {username:acc.username, role:acc.role};
+    state.role = acc.role;
+    state.loginError = null;
+    render();
+  };
+  const btn = document.getElementById('loginSubmitBtn');
+  if(btn) btn.addEventListener('click', submit);
+  const pw = document.getElementById('loginPassword');
+  if(pw) pw.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+  const un = document.getElementById('loginUsername');
+  if(un) un.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+}
+
+function attachCommonEvents(){
+  const logoutBtn = document.getElementById('logoutBtn');
+  if(logoutBtn) logoutBtn.addEventListener('click', ()=>{
+    state.role=null; state.currentUser=null; state.activeTable=null; state.formOpen=false;
+    state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
+    state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
+    state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
+    state.loginError=null;
+    state.takeawayOpen=false; state.takeawayItems={};
+    state.scheduledOpen=false; state.scheduledItems={};
+    state.viewingOrderId=null; state.viewingMode=null;
+    state.bookingPreOrder={};
+    state.previewUsername=null;
+    render();
+  });
+  const backBtn = document.getElementById('backToAdminBtn');
+  if(backBtn) backBtn.addEventListener('click', ()=>{ state.role='admin'; state.activeTable=null; state.previewUsername=null; render(); });
+}
+
+/* ---------- Shared table grid ---------- */
+function buildTableCards(){
+  let cards = '';
+  state.tables.forEach(tbl=>{
+    const t = tbl.id;
+    const order = activeOrderForTable(t);
+    const occ = !!order;
+    const reservation = !occ && state.reservations ? state.reservations[t] : null;
+    const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
+    const actingName = actingUsername();
+    const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !(isRealAdmin && !state.previewUsername);
+    let dotClass = 'free', statusText = 'Озод', extra = '';
+    if(occ){
+      dotClass = 'occupied'; statusText = 'Банд';
+      extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
+    } else if(reservation){
+      dotClass = 'reserved'; statusText = 'Брон';
+      const nm = reservation.name || reservation.note || '';
+      const detailParts = [];
+      if(reservation.phone) detailParts.push(reservation.phone);
+      if(reservation.bookedAt) detailParts.push(fmtTime(reservation.bookedAt));
+      const preSum = preOrderSummary(reservation);
+      extra = (nm ? `<span class="reserve-note">${escapeHtml(nm)}</span>` : '') +
+              (detailParts.length ? `<span class="reserve-detail">${escapeHtml(detailParts.join(' · '))}</span>` : '') +
+              (preSum ? `<span class="reserve-detail">🍽 ${escapeHtml(preSum)}</span>` : '');
+    }
+    const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
+    cards += `
+    <button class="table-card ${reservation?'reserved-table':''} ${lockedForMe?'locked-table':''}" data-table="${t}">
+      <div class="row1">
+        <span class="tnum">${escapeHtml(tbl.name)}</span>
+        <span class="dot ${dotClass}"></span>
+      </div>
+      <span class="status">${statusText} · ${tbl.seats} ҷой</span>
+      ${extra}
+      ${assignBadge}
+      ${lockedForMe ? `<span class="reserve-detail" style="color:var(--brick);">🔒 танҳо ${escapeHtml(tbl.assignedTo)}</span>` : ''}
+    </button>`;
+  });
+  return cards;
+}
+function attachTableGridEvents(){
+  document.querySelectorAll('.table-card').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      openTable(Number(el.dataset.table));
+    });
+  });
+}
+
+/* ---------- Waiter view ---------- */
+function renderWaiter(){
+  const occCount = state.orders.filter(o=>o.status==='active').length;
+  return `
+  <div class="container">
+    <div class="section-title">Мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
+    <div class="table-grid">${buildTableCards()}</div>
+  </div>`;
+}
+function attachWaiterEvents(){ attachTableGridEvents(); }
+
+/* ---------- Cashier view ---------- */
+function renderCashier(){
+  const occCount = state.orders.filter(o=>o.status==='active').length;
+  const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) &&
+    (!state.currentUser || o.paidBy===state.currentUser.username))
+    .sort((a,b)=>b.createdAt-a.createdAt);
+  const takeawayHtml = myTakeaway.length ? myTakeaway.map(o=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${orderLabel(o)}</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
+      </div>
+      <div style="text-align:right;">
+        <div>${fmtMoney(o.total)}</div>
+        <div class="l2">${o.prepared?'тайёр':'дар навбат'}</div>
+      </div>
+    </div>`).join('') : '';
+
+  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active')
+    .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
+  const scheduledHtml = pendingScheduled.length ? pendingScheduled.map(o=>`
+    <div class="receipt-item-row" data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;">
+      <div>
+        <div class="l1">${orderLabel(o)}</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
+      </div>
+      <div style="text-align:right;">
+        <div>${fmtMoney(o.total)}</div>
+        <div class="l2">${o.prepared?'тайёр':'дар навбат'}</div>
+      </div>
+    </div>`).join('') : '';
+
+  return `
+  <div class="container">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+      <button class="btn-primary" id="openTakeawayBtn" style="padding:11px 18px;">🥡 + Фармоиши бо худ бурдан</button>
+      <button class="btn-primary" id="openScheduledBtn" style="padding:11px 18px;background:var(--olive);">🕐 + Фармоиши вақтдор</button>
+    </div>
+    <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
+    <div class="table-grid">${buildTableCards()}</div>
+    ${pendingScheduled.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledHtml}` : ''}
+    ${myTakeaway.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои бо худ бурдани имрӯза</div>${takeawayHtml}` : ''}
+  </div>`;
+}
+
+/* ---------- Takeaway (cashier -> chef, no waiter, no table) ---------- */
+function takeawayTotal(){
+  let total = 0;
+  Object.keys(state.takeawayItems).forEach(mid=>{
+    const item = state.menu.find(m=>m.id===mid);
+    if(item) total += lineTotal(item, state.takeawayItems[mid]);
+  });
+  return total;
+}
+function openTakeaway(){
+  state.takeawayOpen = true;
+  state.takeawayItems = {};
+  state.takeawayCat = (state.menu[0] && state.menu[0].category) || null;
+  render();
+}
+function closeTakeaway(){
+  state.takeawayOpen = false;
+  state.takeawayItems = {};
+  render();
+}
+function changeTakeawayQty(mid, delta){
+  const cur = state.takeawayItems[mid] || 0;
+  const next = Math.max(0, cur + delta);
+  if(next === 0) delete state.takeawayItems[mid];
+  else state.takeawayItems[mid] = next;
+  render();
+}
+function addTakeawayGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) return;
+  const cur = state.takeawayItems[mid] || 0;
+  state.takeawayItems[mid] = cur + g;
+  render();
+}
+function setTakeawayGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) delete state.takeawayItems[mid];
+  else state.takeawayItems[mid] = g;
+  render();
+}
+function removeTakeawayItem(mid){
+  delete state.takeawayItems[mid];
+  render();
+}
+async function submitTakeaway(){
+  const items = Object.keys(state.takeawayItems).map(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.takeawayItems[mid]};
+  });
+  if(!items.length) return;
+  const total = takeawayTotal();
+  const todayCount = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt)).length;
+  const order = {
+    id: uid('ord'), table: null, type: 'takeaway', status: 'paid', takeawayNumber: todayCount+1,
+    items, total, createdAt: Date.now(), updatedAt: Date.now(),
+    createdBy: null, paidAt: Date.now(), paidBy: actingUsername(),
+    prepared: false
+  };
+  state.orders.push(order);
+  await saveOrders(state.orders);
+  showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
+  closeTakeaway();
+}
+
+/* ---------- Scheduled orders (buyurtma bo vaqt) — no table, unpaid until pickup ---------- */
+function scheduledTotal(){
+  let total = 0;
+  Object.keys(state.scheduledItems).forEach(mid=>{
+    const item = state.menu.find(m=>m.id===mid);
+    if(item) total += lineTotal(item, state.scheduledItems[mid]);
+  });
+  return total;
+}
+function openScheduled(){
+  state.scheduledOpen = true;
+  state.scheduledItems = {};
+  state.scheduledCat = (state.menu[0] && state.menu[0].category) || null;
+  state.formOpen = true; state.formOpenAt = Date.now();
+  render();
+}
+function closeScheduled(){
+  state.scheduledOpen = false;
+  state.scheduledItems = {};
+  state.scheduledName = ''; state.scheduledPhone = ''; state.scheduledTime = '';
+  state.formOpen = false;
+  render();
+}
+function changeScheduledQty(mid, delta){
+  const cur = state.scheduledItems[mid] || 0;
+  const next = Math.max(0, cur + delta);
+  if(next === 0) delete state.scheduledItems[mid];
+  else state.scheduledItems[mid] = next;
+  render();
+}
+function addScheduledGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) return;
+  const cur = state.scheduledItems[mid] || 0;
+  state.scheduledItems[mid] = cur + g;
+  render();
+}
+function setScheduledGrams(mid, grams){
+  const g = Math.max(0, Number(grams)||0);
+  if(g<=0) delete state.scheduledItems[mid];
+  else state.scheduledItems[mid] = g;
+  render();
+}
+function removeScheduledItem(mid){
+  delete state.scheduledItems[mid];
+  render();
+}
+async function submitScheduled(name, phone, time){
+  const items = Object.keys(state.scheduledItems).map(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.scheduledItems[mid]};
+  });
+  if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
+  if(!time){ showToast('Соатро таъин кунед'); return; }
+  const total = scheduledTotal();
+  const order = {
+    id: uid('ord'), table: null, type: 'scheduled', status: 'active',
+    items, total, createdAt: Date.now(), updatedAt: Date.now(),
+    createdBy: null, readyTime: time, customerName: name||'', customerPhone: phone||'',
+    prepared: false
+  };
+  state.orders.push(order);
+  await saveOrders(state.orders);
+  showToast('Фармоиши вақтдор сабт шуд ва ба ошпаз фиристода шуд');
+  closeScheduled();
+}
+function openOrderView(id, mode){
+  state.viewingOrderId = id;
+  state.viewingMode = mode;
+  render();
+}
+function closeOrderView(){
+  state.viewingOrderId = null;
+  state.viewingMode = null;
+  render();
+}
+async function payOrderById(id){
+  const order = state.orders.find(o=>o.id===id);
+  if(!order) return;
+  order.status = 'paid';
+  order.paidAt = Date.now();
+  order.paidBy = actingUsername();
+  await saveOrders(state.orders);
+  showToast('Пардохт шуд');
+  closeOrderView();
+}
+function renderTakeawayOverlay(){
+  const cats = [...new Set(state.menu.map(m=>m.category))];
+  if(!state.takeawayCat) state.takeawayCat = cats[0];
+  const tabs = cats.map(c=>`<button class="cat-tab ${c===state.takeawayCat?'active':''}" data-tcat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('');
+  const items = state.menu.filter(m=>m.category===state.takeawayCat).map(m=>{
+    if(m.unit==='kg'){
+      return `
+      <div class="menu-row">
+        <div>
+          <div class="mname">${escapeHtml(m.name)}</div>
+          <div class="mprice">${fmtMoney(m.price)}/кг</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="number" class="kg-qty-input" id="tkgin-${m.id}" value="500" min="10" step="50" style="width:64px;padding:6px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;">
+          <span style="font-size:11px;color:#6b5f4d;">г</span>
+          <button class="add-btn" data-taddgrams="${m.id}">+</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="menu-row">
+      <div>
+        <div class="mname">${escapeHtml(m.name)}</div>
+        <div class="mprice">${fmtMoney(m.price)}</div>
+      </div>
+      <button class="add-btn" data-tadd="${m.id}">+</button>
+    </div>`;
+  }).join('');
+
+  const draftKeys = Object.keys(state.takeawayItems);
+  let receiptLines = '';
+  if(draftKeys.length===0){
+    receiptLines = `<div class="receipt-empty">— холӣ аст —</div>`;
+  } else {
+    draftKeys.forEach(mid=>{
+      const m = state.menu.find(x=>x.id===mid);
+      if(!m) return;
+      const qty = state.takeawayItems[mid];
+      if(m.unit==='kg'){
+        receiptLines += `
+        <div class="receipt-line">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <input type="number" class="kg-edit-input" data-teditgrams="${mid}" value="${qty}" min="0" step="10" style="width:60px;padding:4px 6px;border:1px solid var(--ink);border-radius:6px;font-family:inherit;font-size:12px;">
+            <span>г</span>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+            <button class="qty-btn" data-tremoveitem="${mid}">✕</button>
+          </div>
+        </div>`;
+      } else {
+        receiptLines += `
+        <div class="receipt-line">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <button class="qty-btn" data-tdec="${mid}">−</button>
+            <span>${qty}×</span>
+            <button class="qty-btn" data-tinc="${mid}">+</button>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+          </div>
+        </div>`;
+      }
+    });
+  }
+  const total = takeawayTotal();
+  const disabled = draftKeys.length===0 ? 'disabled' : '';
+
+  return `
+  <div class="overlay" id="takeawayOverlay">
+    <div class="ticket-wrap">
+      <div class="ticket-head">
+        <h2>🥡 Бо худ бурдан</h2>
+        <button class="close-x" id="closeTakeaway">✕</button>
+      </div>
+      <div class="cat-tabs">${tabs}</div>
+      <div class="menu-list">${items}</div>
+      <div class="receipt">
+        <div class="receipt-title">Чек — Бо худ бурдан</div>
+        ${receiptLines}
+        <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
+      </div>
+      <div class="ticket-actions">
+        <button class="btn-pay" id="submitTakeawayBtn" ${disabled}>Пардохт ва фиристодан ба ошпаз</button>
+      </div>
+    </div>
+  </div>`;
+}
+function attachTakeawayEvents(){
+  const overlay = document.getElementById('takeawayOverlay');
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeTakeaway(); });
+  document.getElementById('closeTakeaway').addEventListener('click', closeTakeaway);
+  document.querySelectorAll('[data-tcat]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.takeawayCat = el.dataset.tcat; render(); });
+  });
+  document.querySelectorAll('[data-tadd]').forEach(el=>{
+    el.addEventListener('click', ()=> changeTakeawayQty(el.dataset.tadd, 1));
+  });
+  document.querySelectorAll('[data-tinc]').forEach(el=>{
+    el.addEventListener('click', ()=> changeTakeawayQty(el.dataset.tinc, 1));
+  });
+  document.querySelectorAll('[data-tdec]').forEach(el=>{
+    el.addEventListener('click', ()=> changeTakeawayQty(el.dataset.tdec, -1));
+  });
+  document.querySelectorAll('[data-taddgrams]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const input = document.getElementById('tkgin-'+el.dataset.taddgrams);
+      addTakeawayGrams(el.dataset.taddgrams, input ? input.value : 0);
+    });
+  });
+  document.querySelectorAll('[data-teditgrams]').forEach(el=>{
+    el.addEventListener('change', ()=>{ setTakeawayGrams(el.dataset.teditgrams, el.value); });
+  });
+  document.querySelectorAll('[data-tremoveitem]').forEach(el=>{
+    el.addEventListener('click', ()=> removeTakeawayItem(el.dataset.tremoveitem));
+  });
+  const submitBtn = document.getElementById('submitTakeawayBtn');
+  if(submitBtn) submitBtn.addEventListener('click', submitTakeaway);
+}
+
+function renderScheduledOverlay(){
+  const cats = [...new Set(state.menu.map(m=>m.category))];
+  if(!state.scheduledCat) state.scheduledCat = cats[0];
+  const tabs = cats.map(c=>`<button class="cat-tab ${c===state.scheduledCat?'active':''}" data-scat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('');
+  const items = state.menu.filter(m=>m.category===state.scheduledCat).map(m=>{
+    if(m.unit==='kg'){
+      return `
+      <div class="menu-row">
+        <div>
+          <div class="mname">${escapeHtml(m.name)}</div>
+          <div class="mprice">${fmtMoney(m.price)}/кг</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="number" class="kg-qty-input" id="skgin-${m.id}" value="500" min="10" step="50" style="width:64px;padding:6px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;">
+          <span style="font-size:11px;color:#6b5f4d;">г</span>
+          <button class="add-btn" data-saddgrams="${m.id}">+</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="menu-row">
+      <div>
+        <div class="mname">${escapeHtml(m.name)}</div>
+        <div class="mprice">${fmtMoney(m.price)}</div>
+      </div>
+      <button class="add-btn" data-sadd="${m.id}">+</button>
+    </div>`;
+  }).join('');
+
+  const draftKeys = Object.keys(state.scheduledItems);
+  let receiptLines = '';
+  if(draftKeys.length===0){
+    receiptLines = `<div class="receipt-empty">— холӣ аст —</div>`;
+  } else {
+    draftKeys.forEach(mid=>{
+      const m = state.menu.find(x=>x.id===mid);
+      if(!m) return;
+      const qty = state.scheduledItems[mid];
+      if(m.unit==='kg'){
+        receiptLines += `
+        <div class="receipt-line">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <input type="number" class="kg-edit-input" data-seditgrams="${mid}" value="${qty}" min="0" step="10" style="width:60px;padding:4px 6px;border:1px solid var(--ink);border-radius:6px;font-family:inherit;font-size:12px;">
+            <span>г</span>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+            <button class="qty-btn" data-sremoveitem="${mid}">✕</button>
+          </div>
+        </div>`;
+      } else {
+        receiptLines += `
+        <div class="receipt-line">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <button class="qty-btn" data-sdec="${mid}">−</button>
+            <span>${qty}×</span>
+            <button class="qty-btn" data-sinc="${mid}">+</button>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+          </div>
+        </div>`;
+      }
+    });
+  }
+  const total = scheduledTotal();
+  const disabled = draftKeys.length===0 ? 'disabled' : '';
+
+  return `
+  <div class="overlay" id="scheduledOverlay">
+    <div class="ticket-wrap">
+      <div class="ticket-head">
+        <h2>🕐 Фармоиши вақтдор</h2>
+        <button class="close-x" id="closeScheduled">✕</button>
+      </div>
+      <div style="padding:14px 20px 0;display:flex;flex-wrap:wrap;gap:10px;">
+        <div class="field"><label>Номи мизожон</label><input type="text" id="schedNameInput" value="${escapeHtml(state.scheduledName)}" placeholder="масалан: Каримов"></div>
+        <div class="field"><label>Рақами телефон</label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
+        <div class="field small"><label>То соати</label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime)}"></div>
+      </div>
+      <div class="cat-tabs">${tabs}</div>
+      <div class="menu-list">${items}</div>
+      <div class="receipt">
+        <div class="receipt-title">Чек — Фармоиши вақтдор</div>
+        ${receiptLines}
+        <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
+      </div>
+      <div class="ticket-actions">
+        <button class="btn-primary" id="submitScheduledBtn" ${disabled}>Сабт (пардохт ҳангоми омадан)</button>
+      </div>
+    </div>
+  </div>`;
+}
+function captureScheduledFields(){
+  const n = document.getElementById('schedNameInput'); if(n) state.scheduledName = n.value;
+  const p = document.getElementById('schedPhoneInput'); if(p) state.scheduledPhone = p.value;
+  const t = document.getElementById('schedTimeInput'); if(t) state.scheduledTime = t.value;
+}
+function attachScheduledEvents(){
+  const overlay = document.getElementById('scheduledOverlay');
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeScheduled(); });
+  document.getElementById('closeScheduled').addEventListener('click', closeScheduled);
+  document.querySelectorAll('[data-scat]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); state.scheduledCat = el.dataset.scat; render(); });
+  });
+  document.querySelectorAll('[data-sadd]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); changeScheduledQty(el.dataset.sadd, 1); });
+  });
+  document.querySelectorAll('[data-sinc]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); changeScheduledQty(el.dataset.sinc, 1); });
+  });
+  document.querySelectorAll('[data-sdec]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); changeScheduledQty(el.dataset.sdec, -1); });
+  });
+  document.querySelectorAll('[data-saddgrams]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      captureScheduledFields();
+      const input = document.getElementById('skgin-'+el.dataset.saddgrams);
+      addScheduledGrams(el.dataset.saddgrams, input ? input.value : 0);
+    });
+  });
+  document.querySelectorAll('[data-seditgrams]').forEach(el=>{
+    el.addEventListener('change', ()=>{ captureScheduledFields(); setScheduledGrams(el.dataset.seditgrams, el.value); });
+  });
+  document.querySelectorAll('[data-sremoveitem]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); removeScheduledItem(el.dataset.sremoveitem); });
+  });
+  const submitBtn = document.getElementById('submitScheduledBtn');
+  if(submitBtn) submitBtn.addEventListener('click', ()=>{
+    const name = document.getElementById('schedNameInput').value.trim();
+    const phone = document.getElementById('schedPhoneInput').value.trim();
+    const time = document.getElementById('schedTimeInput').value;
+    submitScheduled(name, phone, time);
+  });
+}
+
+function renderOrderViewOverlay(){
+  const order = state.orders.find(o=>o.id===state.viewingOrderId);
+  if(!order) return '';
+  const itemsHtml = order.items.length ? order.items.map(it=>`
+    <div class="receipt-line">
+      <span>${formatQtyLabel(it)}</span>
+      <span>${fmtMoney(lineTotal({unit:it.unit, price:it.price}, it.qty))}</span>
+    </div>`).join('') : `<div class="receipt-empty">холӣ</div>`;
+  const contactLine = (order.customerName || order.customerPhone)
+    ? `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">${escapeHtml(order.customerName||'')} ${order.customerPhone?('· '+escapeHtml(order.customerPhone)):''}</p>` : '';
+  const actionBtn = state.viewingMode==='pay'
+    ? `<div class="ticket-actions"><button class="btn-pay" id="viewOrderPayBtn">Пардохт шуд</button></div>` : '';
+  return `
+  <div class="overlay" id="viewOrderOverlay">
+    <div class="ticket-wrap">
+      <div class="ticket-head">
+        <h2>${orderLabel(order)}</h2>
+        <button class="close-x" id="closeViewOrder">✕</button>
+      </div>
+      ${contactLine}
+      <div class="receipt">
+        <div class="receipt-title">Чек</div>
+        ${itemsHtml}
+        <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(order.total)}</span></div>
+      </div>
+      ${actionBtn}
+    </div>
+  </div>`;
+}
+function attachOrderViewEvents(){
+  const overlay = document.getElementById('viewOrderOverlay');
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeOrderView(); });
+  document.getElementById('closeViewOrder').addEventListener('click', closeOrderView);
+  const payBtn = document.getElementById('viewOrderPayBtn');
+  if(payBtn) payBtn.addEventListener('click', ()=> payOrderById(state.viewingOrderId));
+}
+
+/* ---------- Chef view ---------- */
+async function toggleOrderPrepared(orderId){
+  const order = state.orders.find(o=>o.id===orderId);
+  if(!order) return;
+  order.prepared = !order.prepared;
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+}
+async function markItemServed(orderId, menuId, amount){
+  const order = state.orders.find(o=>o.id===orderId);
+  if(!order) return;
+  const item = order.items.find(it=>it.menuId===menuId);
+  if(!item) return;
+  const amt = Math.max(0, Number(amount)||0);
+  if(amt<=0) return;
+  const served = Math.min(item.qty, (item.servedQty||0) + amt);
+  item.servedQty = served;
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+  showToast('Кашида шуд');
+}
+async function undoItemServed(orderId, menuId){
+  const order = state.orders.find(o=>o.id===orderId);
+  if(!order) return;
+  const item = order.items.find(it=>it.menuId===menuId);
+  if(!item) return;
+  item.servedQty = 0;
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+}
+function renderChef(){
+  const todays = state.orders.filter(o=>isToday(o.createdAt));
+  let porsiyaTotal = 0;
+  todays.forEach(o=>{
+    o.items.forEach(it=>{
+      if(getItemCategory(it)==='Ош' && it.unit!=='kg') porsiyaTotal += it.qty;
+    });
+  });
+  const kgTotal = oshOrderedKgToday();
+  const pending = state.orders.filter(o=>!o.prepared && (o.status==='active' || (o.type==='takeaway' && o.status==='paid'))).sort((a,b)=>a.createdAt-b.createdAt);
+  const done = state.orders.filter(o=>o.prepared && (o.status==='active' || (o.type==='takeaway' && isToday(o.createdAt)))).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+
+  const hasStock = state.oshStock && state.oshStock.date === todayKey();
+  const cookedKg = hasStock ? (Number(state.oshStock.kg)||0) : null;
+  const remainingKg = hasStock ? (cookedKg - kgTotal) : null;
+  const remainingCard = hasStock
+    ? `<div class="stat-card"><div class="label">Оши боқимонда</div><div class="value" style="color:${remainingKg<0?'var(--brick)':'var(--olive)'};">${remainingKg.toFixed(2)} кг</div></div>`
+    : `<div class="stat-card"><div class="label">Оши боқимонда</div><div class="value" style="font-size:13px;color:#9c8f78;">админ ҳанӯз сабт накардааст</div></div>`;
+
+  const renderOrderCard = (o, isDone) => {
+    const isTakeaway = o.type==='takeaway' || o.table===null;
+    const tbl = isTakeaway ? null : state.tables.find(t=>t.id===o.table);
+    const title = orderLabel(o);
+    const itemsHtml = o.items.length ? o.items.map(it=>{
+      const cat = getItemCategory(it);
+      const lineClass = cat==='Ош'?'chef-osh-line':'chef-other-line';
+      const served = it.servedQty||0;
+      const remaining = Math.max(0, it.qty - served);
+      const servedLabel = it.unit==='kg'
+        ? formatQtyLabel({name:'', unit:'kg', qty:served}).trim()
+        : served+'×';
+      const totalLabel = formatQtyLabel(it);
+      const progressLine = `<div style="font-size:10px;color:${remaining<=0?'var(--olive)':'#9c8f78'};margin:1px 0 4px;">${remaining<=0?'✅ пурра кашида шуд':`${servedLabel||'0'} аз ${totalLabel} кашида шуд · ${it.unit==='kg'?formatQtyLabel({name:'',unit:'kg',qty:remaining}).trim():remaining+'×'} боқӣ`}</div>`;
+      const controlHtml = (!isDone && remaining>0) ? (
+        it.unit==='kg' ? `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+          <input type="number" class="kg-qty-input" id="serve-${o.id}-${it.menuId}" value="${Math.min(remaining,500)}" min="10" max="${remaining}" step="50" style="width:64px;padding:5px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:12px;">
+          <span style="font-size:11px;color:#6b5f4d;">г</span>
+          <button class="btn-ghost" style="padding:5px 10px;font-size:11px;" data-serveitem="${o.id}|${it.menuId}">Кашидан</button>
+        </div>` : `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+          <button class="btn-ghost" style="padding:5px 10px;font-size:11px;" data-serveqty="${o.id}|${it.menuId}|1">+1 кашидан</button>
+          <button class="btn-ghost" style="padding:5px 10px;font-size:11px;" data-serveqty="${o.id}|${it.menuId}|${remaining}">Ҳама (${remaining}) кашидан</button>
+        </div>`
+      ) : '';
+      return `<div class="${lineClass}">${formatQtyLabel(it)}</div>${progressLine}${controlHtml}`;
+    }).join('') : `<div class="receipt-empty">холӣ</div>`;
+    return `
+    <div class="receipt" style="margin:0 0 14px;${isDone?'opacity:.55;':''}">
+      <div class="receipt-title">${escapeHtml(title)}</div>
+      ${itemsHtml}
+      <div style="margin-top:10px;">
+        <button class="${isDone?'btn-ghost':'btn-primary'}" style="padding:8px 16px;font-size:12px;" data-toggleprep="${o.id}">${isDone?'Бозгашт ба навбат':'Тайёр шуд'}</button>
+      </div>
+    </div>`;
+  };
+
+  return `
+  <div class="container">
+    <div class="section-title">Захираи ош — фақат шумо мебинед</div>
+    <div class="stat-row">
+      <div class="stat-card"><div class="label">Ош фармоишшуда (кило)</div><div class="value">${kgTotal.toFixed(2)} кг</div></div>
+      ${remainingCard}
+      <div class="stat-card"><div class="label">Дар навбат</div><div class="value">${pending.length}</div></div>
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-10px 0 24px;">${porsiyaTotal} порсияи оши имрӯза (ҳар як ${state.settings.porsiyaGrams||120} г — аллакай дар ҳисоби боло ҳамроҳ шудааст)</p>
+    <div class="section-title">Дар навбати тайёркунӣ</div>
+    ${pending.length ? pending.map(o=>renderOrderCard(o,false)).join('') : '<div class="empty-state">Ҳоло фармоише нест</div>'}
+    ${done.length ? `<div class="section-title" style="margin-top:24px;">Тайёр шудаанд</div>${done.map(o=>renderOrderCard(o,true)).join('')}` : ''}
+  </div>`;
+}
+function attachChefEvents(){
+  document.querySelectorAll('[data-toggleprep]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      await toggleOrderPrepared(el.dataset.toggleprep);
+      render();
+    });
+  });
+  document.querySelectorAll('[data-serveitem]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const [orderId, menuId] = el.dataset.serveitem.split('|');
+      const input = document.getElementById('serve-'+orderId+'-'+menuId);
+      await markItemServed(orderId, menuId, input ? input.value : 0);
+      render();
+    });
+  });
+  document.querySelectorAll('[data-serveqty]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const [orderId, menuId, amount] = el.dataset.serveqty.split('|');
+      await markItemServed(orderId, menuId, amount);
+      render();
+    });
+  });
+}
+
+/* ---------- Ticket overlay ---------- */
+function renderTicketOverlay(){
+  const mode = state.ticketMode || 'edit';
+  const editable = mode === 'edit';
+  const currentOrder = activeOrderForTable(state.activeTable);
+  const servedInfo = (mid, qty)=>{
+    const prevItem = currentOrder ? currentOrder.items.find(p=>p.menuId===mid) : null;
+    const served = prevItem ? (prevItem.servedQty||0) : 0;
+    if(served<=0) return '';
+    const m = state.menu.find(x=>x.id===mid) || {unit:'dona'};
+    const remaining = Math.max(0, qty - served);
+    const servedLabel = m.unit==='kg' ? formatQtyLabel({name:'',unit:'kg',qty:served}).trim() : served+'×';
+    const remLabel = m.unit==='kg' ? formatQtyLabel({name:'',unit:'kg',qty:remaining}).trim() : remaining+'×';
+    return `<div style="font-size:10px;color:${remaining<=0?'var(--olive)':'#9c8f78'};margin-top:-2px;">${remaining<=0?'✅ пурра кашида шуд':`${servedLabel} кашида шуд · ${remLabel} боқӣ`}</div>`;
+  };
+
+  let menuSection = '';
+  if(editable){
+    const cats = [...new Set(state.menu.map(m=>m.category))];
+    if(!state.activeCat) state.activeCat = cats[0];
+    const tabs = cats.map(c=>`<button class="cat-tab ${c===state.activeCat?'active':''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('');
+    const items = state.menu.filter(m=>m.category===state.activeCat).map(m=>{
+      if(m.unit==='kg'){
+        return `
+        <div class="menu-row">
+          <div>
+            <div class="mname">${escapeHtml(m.name)}</div>
+            <div class="mprice">${fmtMoney(m.price)}/кг</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <input type="number" class="kg-qty-input" id="kgin-${m.id}" value="500" min="10" step="50" style="width:64px;padding:6px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;">
+            <span style="font-size:11px;color:#6b5f4d;">г</span>
+            <button class="add-btn" data-addgrams="${m.id}">+</button>
+          </div>
+        </div>`;
+      }
+      return `
+      <div class="menu-row">
+        <div>
+          <div class="mname">${escapeHtml(m.name)}</div>
+          <div class="mprice">${fmtMoney(m.price)}</div>
+        </div>
+        <button class="add-btn" data-add="${m.id}">+</button>
+      </div>`;
+    }).join('');
+    menuSection = `<div class="cat-tabs">${tabs}</div><div class="menu-list">${items}</div>`;
+  }
+
+  const draftKeys = Object.keys(state.draftItems);
+  let receiptLines = '';
+  if(draftKeys.length===0){
+    receiptLines = `<div class="receipt-empty">— холӣ аст —</div>`;
+  } else {
+    draftKeys.forEach(mid=>{
+      const m = state.menu.find(x=>x.id===mid);
+      if(!m) return;
+      const qty = state.draftItems[mid];
+      const isKg = m.unit==='kg';
+      if(editable && isKg){
+        receiptLines += `
+        <div class="receipt-line" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <input type="number" class="kg-edit-input" data-editgrams="${mid}" value="${qty}" min="0" step="10" style="width:60px;padding:4px 6px;border:1px solid var(--ink);border-radius:6px;font-family:inherit;font-size:12px;">
+            <span>г</span>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+            <button class="qty-btn" data-removeitem="${mid}">✕</button>
+          </div>
+        </div>
+        ${servedInfo(mid, qty)}
+        </div>`;
+      } else if(editable){
+        receiptLines += `
+        <div class="receipt-line" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span>${escapeHtml(m.name)}</span>
+          <div class="qty-ctrl">
+            <button class="qty-btn" data-dec="${mid}">−</button>
+            <span>${qty}×</span>
+            <button class="qty-btn" data-inc="${mid}">+</button>
+            <span style="min-width:60px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
+          </div>
+        </div>
+        ${servedInfo(mid, qty)}
+        </div>`;
+      } else {
+        receiptLines += `
+        <div class="receipt-line" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;justify-content:space-between;">
+          <span>${formatQtyLabel({name:m.name, unit:m.unit, qty})}</span>
+          <span>${fmtMoney(lineTotal(m,qty))}</span>
+        </div>
+        ${servedInfo(mid, qty)}
+        </div>`;
+      }
+    });
+  }
+  const total = draftTotal();
+  const disabled = draftKeys.length===0 ? 'disabled' : '';
+
+  let actions = '';
+  if(mode==='edit'){
+    actions = `<div class="ticket-actions"><button class="btn-primary" id="saveTicketBtn" ${disabled}>Захира</button></div>`;
+  } else if(mode==='pay'){
+    actions = `<div class="ticket-actions"><button class="btn-pay" id="payTicketBtn" ${disabled}>Пардохт шуд</button></div>`;
+  }
+
+  return `
+  <div class="overlay" id="ticketOverlay">
+    <div class="ticket-wrap">
+      <div class="ticket-head">
+        <h2>Мизи №${state.activeTable}</h2>
+        <button class="close-x" id="closeTicket">✕</button>
+      </div>
+      ${menuSection}
+      <div class="receipt">
+        <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
+        ${receiptLines}
+        <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
+      </div>
+      ${actions}
+    </div>
+  </div>`;
+}
+function attachTicketEvents(){
+  const mode = state.ticketMode || 'edit';
+  const overlay = document.getElementById('ticketOverlay');
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeTicket(); });
+  document.getElementById('closeTicket').addEventListener('click', closeTicket);
+  if(mode==='edit'){
+    document.querySelectorAll('.cat-tab').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
+    });
+    document.querySelectorAll('[data-add]').forEach(el=>{
+      el.addEventListener('click', ()=> changeQty(el.dataset.add, 1));
+    });
+    document.querySelectorAll('[data-inc]').forEach(el=>{
+      el.addEventListener('click', ()=> changeQty(el.dataset.inc, 1));
+    });
+    document.querySelectorAll('[data-dec]').forEach(el=>{
+      el.addEventListener('click', ()=> changeQty(el.dataset.dec, -1));
+    });
+    document.querySelectorAll('[data-addgrams]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        const input = document.getElementById('kgin-'+el.dataset.addgrams);
+        addGrams(el.dataset.addgrams, input ? input.value : 0);
+      });
+    });
+    document.querySelectorAll('[data-editgrams]').forEach(el=>{
+      el.addEventListener('change', ()=>{ setGrams(el.dataset.editgrams, el.value); });
+    });
+    document.querySelectorAll('[data-removeitem]').forEach(el=>{
+      el.addEventListener('click', ()=> removeDraftItem(el.dataset.removeitem));
+    });
+    const saveBtn = document.getElementById('saveTicketBtn');
+    if(saveBtn) saveBtn.addEventListener('click', saveTicket);
+  } else if(mode==='pay'){
+    const payBtn = document.getElementById('payTicketBtn');
+    if(payBtn) payBtn.addEventListener('click', payTicket);
+  }
+}
+
+/* ---------- Admin view ---------- */
+function renderAdmin(){
+  let body = '';
+  if(state.adminTab==='tables') body = renderAdminTables();
+  else if(state.adminTab==='menu') body = renderAdminMenu();
+  else if(state.adminTab==='report') body = renderAdminReport();
+  else if(state.adminTab==='staff') body = renderAdminStaff();
+  else if(state.adminTab==='salary') body = renderAdminSalary();
+  else body = renderAdminSettings();
+
+  return `
+  <div class="admin-tabs">
+    <button class="admin-tab ${state.adminTab==='tables'?'active':''}" data-atab="tables">Мизҳо</button>
+    <button class="admin-tab ${state.adminTab==='menu'?'active':''}" data-atab="menu">Меню</button>
+    <button class="admin-tab ${state.adminTab==='report'?'active':''}" data-atab="report">Ҳисобот</button>
+    <button class="admin-tab ${state.adminTab==='staff'?'active':''}" data-atab="staff">Кормандон</button>
+    <button class="admin-tab ${state.adminTab==='salary'?'active':''}" data-atab="salary">Маош</button>
+    <button class="admin-tab ${state.adminTab==='settings'?'active':''}" data-atab="settings">Танзимот</button>
+  </div>
+  <div class="container">${body}</div>`;
+}
+
+function renderAdminTables(){
+  const occCount = state.orders.filter(o=>o.status==='active').length;
+  const reservedNums = Object.keys(state.reservations||{}).map(Number).sort((a,b)=>a-b);
+  const freeForBooking = state.tables.filter(tbl=>{
+    const occ = !!activeOrderForTable(tbl.id);
+    const reserved = !!(state.reservations && state.reservations[tbl.id]);
+    return !occ && !reserved;
+  });
+  const options = freeForBooking.map(tbl=>`<option value="${tbl.id}">${escapeHtml(tbl.name)}</option>`).join('');
+  const cats = [...new Set(state.menu.map(m=>m.category))];
+  const menuOptions = cats.map(c=>`<optgroup label="${escapeHtml(c)}">${state.menu.filter(m=>m.category===c).map(m=>`<option value="${m.id}" data-unit="${m.unit||'dona'}">${escapeHtml(m.name)}</option>`).join('')}</optgroup>`).join('');
+  const preOrderKeys = Object.keys(state.bookingPreOrder);
+  const preOrderListHtml = preOrderKeys.length ? preOrderKeys.map(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    if(!m) return '';
+    const qty = state.bookingPreOrder[mid];
+    return `
+    <div class="receipt-line">
+      <span>${formatQtyLabel({name:m.name, unit:m.unit, qty})}</span>
+      <button class="qty-btn" data-removepreitem="${mid}">✕</button>
+    </div>`;
+  }).join('') : `<div class="receipt-empty" style="padding:6px 0;">— пешфармоише илова нашудааст —</div>`;
+
+  const bookForm = freeForBooking.length ? `
+    <div class="form-box" style="margin-top:4px;flex-direction:column;align-items:stretch;">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        <div class="field"><label>Миз</label><select id="bookTableSelect">${options}</select></div>
+        <div class="field"><label>Номи мизожон</label><input type="text" id="bookNameInput" placeholder="масалан: Каримов"></div>
+        <div class="field"><label>Рақами телефон</label><input type="tel" id="bookPhoneInput" placeholder="масалан: 900123456"></div>
+      </div>
+      <div style="border-top:1px dashed var(--line);margin-top:12px;padding-top:12px;">
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Чӣ брон карда шуд (ихтиёрӣ)</label>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+          <div class="field"><label>Маҳсулот</label><select id="bookPreItemSelect">${menuOptions}</select></div>
+          <div class="field small"><label id="bookPreQtyLabel">Миқдор (дона)</label><input type="number" id="bookPreQtyInput" value="1" min="1"></div>
+          <button class="btn-ghost" type="button" id="bookAddPreItemBtn">+ Илова</button>
+        </div>
+        <div style="margin-top:8px;">${preOrderListHtml}</div>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;margin-top:14px;align-self:flex-start;" id="bookTableBtn">Брон кардан</button>
+    </div>` : `<p style="font-size:13px;color:#9c8f78;margin-top:4px;">Ҳамаи мизҳо банд ё аллакай брон шудаанд</p>`;
+
+  const reservedRows = reservedNums.length ? reservedNums.map(t=>{
+    const tbl = state.tables.find(x=>x.id===t);
+    const r = state.reservations[t] || {};
+    const detail = [r.name, r.phone, r.bookedAt?fmtTime(r.bookedAt):null].filter(Boolean).join(' · ') || r.note || 'бе қайд';
+    const preSummary = preOrderSummary(r);
+    return `
+    <div class="item-row">
+      <div class="info">
+        <div class="nm">${escapeHtml(tbl?tbl.name:('Мизи №'+t))}</div>
+        <div class="cat">${escapeHtml(detail)}</div>
+        ${preSummary ? `<div class="cat" style="color:var(--olive);">${escapeHtml(preSummary)}</div>` : ''}
+      </div>
+      <button class="icon-btn danger" data-cancelbook="${t}">Бекор</button>
+    </div>`;
+  }).join('') : '';
+
+  /* --- table management (name + seats + assignment) --- */
+  const waiterAccounts = state.accounts.filter(a=>a.role==='waiter');
+  const assignLabel = (uname)=> uname ? (state.accounts.find(a=>a.username===uname)?.username || uname) : 'Ҳама official';
+  const tableRows = state.tables.map(tbl=>{
+    const confirming = state.confirmDeleteTableId === tbl.id;
+    return `
+    <div class="item-row">
+      <div class="info">
+        <div class="nm">${escapeHtml(tbl.name)}</div>
+        <div class="cat">${tbl.seats} ҷои нишаст ${tbl.assignedTo?`· 👤 ${escapeHtml(assignLabel(tbl.assignedTo))}`:''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${confirming ? `
+          <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+          <button class="icon-btn danger" data-confirmdeltable="${tbl.id}">Ҳа</button>
+          <button class="icon-btn" data-canceldeltable="${tbl.id}">Не</button>
+        ` : `
+          <button class="icon-btn" data-edittable="${tbl.id}">✎</button>
+          <button class="icon-btn danger" data-deltable="${tbl.id}">🗑</button>
+        `}
+      </div>
+    </div>`;
+  }).join('');
+
+  const waiterOptions = (selected)=> `<option value="">Ҳама official</option>` +
+    waiterAccounts.map(a=>`<option value="${escapeHtml(a.username)}" ${selected===a.username?'selected':''}>${escapeHtml(a.username)}</option>`).join('');
+
+  const addTableFormHtml = state.showAddTableForm ? `
+    <div class="form-box" id="addTableForm">
+      <div class="field"><label>Номи миз</label><input type="text" id="newTableName" placeholder="масалан: Мизи 9 ё Тарраса-1"></div>
+      <div class="field small"><label>Ҷои нишаст</label><input type="number" id="newTableSeats" value="4" min="1"></div>
+      <div class="field"><label>Тахсис ба official</label><select id="newTableAssign">${waiterOptions('')}</select></div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAddTable">Илова кардан</button>
+      <button class="btn-ghost" id="cancelAddTable">Бекор</button>
+    </div>` : `<button class="btn-ghost" id="showAddTableBtn" style="margin-bottom:14px;">+ Иловаи миз</button>`;
+
+  const editTableTarget = state.editingTableId ? state.tables.find(t=>t.id===state.editingTableId) : null;
+  const editTableFormHtml = editTableTarget ? `
+    <div class="form-box" id="editTableForm">
+      <div class="field"><label>Номи миз</label><input type="text" id="editTableName" value="${escapeHtml(editTableTarget.name)}"></div>
+      <div class="field small"><label>Ҷои нишаст</label><input type="number" id="editTableSeats" value="${editTableTarget.seats}" min="1"></div>
+      <div class="field"><label>Тахсис ба official</label><select id="editTableAssign">${waiterOptions(editTableTarget.assignedTo||'')}</select></div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEditTable">Нигоҳ доштан</button>
+      <button class="btn-ghost" id="cancelEditTable">Бекор</button>
+    </div>` : '';
+
+  const waiterAccs2 = state.accounts.filter(a=>a.role==='waiter');
+  const cashierAccs = state.accounts.filter(a=>a.role==='cashier');
+  const chefAccs = state.accounts.filter(a=>a.role==='chef');
+  const previewPicker = (role, accs, icon, label) => {
+    if(!accs.length) return `<p style="font-size:12px;color:#9c8f78;">Ҳанӯз ${label.toLowerCase()} илова нашудааст</p>`;
+    return `
+    <div style="display:flex;align-items:center;gap:6px;">
+      <select id="preview-${role}-select" style="padding:7px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:12px;">
+        ${accs.map(a=>`<option value="${escapeHtml(a.username)}">${escapeHtml(a.username)}</option>`).join('')}
+      </select>
+      <button class="btn-ghost" data-previewrole="${role}" style="padding:8px 12px;">${icon} Кушодан</button>
+    </div>`;
+  };
+
+  return `
+    <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">👤 Экрани official</div>
+        ${previewPicker('waiter', waiterAccs2, '👤', 'official')}
+      </div>
+      <div>
+        <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">💰 Экрани кассир</div>
+        ${previewPicker('cashier', cashierAccs, '💰', 'кассир')}
+      </div>
+      <div>
+        <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">👨‍🍳 Экрани ошпаз</div>
+        ${previewPicker('chef', chefAccs, '👨‍🍳', 'ошпаз')}
+      </div>
+    </div>
+    <div class="section-title">Ҳолати мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед (пардохт танҳо аз ҷониби кассир)</p>
+    <div class="table-grid">${buildTableCards()}</div>
+
+    <div class="section-title" style="margin-top:28px;">Номгузорӣ ва ҷои нишасти мизҳо</div>
+    ${addTableFormHtml}
+    ${editTableFormHtml}
+    ${tableRows}
+
+    <div class="section-title" style="margin-top:28px;">Брон кардани миз</div>
+    ${bookForm}
+    ${reservedRows ? `<div style="margin-top:6px;">${reservedRows}</div>` : ''}
+  `;
+}
+
+function renderAdminSalary(){
+  const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
+  const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
+  let totalMonthly = 0;
+  const rows = state.accounts.map(acc=>{
+    const w = computeWages(acc);
+    totalMonthly += w.monthly;
+    const isCommission = acc.wageType==='commission';
+    const canCommission = acc.role==='waiter' || acc.role==='cashier';
+    return `
+    <div class="salary-row">
+      <div class="salary-name">
+        <div class="nm">${escapeHtml(acc.username)}</div>
+        <div class="cat">${roleLabel[acc.role]||acc.role}</div>
+      </div>
+      <select class="salary-select" id="wtype-${acc.id}">
+        <option value="daily" ${acc.wageType!=='monthly'&&acc.wageType!=='commission'?'selected':''}>Рӯзона (собит)</option>
+        <option value="monthly" ${acc.wageType==='monthly'?'selected':''}>Моҳона (собит)</option>
+        ${canCommission ? `<option value="commission" ${isCommission?'selected':''}>Комиссия аз чек</option>` : ''}
+      </select>
+      <input type="number" class="salary-input" id="wamt-${acc.id}" value="${acc.wageAmount||0}" min="0" step="1" placeholder="маблағ (смн)" style="${isCommission?'display:none;':''}">
+      <span id="wnote-${acc.id}" style="font-size:11px;color:#9c8f78;width:100px;${isCommission?'':'display:none;'}">аз чекҳо ҳисоб мешавад</span>
+      <div class="salary-computed">
+        <span>Имрӯз: <b class="mono">${w.daily.toFixed(1)} смн</b></span>
+        <span>${isCommission?'Ин моҳ':'Моҳона'}: <b class="mono">${w.monthly.toFixed(1)} смн</b></span>
+      </div>
+      <button class="btn-primary" data-savewage="${acc.id}" style="padding:7px 14px;font-size:12px;flex:none;">Сабт</button>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="section-title">Ҳисоби маоши кормандон</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
+    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ош дар чек ≥500г бошад — 12 смн аз ҳар чек; агар <500г — 5% аз арзиши он қисм; аз ҳама маҳсули дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
+    <div class="field small" style="margin-bottom:18px;">
+      <label>Рӯзҳои корӣ дар як моҳ (барои маоши собит)</label>
+      <input type="number" id="workDaysInput" value="${days}" min="1" max="31" style="width:90px;">
+      <button class="btn-ghost" id="saveWorkDaysBtn" style="margin-left:8px;padding:8px 14px;">Сабт</button>
+    </div>
+    ${rows || '<div class="empty-state">Ҳанӯз кормандон нест</div>'}
+    <div class="stat-row" style="margin-top:20px;">
+      <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:32px;">Ҷадвали тафсилоти имрӯза (комиссионӣ)</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Мисли Умед: чанд чек имрӯз гирифт/пардохт, аз онҳо чанд то ≥500г буд, чанд то камтар — ва маоши имрӯза.</p>
+    ${renderSalaryXlsTable()}
+  `;
+}
+
+function renderSalaryXlsTable(){
+  const roleLabel = {waiter:'Официант', cashier:'Кассир'};
+  const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
+  if(!commissionAccounts.length){
+    return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ корманде ба навъи «Комиссия аз чек» гузошта нашудааст.</p>`;
+  }
+  let grandTotal = 0;
+  const rows = commissionAccounts.map(acc=>{
+    const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
+    grandTotal += b.total;
+    return `
+    <tr>
+      <td>${escapeHtml(acc.username)} <span style="color:#9c8f78;font-weight:400;">(${roleLabel[acc.role]})</span></td>
+      <td>${b.orderCount}</td>
+      <td>${b.countHigh}</td>
+      <td>${b.countLow}</td>
+      <td>${b.countNoOsh}</td>
+      <td>${b.oshSum.toFixed(1)}</td>
+      <td>${b.otherSum.toFixed(1)}</td>
+      <td class="total-cell">${b.total.toFixed(1)}</td>
+    </tr>`;
+  }).join('');
+  return `
+  <table class="xls-table">
+    <thead>
+      <tr>
+        <th>Корманд</th>
+        <th>Чекҳо</th>
+        <th>≥500г</th>
+        <th>&lt;500г</th>
+        <th>Бе ош</th>
+        <th>Аз ош (смн)</th>
+        <th>Аз дигар (смн)</th>
+        <th>Ҳамагӣ (смн)</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows}
+      <tr>
+        <td style="font-weight:700;">Ҳамагӣ</td>
+        <td></td><td></td><td></td><td></td><td></td><td></td>
+        <td class="total-cell">${grandTotal.toFixed(1)}</td>
+      </tr>
+    </tbody>
+  </table>`;
+}
+
+function renderAdminStaff(){
+  const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
+  const rows = state.accounts.map(acc=>{
+    const confirming = state.confirmDeleteAccountId === acc.id;
+    const isOnlyAdmin = acc.role==='admin' && state.accounts.filter(a=>a.role==='admin').length<=1;
+    return `
+    <div class="item-row">
+      <div class="info">
+        <div class="nm">${escapeHtml(acc.username)}</div>
+        <div class="cat">${roleLabel[acc.role]||acc.role}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${confirming ? `
+          <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+          <button class="icon-btn danger" data-confirmdelacc="${acc.id}">Ҳа</button>
+          <button class="icon-btn" data-canceldelacc="${acc.id}">Не</button>
+        ` : `
+          <button class="icon-btn" data-editacc="${acc.id}">✎</button>
+          ${isOnlyAdmin ? '' : `<button class="icon-btn danger" data-delacc="${acc.id}">🗑</button>`}
+        `}
+      </div>
+    </div>`;
+  }).join('');
+
+  const addForm = state.showAddAccountForm ? `
+    <div class="form-box" id="addAccountForm">
+      <div class="field"><label>Логин</label><input type="text" id="newAccUsername" placeholder="масалан: aziz"></div>
+      <div class="field small"><label>Парол</label><input type="text" id="newAccPassword" placeholder="парол"></div>
+      <div class="field"><label>Нақш</label>
+        <select id="newAccRole">
+          <option value="waiter">Официант</option>
+          <option value="cashier">Кассир</option>
+          <option value="chef">Ошпаз</option>
+          <option value="admin">Админ</option>
+        </select>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAddAccount">Илова кардан</button>
+      <button class="btn-ghost" id="cancelAddAccount">Бекор</button>
+    </div>` : `<button class="btn-ghost" id="showAddAccountBtn" style="margin-bottom:14px;">+ Иловаи корманд</button>`;
+
+  const editTarget = state.editingAccountId ? state.accounts.find(a=>a.id===state.editingAccountId) : null;
+  const editForm = editTarget ? `
+    <div class="form-box" id="editAccountForm">
+      <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
+      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(editTarget.password)}"></div>
+      <div class="field"><label>Нақш</label>
+        <select id="editAccRole">
+          <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
+          <option value="cashier" ${editTarget.role==='cashier'?'selected':''}>Кассир</option>
+          <option value="chef" ${editTarget.role==='chef'?'selected':''}>Ошпаз</option>
+          <option value="admin" ${editTarget.role==='admin'?'selected':''}>Админ</option>
+        </select>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEditAccount">Нигоҳ доштан</button>
+      <button class="btn-ghost" id="cancelEditAccount">Бекор</button>
+    </div>` : '';
+
+  const defaultPwWarning = state.accounts.some(a=>a.username==='admin' && a.password==='admin123')
+    ? `<p style="font-size:12px;color:var(--brick);font-weight:600;margin:-8px 0 16px;">⚠️ Пароли пешфарзи «admin»-ро ҳатман иваз кунед!</p>` : '';
+
+  return `
+    <div class="section-title">Кормандон</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:16px;">Барои ҳар корманд логин ва парол диҳед. Онҳо танҳо ба экрани нақши худ дастрасӣ доранд.</p>
+    ${defaultPwWarning}
+    ${addForm}
+    ${editForm}
+    ${rows}
+  `;
+}
+
+function renderAdminMenu(){
+  const cats = [...new Set(state.menu.map(m=>m.category))];
+  let groups = cats.map(c=>{
+    const rows = state.menu.filter(m=>m.category===c).map(m=>{
+      const confirming = state.confirmDeleteId === m.id;
+      return `
+      <div class="item-row">
+        <div class="info">
+          <div class="nm">${escapeHtml(m.name)}</div>
+          <div class="cat">${m.unit==='kg'?'бо кг':'бо дона'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="price mono">${fmtMoney(m.price)}${m.unit==='kg'?'/кг':''}</span>
+          ${confirming ? `
+            <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+            <button class="icon-btn danger" data-confirmdel="${m.id}">Ҳа</button>
+            <button class="icon-btn" data-canceldel="${m.id}">Не</button>
+          ` : `
+            <button class="icon-btn" data-edit="${m.id}">✎</button>
+            <button class="icon-btn danger" data-del="${m.id}">🗑</button>
+          `}
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="cat-group"><h3>${escapeHtml(c)}</h3>${rows}</div>`;
+  }).join('');
+
+  const addFormHtml = state.showAddForm ? `
+    <div class="form-box" id="addForm">
+      <div class="field"><label>Ном</label><input type="text" id="newName" placeholder="Номи хӯрок"></div>
+      <div class="field small"><label>Нарх (смн)</label><input type="number" id="newPrice" placeholder="0"></div>
+      <div class="field"><label>Категория</label><input type="text" id="newCat" placeholder="масалан: Хӯрок" list="catList">
+        <datalist id="catList">${cats.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
+      </div>
+      <div class="field"><label>Воҳид</label>
+        <select id="newUnit">
+          <option value="dona">Дона / порсия</option>
+          <option value="kg">Кило (вазн)</option>
+        </select>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAdd">Илова кардан</button>
+      <button class="btn-ghost" id="cancelAdd">Бекор</button>
+    </div>` : `<button class="btn-ghost" id="showAddBtn" style="margin-bottom:18px;">+ Иловаи хӯрок</button>`;
+
+  const editTarget = state.editingId ? state.menu.find(m=>m.id===state.editingId) : null;
+  const editFormHtml = editTarget ? `
+    <div class="form-box" id="editForm">
+      <div class="field"><label>Ном</label><input type="text" id="editName" value="${escapeHtml(editTarget.name)}"></div>
+      <div class="field small"><label>Нарх (смн)</label><input type="number" id="editPrice" value="${editTarget.price}"></div>
+      <div class="field"><label>Категория</label><input type="text" id="editCat" value="${escapeHtml(editTarget.category)}" list="catList2">
+        <datalist id="catList2">${cats.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
+      </div>
+      <div class="field"><label>Воҳид</label>
+        <select id="editUnit">
+          <option value="dona" ${editTarget.unit!=='kg'?'selected':''}>Дона / порсия</option>
+          <option value="kg" ${editTarget.unit==='kg'?'selected':''}>Кило (вазн)</option>
+        </select>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEdit">Нигоҳ доштан</button>
+      <button class="btn-ghost" id="cancelEdit">Бекор</button>
+    </div>` : '';
+
+  return `
+    <div class="section-title">Нархномаи меню</div>
+    ${addFormHtml}
+    ${editFormHtml}
+    ${groups || '<div class="empty-state">Меню холист</div>'}
+  `;
+}
+
+function renderAdminReport(){
+  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const revenue = paidToday.reduce((s,o)=>s+o.total,0);
+  const active = state.orders.filter(o=>o.status==='active');
+
+  const receiptsHtml = paidToday.length ? paidToday
+    .sort((a,b)=>b.paidAt-a.paidAt)
+    .map(o=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${orderLabel(o)}</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
+      </div>
+      <div style="text-align:right;">
+        <div>${fmtMoney(o.total)}</div>
+        <div class="l2">${fmtTime(o.paidAt)}</div>
+      </div>
+    </div>`).join('') : `<div class="empty-state" style="padding:24px;">Имрӯз ҳанӯз чек пардохт нашудааст</div>`;
+
+  const activeHtml = active.length ? active.map(o=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${orderLabel(o)} — фаъол</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ') || 'холӣ'}</div>
+      </div>
+      <div>${fmtMoney(o.total)}</div>
+    </div>`).join('') : '';
+
+  return `
+    <div class="stat-row">
+      <div class="stat-card"><div class="label">Даромади имрӯз</div><div class="value">${fmtMoney(revenue)}</div></div>
+      <div class="stat-card"><div class="label">Шумораи чекҳо</div><div class="value">${paidToday.length}</div></div>
+      <div class="stat-card"><div class="label">Мизҳои фаъол</div><div class="value">${active.length}</div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:24px;">Даромад аз рӯи маҳсулот (имрӯз)</div>
+    ${renderProductBreakdownTable(paidToday)}
+
+    ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
+    <div class="section-title" style="margin-top:24px;">Чекҳои имрӯза</div>
+    ${receiptsHtml}
+  `;
+}
+
+function renderProductBreakdownTable(orders){
+  if(!orders.length) return `<p style="font-size:13px;color:#9c8f78;">Имрӯз ҳанӯз фурӯше нашудааст</p>`;
+  const map = {};
+  orders.forEach(o=>{
+    o.items.forEach(it=>{
+      if(!map[it.name]) map[it.name] = {qty:0, unit:it.unit, revenue:0};
+      map[it.name].qty += it.qty;
+      map[it.name].revenue += lineTotal({unit:it.unit, price:it.price}, it.qty);
+    });
+  });
+  const list = Object.entries(map).map(([name,v])=>({name, ...v})).sort((a,b)=>b.revenue-a.revenue);
+  const totalRevenue = list.reduce((s,p)=>s+p.revenue,0);
+  const rows = list.map(p=>{
+    const qtyLabel = p.unit==='kg'
+      ? (p.qty>=1000 ? (Math.round((p.qty/1000)*100)/100)+' кг' : Math.round(p.qty)+' г')
+      : p.qty+' дона';
+    return `
+    <tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td>${qtyLabel}</td>
+      <td class="total-cell">${p.revenue.toFixed(1)} смн</td>
+    </tr>`;
+  }).join('');
+  return `
+  <table class="xls-table">
+    <thead><tr><th>Маҳсулот</th><th>Миқдор</th><th>Даромад</th></tr></thead>
+    <tbody>
+      ${rows}
+      <tr><td style="font-weight:700;">Ҳамагӣ</td><td></td><td class="total-cell">${totalRevenue.toFixed(1)} смн</td></tr>
+    </tbody>
+  </table>`;
+}
+
+function renderAdminSettings(){
+  const confirming = state.confirmResetMenu;
+  return `
+  <div class="section-title">Танзимот</div>
+  <div class="settings-form">
+    <div class="field">
+      <label>Номи кафе</label>
+      <input type="text" id="cafeNameInput" value="${escapeHtml(state.settings.cafeName)}">
+    </div>
+    <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveSettingsBtn">Нигоҳ доштан</button>
+  </div>
+  <p style="font-size:12px;color:#9c8f78;max-width:340px;">Барои иловаи миз, тағйири ном ё ҷои нишаст — ба варақаи «Мизҳо» гузаред.</p>
+
+  <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза</div>
+  <div class="settings-form">
+    <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Миқдори кг оше, ки имрӯз пухта шуд — ба ҳама (официант, кассир, ошпаз) нишон дода мешавад.</p>
+    <div class="field">
+      <label>Ош пухта шуд (кг)</label>
+      <input type="number" id="oshStockInput" value="${state.oshStock && state.oshStock.date===todayKey() ? state.oshStock.kg : ''}" min="0" step="0.5" placeholder="масалан: 20">
+    </div>
+    <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
+  </div>
+  <div class="settings-form" style="margin-top:18px;">
+    <div class="field">
+      <label>Вазни 1 порсияи ош (грамм)</label>
+      <input type="number" id="porsiyaGramsInput" value="${state.settings.porsiyaGrams||120}" min="1" step="10" style="width:120px;">
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Барои ҳисоби «оши боқимонда» — фармоишҳои порсиягӣ низ ба вазн табдил ёфта, ба ҳисоби умумии кг илова мешаванд.</p>
+    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="savePorsiyaGramsBtn">Сабт кардан</button>
+  </div>
+
+  <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
+  <div class="form-box" style="max-width:420px;flex-direction:column;align-items:flex-start;">
+    <p style="font-size:13px;color:#6b5f4d;margin:0 0 6px;">Тамоми хӯрокҳои ҳозираро нест карда, менюро ба ҳолати пешфарз бармегардонад. Барои хӯрокҳои шумо мувофиқ нест — фақат нуқтаи оғоз аст, баъд аз он дар варақаи «Меню» тағйир диҳед.</p>
+    ${confirming ? `
+      <div style="display:flex;gap:10px;align-items:center;">
+        <span style="font-size:13px;color:var(--brick);font-weight:600;">Мутмаин ҳастед?</span>
+        <button class="btn-pay" style="flex:none;padding:8px 16px;" id="confirmResetBtn">Ҳа, барқарор кун</button>
+        <button class="btn-ghost" id="cancelResetBtn">Не</button>
+      </div>
+    ` : `<button class="btn-ghost" id="resetMenuBtn">Барқарор кардани менюи пешфарз</button>`}
+  </div>`;
+}
+
+function attachAdminEvents(){
+  // keep typing safe from the 6s poll wipe while on tabs with persistent free-typed fields
+  if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings'){
+    state.formOpen = true;
+    state.formOpenAt = Date.now();
+  }
+  document.querySelectorAll('.admin-tab').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
+      state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
+      state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
+      if(el.dataset.atab!=='tables') state.bookingPreOrder = {};
+      if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
+      render();
+    });
+  });
+
+  if(state.adminTab==='tables'){
+    attachTableGridEvents();
+    document.querySelectorAll('[data-previewrole]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        const role = el.dataset.previewrole;
+        const sel = document.getElementById('preview-'+role+'-select');
+        state.previewUsername = sel ? sel.value : null;
+        state.role = role;
+        state.activeTable=null;
+        render();
+      });
+    });
+    const bookBtn = document.getElementById('bookTableBtn');
+    if(bookBtn) bookBtn.addEventListener('click', async ()=>{
+      const t = Number(document.getElementById('bookTableSelect').value);
+      const name = document.getElementById('bookNameInput').value.trim();
+      const phone = document.getElementById('bookPhoneInput').value.trim();
+      if(!name){ showToast('Номи мизожонро нависед'); return; }
+      await bookTable(t, name, phone, bookingPreOrderList());
+      state.bookingPreOrder = {};
+      render();
+    });
+    document.querySelectorAll('[data-cancelbook]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        await cancelBooking(Number(el.dataset.cancelbook));
+        render();
+      });
+    });
+    const preItemSelect = document.getElementById('bookPreItemSelect');
+    const preQtyInput = document.getElementById('bookPreQtyInput');
+    const preQtyLabel = document.getElementById('bookPreQtyLabel');
+    function syncPreQtyUi(){
+      if(!preItemSelect || !preQtyInput || !preQtyLabel) return;
+      const opt = preItemSelect.options[preItemSelect.selectedIndex];
+      const isKg = opt && opt.dataset.unit==='kg';
+      preQtyLabel.textContent = isKg ? 'Миқдор (грамм)' : 'Миқдор (дона)';
+      preQtyInput.value = isKg ? 500 : 1;
+      preQtyInput.step = isKg ? 50 : 1;
+    }
+    if(preItemSelect) preItemSelect.addEventListener('change', syncPreQtyUi);
+    syncPreQtyUi();
+    const addPreItemBtn = document.getElementById('bookAddPreItemBtn');
+    if(addPreItemBtn) addPreItemBtn.addEventListener('click', ()=>{
+      const mid = document.getElementById('bookPreItemSelect').value;
+      const qty = document.getElementById('bookPreQtyInput').value;
+      addToBookingPreOrder(mid, qty);
+    });
+    document.querySelectorAll('[data-removepreitem]').forEach(el=>{
+      el.addEventListener('click', ()=> removeFromBookingPreOrder(el.dataset.removepreitem));
+    });
+
+    const showAddTableBtn = document.getElementById('showAddTableBtn');
+    if(showAddTableBtn) showAddTableBtn.addEventListener('click', ()=>{ state.showAddTableForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    const cancelAddTable = document.getElementById('cancelAddTable');
+    if(cancelAddTable) cancelAddTable.addEventListener('click', ()=>{ state.showAddTableForm=false; state.formOpen=false; render(); });
+    const submitAddTable = document.getElementById('submitAddTable');
+    if(submitAddTable) submitAddTable.addEventListener('click', async ()=>{
+      const name = document.getElementById('newTableName').value.trim();
+      const seats = document.getElementById('newTableSeats').value;
+      const assignedTo = document.getElementById('newTableAssign').value;
+      await addTableConfig(name, seats, assignedTo);
+      state.showAddTableForm=false; state.formOpen=false;
+      render();
+    });
+
+    document.querySelectorAll('[data-edittable]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.editingTableId = Number(el.dataset.edittable); state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    });
+    document.querySelectorAll('[data-deltable]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteTableId = Number(el.dataset.deltable); render(); });
+    });
+    document.querySelectorAll('[data-confirmdeltable]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        state.confirmDeleteTableId = null;
+        await deleteTableConfig(Number(el.dataset.confirmdeltable));
+        render();
+      });
+    });
+    document.querySelectorAll('[data-canceldeltable]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteTableId = null; render(); });
+    });
+    const cancelEditTable = document.getElementById('cancelEditTable');
+    if(cancelEditTable) cancelEditTable.addEventListener('click', ()=>{ state.editingTableId=null; state.formOpen=false; render(); });
+    const submitEditTable = document.getElementById('submitEditTable');
+    if(submitEditTable) submitEditTable.addEventListener('click', async ()=>{
+      const name = document.getElementById('editTableName').value.trim();
+      const seats = document.getElementById('editTableSeats').value;
+      const assignedTo = document.getElementById('editTableAssign').value;
+      await updateTableConfig(state.editingTableId, name, seats, assignedTo);
+      state.editingTableId=null; state.formOpen=false;
+      render();
+    });
+  }
+
+  if(state.adminTab==='staff'){
+    const showAddAccountBtn = document.getElementById('showAddAccountBtn');
+    if(showAddAccountBtn) showAddAccountBtn.addEventListener('click', ()=>{ state.showAddAccountForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    const cancelAddAccount = document.getElementById('cancelAddAccount');
+    if(cancelAddAccount) cancelAddAccount.addEventListener('click', ()=>{ state.showAddAccountForm=false; state.formOpen=false; render(); });
+    const submitAddAccount = document.getElementById('submitAddAccount');
+    if(submitAddAccount) submitAddAccount.addEventListener('click', async ()=>{
+      const username = document.getElementById('newAccUsername').value.trim();
+      const password = document.getElementById('newAccPassword').value;
+      const role = document.getElementById('newAccRole').value;
+      const ok = await addAccount(username, password, role);
+      if(ok){ state.showAddAccountForm=false; state.formOpen=false; }
+      render();
+    });
+
+    document.querySelectorAll('[data-editacc]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.editingAccountId = el.dataset.editacc; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    });
+    document.querySelectorAll('[data-delacc]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteAccountId = el.dataset.delacc; render(); });
+    });
+    document.querySelectorAll('[data-confirmdelacc]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        state.confirmDeleteAccountId = null;
+        await deleteAccount(el.dataset.confirmdelacc);
+        render();
+      });
+    });
+    document.querySelectorAll('[data-canceldelacc]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteAccountId = null; render(); });
+    });
+    const cancelEditAccount = document.getElementById('cancelEditAccount');
+    if(cancelEditAccount) cancelEditAccount.addEventListener('click', ()=>{ state.editingAccountId=null; state.formOpen=false; render(); });
+    const submitEditAccount = document.getElementById('submitEditAccount');
+    if(submitEditAccount) submitEditAccount.addEventListener('click', async ()=>{
+      const username = document.getElementById('editAccUsername').value.trim();
+      const password = document.getElementById('editAccPassword').value;
+      const role = document.getElementById('editAccRole').value;
+      const ok = await updateAccountFn(state.editingAccountId, username, password, role);
+      if(ok){ state.editingAccountId=null; state.formOpen=false; }
+      render();
+    });
+  }
+
+  if(state.adminTab==='salary'){
+    document.querySelectorAll('.salary-select').forEach(sel=>{
+      sel.addEventListener('change', ()=>{
+        const id = sel.id.replace('wtype-','');
+        const input = document.getElementById('wamt-'+id);
+        const note = document.getElementById('wnote-'+id);
+        const isCommission = sel.value==='commission';
+        if(input) input.style.display = isCommission ? 'none' : '';
+        if(note) note.style.display = isCommission ? '' : 'none';
+      });
+    });
+    document.querySelectorAll('[data-savewage]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        const id = el.dataset.savewage;
+        const wtype = document.getElementById('wtype-'+id).value;
+        const wamtEl = document.getElementById('wamt-'+id);
+        const wamt = wamtEl ? wamtEl.value : 0;
+        await saveWage(id, wtype, wamt);
+        render();
+      });
+    });
+    const saveWorkDaysBtn = document.getElementById('saveWorkDaysBtn');
+    if(saveWorkDaysBtn) saveWorkDaysBtn.addEventListener('click', async ()=>{
+      const days = Math.max(1, Math.min(31, Number(document.getElementById('workDaysInput').value) || 30));
+      state.settings = {...state.settings, workDaysPerMonth: days};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+  }
+
+  if(state.adminTab==='menu'){
+    const showBtn = document.getElementById('showAddBtn');
+    if(showBtn) showBtn.addEventListener('click', ()=>{ state.showAddForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    const cancelAdd = document.getElementById('cancelAdd');
+    if(cancelAdd) cancelAdd.addEventListener('click', ()=>{ state.showAddForm=false; state.formOpen=false; render(); });
+    const submitAdd = document.getElementById('submitAdd');
+    if(submitAdd) submitAdd.addEventListener('click', async ()=>{
+      const name = document.getElementById('newName').value.trim();
+      const price = document.getElementById('newPrice').value;
+      const cat = document.getElementById('newCat').value.trim();
+      const unit = document.getElementById('newUnit').value;
+      if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
+      await addMenuItem(name, price, cat, unit);
+      state.showAddForm=false; state.formOpen=false;
+      render();
+    });
+
+    document.querySelectorAll('[data-edit]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.editingId = el.dataset.edit; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    });
+    document.querySelectorAll('[data-del]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteId = el.dataset.del; render(); });
+    });
+    document.querySelectorAll('[data-confirmdel]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteId = null; deleteMenuItem(el.dataset.confirmdel); });
+    });
+    document.querySelectorAll('[data-canceldel]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteId = null; render(); });
+    });
+    const cancelEdit = document.getElementById('cancelEdit');
+    if(cancelEdit) cancelEdit.addEventListener('click', ()=>{ state.editingId=null; state.formOpen=false; render(); });
+    const submitEdit = document.getElementById('submitEdit');
+    if(submitEdit) submitEdit.addEventListener('click', async ()=>{
+      const name = document.getElementById('editName').value.trim();
+      const price = document.getElementById('editPrice').value;
+      const cat = document.getElementById('editCat').value.trim();
+      const unit = document.getElementById('editUnit').value;
+      if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
+      await updateMenuItem(state.editingId, name, price, cat, unit);
+      state.editingId=null; state.formOpen=false;
+      render();
+    });
+  }
+
+  if(state.adminTab==='settings'){
+    const btn = document.getElementById('saveSettingsBtn');
+    if(btn) btn.addEventListener('click', async ()=>{
+      const cafeName = document.getElementById('cafeNameInput').value.trim() || 'Кафеи ман';
+      state.settings = {...state.settings, cafeName};
+      await saveSettings(state.settings);
+      showToast('Танзимот сабт шуд');
+      render();
+    });
+    const resetBtn = document.getElementById('resetMenuBtn');
+    if(resetBtn) resetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = true; render(); });
+    const cancelResetBtn = document.getElementById('cancelResetBtn');
+    if(cancelResetBtn) cancelResetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = false; render(); });
+    const saveOshBtn = document.getElementById('saveOshStockBtn');
+    if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
+      const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
+      state.oshStock = {date: todayKey(), kg};
+      await saveOshStock(state.oshStock);
+      showToast('Миқдори ош сабт шуд');
+      render();
+    });
+    const savePorsiyaBtn = document.getElementById('savePorsiyaGramsBtn');
+    if(savePorsiyaBtn) savePorsiyaBtn.addEventListener('click', async ()=>{
+      const g = Math.max(1, Number(document.getElementById('porsiyaGramsInput').value) || 120);
+      state.settings = {...state.settings, porsiyaGrams: g};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+    const confirmResetBtn = document.getElementById('confirmResetBtn');
+    if(confirmResetBtn) confirmResetBtn.addEventListener('click', async ()=>{
+      state.menu = DEFAULT_MENU.map(m=>({...m}));
+      await saveMenu(state.menu);
+      state.confirmResetMenu = false;
+      showToast('Менюи пешфарз барқарор шуд');
+      render();
+    });
+  }
+}
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+init();
+</script>
+</body>
+</html>
