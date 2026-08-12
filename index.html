@@ -378,6 +378,8 @@ let state = {
   settings:{...DEFAULT_SETTINGS},
   reservations:{},          // tableNumber -> {note, bookedAt}
   bookingPreOrder:{},       // menuId -> qty (while building a table booking's pre-order)
+  bookingName:'',
+  bookingPhone:'',
   tables:[],                // [{id, name, seats}]
   oshStock:{date:'', kg:0}, // admin-entered total osh cooked today
   accounts:[],              // [{id, username, password, role}]
@@ -941,6 +943,7 @@ function attachCommonEvents(){
     state.scheduledOpen=false; state.scheduledItems={};
     state.viewingOrderId=null; state.viewingMode=null;
     state.bookingPreOrder={};
+    state.bookingName=''; state.bookingPhone='';
     state.previewUsername=null;
     render();
   });
@@ -1000,13 +1003,45 @@ function attachTableGridEvents(){
 /* ---------- Waiter view ---------- */
 function renderWaiter(){
   const occCount = state.orders.filter(o=>o.status==='active').length;
+  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active')
+    .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
+  const freeTables = state.tables.filter(t=>!activeOrderForTable(t.id));
+  const scheduledHtml = pendingScheduled.length ? pendingScheduled.map(o=>{
+    const tableOptions = freeTables.map(t=>`<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+    return `
+    <div class="receipt-item-row" style="flex-wrap:wrap;gap:8px;">
+      <div>
+        <div class="l1">${orderLabel(o)}</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        ${freeTables.length ? `
+          <select id="assignSel-${o.id}" style="padding:6px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:12px;">${tableOptions}</select>
+          <button class="btn-ghost" style="padding:6px 12px;font-size:12px;" data-assignsched="${o.id}">Ба миз гузоштан</button>
+        ` : `<span style="font-size:12px;color:#9c8f78;">мизи озод нест</span>`}
+      </div>
+    </div>`;
+  }).join('') : '';
   return `
   <div class="container">
     <div class="section-title">Мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <div class="table-grid">${buildTableCards()}</div>
+    ${pendingScheduled.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор</div><p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳангоми омадани мизожон, мизи озодро интихоб карда «Ба миз гузоштан»-ро занед</p>${scheduledHtml}` : ''}
   </div>`;
 }
-function attachWaiterEvents(){ attachTableGridEvents(); }
+function attachWaiterEvents(){
+  attachTableGridEvents();
+  document.querySelectorAll('[data-assignsched]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const orderId = el.dataset.assignsched;
+      const sel = document.getElementById('assignSel-'+orderId);
+      const tableId = sel ? Number(sel.value) : null;
+      if(!tableId){ showToast('Мизро интихоб кунед'); return; }
+      await assignScheduledToTable(orderId, tableId);
+      render();
+    });
+  });
+}
 
 /* ---------- Cashier view ---------- */
 function renderCashier(){
@@ -1203,6 +1238,17 @@ async function payOrderById(id){
   await saveOrders(state.orders);
   showToast('Пардохт шуд');
   closeOrderView();
+}
+async function assignScheduledToTable(orderId, tableId){
+  const order = state.orders.find(o=>o.id===orderId);
+  if(!order) return;
+  if(activeOrderForTable(tableId)){ showToast('Ин миз аллакай банд аст'); return; }
+  order.table = tableId;
+  order.type = 'dine-in';
+  order.createdBy = actingUsername();
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+  showToast('Ба миз гузошта шуд');
 }
 function renderTakeawayOverlay(){
   const cats = [...new Set(state.menu.map(m=>m.category))];
@@ -1830,8 +1876,8 @@ function renderAdminTables(){
     <div class="form-box" style="margin-top:4px;flex-direction:column;align-items:stretch;">
       <div style="display:flex;flex-wrap:wrap;gap:10px;">
         <div class="field"><label>Миз</label><select id="bookTableSelect">${options}</select></div>
-        <div class="field"><label>Номи мизожон</label><input type="text" id="bookNameInput" placeholder="масалан: Каримов"></div>
-        <div class="field"><label>Рақами телефон</label><input type="tel" id="bookPhoneInput" placeholder="масалан: 900123456"></div>
+        <div class="field"><label>Номи мизожон</label><input type="text" id="bookNameInput" value="${escapeHtml(state.bookingName)}" placeholder="масалан: Каримов"></div>
+        <div class="field"><label>Рақами телефон</label><input type="tel" id="bookPhoneInput" value="${escapeHtml(state.bookingPhone)}" placeholder="масалан: 900123456"></div>
       </div>
       <div style="border-top:1px dashed var(--line);margin-top:12px;padding-top:12px;">
         <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Чӣ брон карда шуд (ихтиёрӣ)</label>
@@ -2320,7 +2366,7 @@ function attachAdminEvents(){
       state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
-      if(el.dataset.atab!=='tables') state.bookingPreOrder = {};
+      if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
       if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
       render();
     });
@@ -2346,6 +2392,7 @@ function attachAdminEvents(){
       if(!name){ showToast('Номи мизожонро нависед'); return; }
       await bookTable(t, name, phone, bookingPreOrderList());
       state.bookingPreOrder = {};
+      state.bookingName = ''; state.bookingPhone = '';
       render();
     });
     document.querySelectorAll('[data-cancelbook]').forEach(el=>{
@@ -2367,14 +2414,19 @@ function attachAdminEvents(){
     }
     if(preItemSelect) preItemSelect.addEventListener('change', syncPreQtyUi);
     syncPreQtyUi();
+    function captureBookingFields(){
+      const n = document.getElementById('bookNameInput'); if(n) state.bookingName = n.value;
+      const p = document.getElementById('bookPhoneInput'); if(p) state.bookingPhone = p.value;
+    }
     const addPreItemBtn = document.getElementById('bookAddPreItemBtn');
     if(addPreItemBtn) addPreItemBtn.addEventListener('click', ()=>{
+      captureBookingFields();
       const mid = document.getElementById('bookPreItemSelect').value;
       const qty = document.getElementById('bookPreQtyInput').value;
       addToBookingPreOrder(mid, qty);
     });
     document.querySelectorAll('[data-removepreitem]').forEach(el=>{
-      el.addEventListener('click', ()=> removeFromBookingPreOrder(el.dataset.removepreitem));
+      el.addEventListener('click', ()=>{ captureBookingFields(); removeFromBookingPreOrder(el.dataset.removepreitem); });
     });
 
     const showAddTableBtn = document.getElementById('showAddTableBtn');
