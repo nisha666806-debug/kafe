@@ -334,7 +334,7 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, failed:{}};
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -348,6 +348,7 @@ async function loadAll(){
   await parseField('tables', 'tables');
   await parseField('oshStock', 'oshStock');
   await parseField('accounts', 'accounts');
+  await parseField('inventory', 'inventory');
   return out;
 }
 async function saveMenu(menu){
@@ -376,6 +377,10 @@ async function saveOshStock(data){
 }
 async function saveAccounts(accounts){
   const ok = await fsSet('accounts', JSON.stringify(accounts));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveInventory(inventory){
+  const ok = await fsSet('inventory', JSON.stringify(inventory));
   if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
 }
 
@@ -411,6 +416,10 @@ let state = {
   currentUser:null,         // {username, role}
   loginError:null,
   needsSetup:false,
+  inventory:[],
+  showAddInvForm:false,
+  editingInvId:null,
+  confirmDeleteInvId:null,
   loadError:false,
   setupError:null,
   showAddAccountForm:false,
@@ -485,7 +494,7 @@ function oshOrderedKgToday(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, failed} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, failed} = await loadAll();
 
   // Accounts are load-bearing for login — if we couldn't even confirm whether they exist
   // (network blip etc.), we must NEVER guess "empty" and reseed, or real staff data gets
@@ -530,6 +539,7 @@ async function init(){
     state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
     await saveAccounts(state.accounts);
   }
+  state.inventory = inventory || [];
 
   const session = loadSession();
   if(session){
@@ -578,7 +588,7 @@ async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
   if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
   if(state.formOpen) state.formOpen = false; // safety: don't let a stuck form block sync forever
-  const {menu, orders, settings, reservations, tables, oshStock, accounts} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory} = await loadAll();
   if(menu) state.menu = menu;
   if(orders) state.orders = orders;
   if(settings) state.settings = settings;
@@ -586,6 +596,7 @@ async function pollRefresh(){
   if(tables) state.tables = tables;
   if(oshStock) state.oshStock = oshStock;
   if(accounts) state.accounts = accounts;
+  if(inventory) state.inventory = inventory;
   render();
 }
 
@@ -828,6 +839,45 @@ async function deleteTableConfig(id){
     await saveReservations(state.reservations);
   }
   showToast('Миз нест шуд');
+}
+/* ---------- Inventory (анбор) ---------- */
+async function addInventoryItem(name, unit, qty, unitCost, minThreshold){
+  if(!name){ showToast('Номи маҳсулотро нависед'); return; }
+  const item = {
+    id: uid('inv'), name, unit: unit||'kg',
+    qty: Math.max(0, Number(qty)||0),
+    unitCost: Math.max(0, Number(unitCost)||0),
+    minThreshold: Math.max(0, Number(minThreshold)||0),
+    updatedAt: Date.now()
+  };
+  state.inventory.push(item);
+  await saveInventory(state.inventory);
+  showToast('Маҳсулот ба анбор илова шуд');
+}
+async function updateInventoryItem(id, name, unit, qty, unitCost, minThreshold){
+  const item = state.inventory.find(i=>i.id===id);
+  if(!item) return;
+  item.name = name || item.name;
+  item.unit = unit || item.unit;
+  item.qty = Math.max(0, Number(qty)||0);
+  item.unitCost = Math.max(0, Number(unitCost)||0);
+  item.minThreshold = Math.max(0, Number(minThreshold)||0);
+  item.updatedAt = Date.now();
+  await saveInventory(state.inventory);
+  showToast('Тағйирот сабт шуд');
+}
+async function deleteInventoryItem(id){
+  state.inventory = state.inventory.filter(i=>i.id!==id);
+  await saveInventory(state.inventory);
+  showToast('Маҳсулот аз анбор нест шуд');
+}
+async function adjustInventoryQty(id, delta){
+  const item = state.inventory.find(i=>i.id===id);
+  if(!item) return;
+  item.qty = Math.max(0, (Number(item.qty)||0) + delta);
+  item.updatedAt = Date.now();
+  await saveInventory(state.inventory);
+  showToast(delta>0 ? 'Илова шуд' : 'Кам карда шуд');
 }
 async function addAccount(username, password, role){
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
@@ -2070,6 +2120,7 @@ function renderAdmin(){
   let body = '';
   if(state.adminTab==='tables') body = renderAdminTables();
   else if(state.adminTab==='menu') body = renderAdminMenu();
+  else if(state.adminTab==='inventory') body = renderAdminInventory();
   else if(state.adminTab==='report') body = renderAdminReport();
   else if(state.adminTab==='staff') body = renderAdminStaff();
   else if(state.adminTab==='salary') body = renderAdminSalary();
@@ -2079,6 +2130,7 @@ function renderAdmin(){
   <div class="admin-tabs">
     <button class="admin-tab ${state.adminTab==='tables'?'active':''}" data-atab="tables">Мизҳо</button>
     <button class="admin-tab ${state.adminTab==='menu'?'active':''}" data-atab="menu">Меню</button>
+    <button class="admin-tab ${state.adminTab==='inventory'?'active':''}" data-atab="inventory">Анбор</button>
     <button class="admin-tab ${state.adminTab==='report'?'active':''}" data-atab="report">Ҳисобот</button>
     <button class="admin-tab ${state.adminTab==='staff'?'active':''}" data-atab="staff">Кормандон</button>
     <button class="admin-tab ${state.adminTab==='salary'?'active':''}" data-atab="salary">Маош</button>
@@ -2087,6 +2139,97 @@ function renderAdmin(){
   <div class="container">${body}</div>`;
 }
 
+function renderAdminInventory(){
+  const unitLabel = {kg:'кг', l:'литр', dona:'дона'};
+  const items = [...state.inventory].sort((a,b)=>a.name.localeCompare(b.name));
+  const totalValue = items.reduce((s,i)=>s+(i.qty*i.unitCost),0);
+  const lowStock = items.filter(i=>i.minThreshold>0 && i.qty<i.minThreshold);
+
+  const lowStockHtml = lowStock.length ? `
+    <div class="section-title" style="margin-top:0;color:var(--brick);">⚠️ Маҳсулоти кам монда</div>
+    ${lowStock.map(i=>`
+      <div class="item-row" style="border-color:var(--brick);">
+        <div class="info">
+          <div class="nm">${escapeHtml(i.name)}</div>
+          <div class="cat" style="color:var(--brick);">${i.qty} ${unitLabel[i.unit]||i.unit} монд (ҳадди ҳушдор: ${i.minThreshold} ${unitLabel[i.unit]||i.unit})</div>
+        </div>
+      </div>`).join('')}
+  ` : '';
+
+  const rows = items.map(i=>{
+    const confirming = state.confirmDeleteInvId === i.id;
+    const isLow = i.minThreshold>0 && i.qty<i.minThreshold;
+    const value = i.qty*i.unitCost;
+    return `
+    <div class="item-row" style="${isLow?'border-color:var(--brick);':''}">
+      <div class="info">
+        <div class="nm">${escapeHtml(i.name)} ${isLow?'⚠️':''}</div>
+        <div class="cat">${i.qty} ${unitLabel[i.unit]||i.unit} · ${fmtMoney(i.unitCost)}/${unitLabel[i.unit]||i.unit} · арзиш: ${value.toFixed(1)} смн</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        ${confirming ? `
+          <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+          <button class="icon-btn danger" data-confirmdelinv="${i.id}">Ҳа</button>
+          <button class="icon-btn" data-canceldelinv="${i.id}">Не</button>
+        ` : `
+          <input type="number" id="invqty-${i.id}" value="1" min="0.1" step="0.1" style="width:60px;padding:5px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:12px;">
+          <button class="icon-btn" data-invadd="${i.id}" title="Илова">+</button>
+          <button class="icon-btn" data-invsub="${i.id}" title="Кам кардан">−</button>
+          <button class="icon-btn" data-editinv="${i.id}">✎</button>
+          <button class="icon-btn danger" data-delinv="${i.id}">🗑</button>
+        `}
+      </div>
+    </div>`;
+  }).join('');
+
+  const addFormHtml = state.showAddInvForm ? `
+    <div class="form-box" id="addInvForm">
+      <div class="field"><label>Номи маҳсулот</label><input type="text" id="newInvName" placeholder="масалан: Гӯшти гов"></div>
+      <div class="field"><label>Воҳид</label>
+        <select id="newInvUnit">
+          <option value="kg">Килограм</option>
+          <option value="l">Литр</option>
+          <option value="dona">Дона</option>
+        </select>
+      </div>
+      <div class="field small"><label>Миқдори ҳозира</label><input type="number" id="newInvQty" value="0" min="0" step="0.1"></div>
+      <div class="field small"><label>Нархи харид (як воҳид)</label><input type="number" id="newInvCost" value="0" min="0" step="0.5"></div>
+      <div class="field small"><label>Ҳадди ҳушдор</label><input type="number" id="newInvMin" value="0" min="0" step="0.5"></div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAddInv">Илова кардан</button>
+      <button class="btn-ghost" id="cancelAddInv">Бекор</button>
+    </div>` : `<button class="btn-ghost" style="margin-bottom:14px;" id="showAddInvBtn">+ Иловаи маҳсулот</button>`;
+
+  const editTarget = state.editingInvId ? state.inventory.find(i=>i.id===state.editingInvId) : null;
+  const editFormHtml = editTarget ? `
+    <div class="form-box" id="editInvForm">
+      <div class="field"><label>Номи маҳсулот</label><input type="text" id="editInvName" value="${escapeHtml(editTarget.name)}"></div>
+      <div class="field"><label>Воҳид</label>
+        <select id="editInvUnit">
+          <option value="kg" ${editTarget.unit==='kg'?'selected':''}>Килограм</option>
+          <option value="l" ${editTarget.unit==='l'?'selected':''}>Литр</option>
+          <option value="dona" ${editTarget.unit==='dona'?'selected':''}>Дона</option>
+        </select>
+      </div>
+      <div class="field small"><label>Миқдор</label><input type="number" id="editInvQty" value="${editTarget.qty}" min="0" step="0.1"></div>
+      <div class="field small"><label>Нархи харид</label><input type="number" id="editInvCost" value="${editTarget.unitCost}" min="0" step="0.5"></div>
+      <div class="field small"><label>Ҳадди ҳушдор</label><input type="number" id="editInvMin" value="${editTarget.minThreshold}" min="0" step="0.5"></div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEditInv">Нигоҳ доштан</button>
+      <button class="btn-ghost" id="cancelEditInv">Бекор</button>
+    </div>` : '';
+
+  return `
+    <div class="stat-row">
+      <div class="stat-card"><div class="label">Арзиши умумии анбор</div><div class="value">${totalValue.toFixed(0)} смн</div></div>
+      <div class="stat-card"><div class="label">Намуди маҳсулот</div><div class="value">${items.length}</div></div>
+      <div class="stat-card"><div class="label">Кам монда</div><div class="value" style="color:${lowStock.length?'var(--brick)':'var(--olive)'};">${lowStock.length}</div></div>
+    </div>
+    ${lowStockHtml}
+    <div class="section-title" style="margin-top:24px;">Анбори маҳсулот</div>
+    ${addFormHtml}
+    ${editFormHtml}
+    ${rows || '<div class="empty-state">Анбор холист</div>'}
+  `;
+}
 function renderAdminTables(){
   const occCount = state.orders.filter(o=>o.status==='active').length;
   const reservedNums = Object.keys(state.reservations||{}).map(Number).sort((a,b)=>a-b);
@@ -2652,7 +2795,7 @@ function renderAdminSettings(){
 
 function attachAdminEvents(){
   // keep typing safe from the 6s poll wipe while on tabs with persistent free-typed fields
-  if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings'){
+  if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings' || state.adminTab==='inventory'){
     state.formOpen = true;
     state.formOpenAt = Date.now();
   }
@@ -2662,8 +2805,9 @@ function attachAdminEvents(){
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
       state.confirmClearReport=false;
+      state.showAddInvForm=false; state.editingInvId=null; state.confirmDeleteInvId=null;
       if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
-      if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
+      if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings' || el.dataset.atab==='inventory'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
       render();
     });
   });
@@ -2809,6 +2953,71 @@ function attachAdminEvents(){
       const ok = await updateAccountFn(state.editingAccountId, username, password, role);
       if(ok){ state.editingAccountId=null; state.formOpen=false; }
       render();
+    });
+  }
+
+  if(state.adminTab==='inventory'){
+    const showAddInvBtn = document.getElementById('showAddInvBtn');
+    if(showAddInvBtn) showAddInvBtn.addEventListener('click', ()=>{ state.showAddInvForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    const cancelAddInv = document.getElementById('cancelAddInv');
+    if(cancelAddInv) cancelAddInv.addEventListener('click', ()=>{ state.showAddInvForm=false; state.formOpen=false; render(); });
+    const submitAddInv = document.getElementById('submitAddInv');
+    if(submitAddInv) submitAddInv.addEventListener('click', async ()=>{
+      const name = document.getElementById('newInvName').value.trim();
+      const unit = document.getElementById('newInvUnit').value;
+      const qty = document.getElementById('newInvQty').value;
+      const cost = document.getElementById('newInvCost').value;
+      const min = document.getElementById('newInvMin').value;
+      await addInventoryItem(name, unit, qty, cost, min);
+      state.showAddInvForm=false; state.formOpen=false;
+      render();
+    });
+
+    document.querySelectorAll('[data-editinv]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.editingInvId = el.dataset.editinv; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    });
+    const cancelEditInv = document.getElementById('cancelEditInv');
+    if(cancelEditInv) cancelEditInv.addEventListener('click', ()=>{ state.editingInvId=null; state.formOpen=false; render(); });
+    const submitEditInv = document.getElementById('submitEditInv');
+    if(submitEditInv) submitEditInv.addEventListener('click', async ()=>{
+      const name = document.getElementById('editInvName').value.trim();
+      const unit = document.getElementById('editInvUnit').value;
+      const qty = document.getElementById('editInvQty').value;
+      const cost = document.getElementById('editInvCost').value;
+      const min = document.getElementById('editInvMin').value;
+      await updateInventoryItem(state.editingInvId, name, unit, qty, cost, min);
+      state.editingInvId=null; state.formOpen=false;
+      render();
+    });
+
+    document.querySelectorAll('[data-delinv]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteInvId = el.dataset.delinv; render(); });
+    });
+    document.querySelectorAll('[data-confirmdelinv]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        state.confirmDeleteInvId = null;
+        await deleteInventoryItem(el.dataset.confirmdelinv);
+        render();
+      });
+    });
+    document.querySelectorAll('[data-canceldelinv]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteInvId = null; render(); });
+    });
+    document.querySelectorAll('[data-invadd]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        const input = document.getElementById('invqty-'+el.dataset.invadd);
+        const amt = input ? Number(input.value)||0 : 0;
+        await adjustInventoryQty(el.dataset.invadd, amt);
+        render();
+      });
+    });
+    document.querySelectorAll('[data-invsub]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        const input = document.getElementById('invqty-'+el.dataset.invsub);
+        const amt = input ? Number(input.value)||0 : 0;
+        await adjustInventoryQty(el.dataset.invsub, -amt);
+        render();
+      });
     });
   }
 
