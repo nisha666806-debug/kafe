@@ -30,7 +30,7 @@
     --white:#FFFDF8;
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;}
+  html,body{margin:0;padding:0;overscroll-behavior-y:contain;}
   body{
     background:var(--paper);
     color:var(--ink);
@@ -285,50 +285,69 @@ try{
   db = firebase.firestore();
 }catch(e){ console.error('Firebase init failed', e); }
 
+/* Multi-tenant: ?cafe=<slug> in the URL isolates a new café's data completely.
+   No param (default) keeps using the ORIGINAL flat 'cafeData' collection so the
+   already-running café is never touched by this change. */
+function getCafeId(){
+  try{
+    return (new URLSearchParams(window.location.search).get('cafe') || '').trim().toLowerCase().replace(/[^a-z0-9-]/g,'');
+  }catch(e){ return ''; }
+}
+const CAFE_ID = getCafeId();
+function docRef(key){
+  return CAFE_ID
+    ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
+    : db.collection('cafeData').doc(key);
+}
+
+/* ============ SESSION PERSISTENCE ============
+   Keeps the logged-in user through accidental reloads (pull-to-refresh, phone killing the
+   tab in the background, etc.) so people aren't forced to retype their password constantly. */
+const SESSION_KEY = 'cafeSession_' + (CAFE_ID || 'default');
+function saveSession(user){
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }catch(e){}
+}
+function loadSession(){
+  try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
+}
+function clearSession(){
+  try{ localStorage.removeItem(SESSION_KEY); }catch(e){}
+}
+
+// Returns {ok, value}. ok=true means the read genuinely succeeded — value is either the
+// stored data or null if the document truly does not exist yet. ok=false means the read
+// FAILED (network blip, etc.) — callers must NOT treat this as "empty" or they will
+// overwrite real data with defaults. This distinction is critical: a transient failure
+// must never be allowed to look like "this is a brand new café".
 async function fsGet(key){
   try{
-    const snap = await db.collection('cafeData').doc(key).get();
-    return snap.exists ? snap.data().value : null;
-  }catch(e){ console.error('fsGet failed', key, e); return null; }
+    const snap = await docRef(key).get();
+    return {ok:true, value: snap.exists ? snap.data().value : null};
+  }catch(e){ console.error('fsGet failed', key, e); return {ok:false, value:null}; }
 }
 async function fsSet(key, value){
   try{
-    await db.collection('cafeData').doc(key).set({value, updatedAt: Date.now()});
+    await docRef(key).set({value, updatedAt: Date.now()});
     return true;
   }catch(e){ console.error('fsSet failed', key, e); return false; }
 }
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null};
-  try{
-    const m = await fsGet('menu');
-    out.menu = m ? JSON.parse(m) : null;
-  }catch(e){ out.menu = null; }
-  try{
-    const o = await fsGet('orders');
-    out.orders = o ? JSON.parse(o) : null;
-  }catch(e){ out.orders = null; }
-  try{
-    const s = await fsGet('settings');
-    out.settings = s ? JSON.parse(s) : null;
-  }catch(e){ out.settings = null; }
-  try{
-    const r = await fsGet('reservations');
-    out.reservations = r ? JSON.parse(r) : null;
-  }catch(e){ out.reservations = null; }
-  try{
-    const tb = await fsGet('tables');
-    out.tables = tb ? JSON.parse(tb) : null;
-  }catch(e){ out.tables = null; }
-  try{
-    const os = await fsGet('oshStock');
-    out.oshStock = os ? JSON.parse(os) : null;
-  }catch(e){ out.oshStock = null; }
-  try{
-    const ac = await fsGet('accounts');
-    out.accounts = ac ? JSON.parse(ac) : null;
-  }catch(e){ out.accounts = null; }
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, failed:{}};
+  const parseField = async (key, outKey)=>{
+    const r = await fsGet(key);
+    if(!r.ok){ out.failed[outKey] = true; return; }
+    try{ out[outKey] = r.value ? JSON.parse(r.value) : null; }
+    catch(e){ out.failed[outKey] = true; }
+  };
+  await parseField('menu', 'menu');
+  await parseField('orders', 'orders');
+  await parseField('settings', 'settings');
+  await parseField('reservations', 'reservations');
+  await parseField('tables', 'tables');
+  await parseField('oshStock', 'oshStock');
+  await parseField('accounts', 'accounts');
   return out;
 }
 async function saveMenu(menu){
@@ -391,6 +410,9 @@ let state = {
   accounts:[],              // [{id, username, password, role}]
   currentUser:null,         // {username, role}
   loginError:null,
+  needsSetup:false,
+  loadError:false,
+  setupError:null,
   showAddAccountForm:false,
   editingAccountId:null,
   confirmDeleteAccountId:null,
@@ -402,6 +424,7 @@ let state = {
   editingId:null,
   confirmDeleteId:null,
   confirmResetMenu:false,
+  confirmClearReport:false,
   showAddTableForm:false,
   takeawayOpen:false,
   takeawayItems:{},
@@ -462,25 +485,90 @@ function oshOrderedKgToday(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts} = await loadAll();
-  if(menu && menu.length){ state.menu = menu; } else { state.menu = DEFAULT_MENU; await saveMenu(state.menu); }
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, failed} = await loadAll();
+
+  // Accounts are load-bearing for login — if we couldn't even confirm whether they exist
+  // (network blip etc.), we must NEVER guess "empty" and reseed, or real staff data gets
+  // wiped. Show a retry screen instead and try again — nothing is written either way.
+  if(failed.accounts){
+    state.loadError = true;
+    state.loaded = true;
+    render();
+    return;
+  }
+
+  if(CAFE_ID && (!accounts || !accounts.length)){
+    // confirmed genuinely empty (not a failed read) — brand-new café on this link
+    state.needsSetup = true;
+    state.loaded = true;
+    render();
+    return;
+  }
+
+  state.menu = (menu && menu.length) ? menu : (failed.menu ? [] : DEFAULT_MENU);
+  if(!failed.menu && !(menu && menu.length)) await saveMenu(state.menu);
+
   state.orders = orders || [];
   state.settings = settings || {...DEFAULT_SETTINGS};
   state.reservations = reservations || {};
   state.oshStock = oshStock || {date:'', kg:0};
+
   if(tables && tables.length){
     state.tables = tables;
+  } else if(failed.tables){
+    state.tables = []; // don't guess/overwrite — leave empty locally until next successful sync
   } else {
     const tc = (settings && settings.tableCount) || 8;
     state.tables = Array.from({length:tc}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
     await saveTables(state.tables);
   }
+
   if(accounts && accounts.length){
     state.accounts = accounts;
   } else {
+    // accounts read succeeded (failed.accounts is false, handled above) and is genuinely empty
     state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
     await saveAccounts(state.accounts);
   }
+
+  const session = loadSession();
+  if(session){
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase() && a.password===session.password);
+    if(acc){
+      state.currentUser = {username:acc.username, role:acc.role};
+      state.role = acc.role;
+    } else {
+      clearSession(); // account was deleted or password changed elsewhere — fall back to login
+    }
+  }
+
+  state.loaded = true;
+  render();
+  setInterval(pollRefresh, 6000);
+}
+
+async function submitCafeSetup(cafeName, adminUser, adminPass){
+  if(!cafeName || !adminUser || !adminPass){ state.setupError='Ҳамаи майдонҳоро пур кунед'; render(); return; }
+  state.menu = DEFAULT_MENU.map(m=>({...m}));
+  await saveMenu(state.menu);
+  state.settings = {...DEFAULT_SETTINGS, cafeName};
+  await saveSettings(state.settings);
+  state.tables = Array.from({length:8}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
+  await saveTables(state.tables);
+  state.reservations = {};
+  await saveReservations(state.reservations);
+  state.oshStock = {date:'', kg:0};
+  await saveOshStock(state.oshStock);
+  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
+  state.accounts = [adminAcc];
+  await saveAccounts(state.accounts);
+  state.orders = [];
+
+  state.needsSetup = false;
+  state.setupError = null;
+  state.currentUser = {username:adminAcc.username, role:'admin'};
+  state.role = 'admin';
+  saveSession({username:adminAcc.username, password:adminAcc.password});
   state.loaded = true;
   render();
   setInterval(pollRefresh, 6000);
@@ -881,6 +969,22 @@ function render(){
     app.innerHTML = `<div class="empty-state"><div class="big">☕</div><div class="mono">Бор карда истодааст…</div></div>`;
     return;
   }
+  if(state.loadError){
+    app.innerHTML = `
+    <div class="role-select">
+      <h1>⚠️ Пайваст ноком шуд</h1>
+      <p>Интернет ё Firebase дастрас нест. Барои эҳтиёти маълумот, барнома ҳеҷ чиз наменависад.</p>
+      <button class="btn-primary" style="padding:12px 24px;" id="retryLoadBtn">Кӯшиши дубора</button>
+    </div>`;
+    const btn = document.getElementById('retryLoadBtn');
+    if(btn) btn.addEventListener('click', ()=>{ state.loadError=false; state.loaded=false; init(); });
+    return;
+  }
+  if(state.needsSetup){
+    app.innerHTML = renderCafeSetup();
+    attachCafeSetupEvents();
+    return;
+  }
   if(!state.role){
     app.innerHTML = renderLogin();
     attachLoginEvents();
@@ -969,6 +1073,34 @@ function renderTopbar(){
   </div>`;
 }
 
+function renderCafeSetup(){
+  return `
+  <div class="role-select">
+    <h1>☕ Кафеи нав</h1>
+    <p>Ин линк холист — маълумоти кафеи худро таъин кунед</p>
+    <div class="login-box">
+      <div class="field"><label>Номи кафе</label><input type="text" id="setupCafeName" placeholder="масалан: Оши Форам"></div>
+      <div class="field"><label>Логини Админ</label><input type="text" id="setupAdminUser" placeholder="масалан: admin" autocomplete="username"></div>
+      <div class="field"><label>Пароли Админ</label><input type="password" id="setupAdminPass" autocomplete="new-password"></div>
+      ${state.setupError ? `<div class="login-error">${escapeHtml(state.setupError)}</div>` : ''}
+      <button class="btn-primary" style="padding:12px;" id="setupSubmitBtn">Сохтани кафе</button>
+    </div>
+  </div>`;
+}
+function attachCafeSetupEvents(){
+  const submit = ()=>{
+    const name = (document.getElementById('setupCafeName').value||'').trim();
+    const user = (document.getElementById('setupAdminUser').value||'').trim();
+    const pass = document.getElementById('setupAdminPass').value||'';
+    submitCafeSetup(name, user, pass);
+  };
+  const btn = document.getElementById('setupSubmitBtn');
+  if(btn) btn.addEventListener('click', submit);
+  ['setupCafeName','setupAdminUser','setupAdminPass'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+  });
+}
 function renderLogin(){
   return `
   <div class="role-select">
@@ -991,6 +1123,7 @@ function attachLoginEvents(){
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
+    saveSession({username:acc.username, password:acc.password});
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -1004,6 +1137,7 @@ function attachLoginEvents(){
 function attachCommonEvents(){
   const logoutBtn = document.getElementById('logoutBtn');
   if(logoutBtn) logoutBtn.addEventListener('click', ()=>{
+    clearSession();
     state.role=null; state.currentUser=null; state.activeTable=null; state.formOpen=false;
     state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
     state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
@@ -1660,14 +1794,17 @@ function renderChef(){
     });
   });
   const kgTotal = oshOrderedKgToday();
+  const hasOsh = (o)=> o.items.some(it=>getItemCategory(it)==='Ош');
   const pending = state.orders.filter(o=>{
     if(o.prepared) return false;
+    if(!hasOsh(o)) return false;
     if(o.type==='takeaway') return o.status==='paid';
     if(o.type==='scheduled') return o.status==='active';
     return o.status==='active' && o.sentToKitchen===true;
   }).sort((a,b)=>a.createdAt-b.createdAt);
   const done = state.orders.filter(o=>{
     if(!o.prepared) return false;
+    if(!hasOsh(o)) return false;
     if(o.type==='takeaway') return isToday(o.createdAt);
     if(o.type==='scheduled') return isToday(o.createdAt);
     return o.status==='active' && o.sentToKitchen===true;
@@ -1684,9 +1821,10 @@ function renderChef(){
     const isTakeaway = o.type==='takeaway' || o.table===null;
     const tbl = isTakeaway ? null : state.tables.find(t=>t.id===o.table);
     const title = orderLabel(o);
-    const itemsHtml = o.items.length ? o.items.map(it=>{
-      const cat = getItemCategory(it);
-      const lineClass = cat==='Ош'?'chef-osh-line':'chef-other-line';
+    const oshItems = o.items.filter(it=>getItemCategory(it)==='Ош');
+    const itemsHtml = oshItems.length ? oshItems.map(it=>{
+      const cat = 'Ош';
+      const lineClass = 'chef-osh-line';
       const served = it.servedQty||0;
       const remaining = Math.max(0, it.qty - served);
       const servedLabel = it.unit==='kg'
@@ -2334,6 +2472,12 @@ function renderAdminMenu(){
   `;
 }
 
+async function clearAllReportHistory(){
+  state.orders = state.orders.filter(o=>o.status!=='paid');
+  await saveOrders(state.orders);
+  state.confirmClearReport = false;
+  showToast('Ҳисобот пурра пок карда шуд');
+}
 function renderAdminReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
@@ -2364,7 +2508,18 @@ function renderAdminReport(){
       <div>${fmtMoney(o.total)}</div>
     </div>`).join('') : '';
 
+  const clearControl = state.confirmClearReport ? `
+    <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи чекҳои пардохтшударо (ҳисобот, даромад, комиссияи кормандон барои гузашта) пурра ва бебозгашт нест мекунад. Мизҳои фаъол дахл намеёбанд.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
+        <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
+      </div>
+    </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--brick);border-color:var(--brick);" id="clearReportBtn">🗑 Пок кардани ҳисобот</button>`;
+
   return `
+    ${clearControl}
     <div class="stat-row">
       <div class="stat-card"><div class="label">Даромади имрӯз</div><div class="value">${fmtMoney(revenue)}</div></div>
       <div class="stat-card"><div class="label">💵 Нақд имрӯз</div><div class="value">${fmtMoney(cashToday)}</div></div>
@@ -2506,6 +2661,7 @@ function attachAdminEvents(){
       state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
+      state.confirmClearReport=false;
       if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
       if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
       render();
@@ -2656,6 +2812,18 @@ function attachAdminEvents(){
     });
   }
 
+  if(state.adminTab==='report'){
+    const clearBtn = document.getElementById('clearReportBtn');
+    if(clearBtn) clearBtn.addEventListener('click', ()=>{ state.confirmClearReport=true; render(); });
+    const cancelClearBtn = document.getElementById('cancelClearReportBtn');
+    if(cancelClearBtn) cancelClearBtn.addEventListener('click', ()=>{ state.confirmClearReport=false; render(); });
+    const confirmClearBtn = document.getElementById('confirmClearReportBtn');
+    if(confirmClearBtn) confirmClearBtn.addEventListener('click', async ()=>{
+      await clearAllReportHistory();
+      render();
+    });
+  }
+
   if(state.adminTab==='salary'){
     document.querySelectorAll('.salary-select').forEach(sel=>{
       sel.addEventListener('change', ()=>{
@@ -2773,6 +2941,24 @@ function attachAdminEvents(){
 
 function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+if(CAFE_ID){
+  try{
+    const manifest = {
+      name: 'Кафе', short_name: 'Кафе',
+      start_url: './index.html?cafe=' + encodeURIComponent(CAFE_ID),
+      scope: './', display: 'standalone',
+      background_color: '#0A0806', theme_color: '#0A0806',
+      icons: [
+        {src: new URL('icon-192.png', location.href).href, sizes:'192x192', type:'image/png', purpose:'any maskable'},
+        {src: new URL('icon-512.png', location.href).href, sizes:'512x512', type:'image/png', purpose:'any maskable'}
+      ]
+    };
+    const blob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+    const link = document.querySelector('link[rel="manifest"]');
+    if(link) link.setAttribute('href', URL.createObjectURL(blob));
+  }catch(e){}
 }
 
 init();
