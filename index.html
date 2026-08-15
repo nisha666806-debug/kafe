@@ -558,10 +558,12 @@ async function init(){
   render(); // loading state
   const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, failed} = await loadAll();
 
-  // Accounts are load-bearing for login — if we couldn't even confirm whether they exist
-  // (network blip etc.), we must NEVER guess "empty" and reseed, or real staff data gets
-  // wiped. Show a retry screen instead and try again — nothing is written either way.
-  if(failed.accounts){
+  // EVERY field must load successfully before we touch anything. A failed read must NEVER be
+  // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
+  // inventory data to be silently wiped in the past. If ANY field failed to load (network
+  // blip etc.), show a retry screen and write nothing at all until a full, successful load.
+  const anyFailed = Object.keys(failed).some(k=>failed[k]);
+  if(anyFailed){
     state.loadError = true;
     state.loaded = true;
     render();
@@ -576,18 +578,19 @@ async function init(){
     return;
   }
 
-  state.menu = (menu && menu.length) ? menu : (failed.menu ? [] : DEFAULT_MENU);
-  if(!failed.menu && !(menu && menu.length)) await saveMenu(state.menu);
+  state.menu = (menu && menu.length) ? menu : DEFAULT_MENU;
+  if(!(menu && menu.length)) await saveMenu(state.menu);
 
   state.orders = orders || [];
   state.settings = settings || {...DEFAULT_SETTINGS};
   state.reservations = reservations || {};
   state.oshStock = oshStock || {date:'', kg:0};
+  state.inventory = inventory || [];
+  state.activityLog = activityLog || [];
+  state.bonuses = bonuses || [];
 
   if(tables && tables.length){
     state.tables = tables;
-  } else if(failed.tables){
-    state.tables = []; // don't guess/overwrite — leave empty locally until next successful sync
   } else {
     const tc = (settings && settings.tableCount) || 8;
     state.tables = Array.from({length:tc}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
@@ -597,13 +600,10 @@ async function init(){
   if(accounts && accounts.length){
     state.accounts = accounts;
   } else {
-    // accounts read succeeded (failed.accounts is false, handled above) and is genuinely empty
+    // accounts read succeeded (anyFailed already excluded that) and is genuinely empty
     state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
     await saveAccounts(state.accounts);
   }
-  state.inventory = inventory || [];
-  state.activityLog = activityLog || [];
-  state.bonuses = bonuses || [];
 
   const session = loadSession();
   if(session){
@@ -618,7 +618,7 @@ async function init(){
 
   state.loaded = true;
   render();
-  setInterval(pollRefresh, 6000);
+  setupRealtimeSync();
 }
 
 async function submitCafeSetup(cafeName, adminUser, adminPass){
@@ -645,9 +645,40 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   saveSession({username:adminAcc.username, password:adminAcc.password});
   state.loaded = true;
   render();
-  setInterval(pollRefresh, 6000);
+  setupRealtimeSync();
 }
 
+/* ============ REAL-TIME SYNC ============
+   Uses Firestore's onSnapshot listeners instead of polling — changes on one device now
+   reach every other device almost instantly, not after up to 6 seconds. */
+let __realtimeUnsubs = [];
+function teardownRealtimeSync(){
+  __realtimeUnsubs.forEach(unsub=>{ try{ unsub(); }catch(e){} });
+  __realtimeUnsubs = [];
+}
+function setupRealtimeSync(){
+  teardownRealtimeSync();
+  const fields = [
+    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
+    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
+    ['activityLog','activityLog'], ['bonuses','bonuses']
+  ];
+  fields.forEach(([key, stateKey])=>{
+    try{
+      const unsub = docRef(key).onSnapshot((snap)=>{
+        if(!state.role) return; // don't disturb the login screen while typing
+        if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
+        if(!snap.exists) return;
+        try{
+          const parsed = JSON.parse(snap.data().value);
+          state[stateKey] = parsed;
+          render();
+        }catch(e){}
+      }, (err)=>{ console.error('Realtime listener error for', key, err); });
+      __realtimeUnsubs.push(unsub);
+    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
+  });
+}
 async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
   if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
