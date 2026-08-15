@@ -418,6 +418,8 @@ let state = {
   needsSetup:false,
   inventory:[],
   showAddInvForm:false,
+  recipeDraft:{},
+  menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
   editingInvId:null,
   confirmDeleteInvId:null,
   loadError:false,
@@ -692,7 +694,10 @@ async function saveTicket(sendFlag){
   order.items = items;
   order.total = total;
   order.updatedAt = Date.now();
-  if(sendFlag) order.sentToKitchen = true;
+  if(sendFlag){
+    order.sentToKitchen = true;
+    await deductForOrderDelta(order, items);
+  }
   await saveOrders(state.orders);
   if(isNew && state.reservations && state.reservations[state.activeTable]){
     delete state.reservations[state.activeTable];
@@ -879,6 +884,46 @@ async function adjustInventoryQty(id, delta){
   await saveInventory(state.inventory);
   showToast(delta>0 ? 'Илова шуд' : 'Кам карда шуд');
 }
+/* ---------- Recipe-based automatic inventory deduction ---------- */
+function computeInventoryDeduction(orderItems){
+  const deduction = {};
+  orderItems.forEach(it=>{
+    const menuItem = state.menu.find(m=>m.id===it.menuId);
+    if(!menuItem || !menuItem.recipe || !menuItem.recipe.length) return;
+    const soldAmount = menuItem.unit==='kg' ? (it.qty/1000) : it.qty; // recipe is "per 1kg" or "per 1 dona"
+    menuItem.recipe.forEach(r=>{
+      deduction[r.invId] = (deduction[r.invId]||0) + (Number(r.qty)||0) * soldAmount;
+    });
+  });
+  return deduction;
+}
+async function applyInventoryDeduction(deduction){
+  let changed = false;
+  Object.keys(deduction).forEach(invId=>{
+    const item = state.inventory.find(i=>i.id===invId);
+    if(!item) return;
+    item.qty = Math.max(0, (Number(item.qty)||0) - deduction[invId]);
+    item.updatedAt = Date.now();
+    changed = true;
+  });
+  if(changed) await saveInventory(state.inventory);
+}
+// Deducts only the DELTA vs what was already deducted for this order before (so re-sending
+// an order after adding more items doesn't double-subtract the items already accounted for).
+async function deductForOrderDelta(order, currentItems){
+  const prevMap = order.inventoryDeductedFor || {};
+  const deltaItems = [];
+  currentItems.forEach(it=>{
+    const prevQty = prevMap[it.menuId] || 0;
+    const delta = it.qty - prevQty;
+    if(delta > 0) deltaItems.push({menuId:it.menuId, qty:delta, unit:it.unit});
+  });
+  const deduction = computeInventoryDeduction(deltaItems);
+  await applyInventoryDeduction(deduction);
+  const newMap = {};
+  currentItems.forEach(it=>{ newMap[it.menuId] = it.qty; });
+  order.inventoryDeductedFor = newMap;
+}
 async function addAccount(username, password, role){
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
   if(state.accounts.some(a=>a.username.toLowerCase()===username.toLowerCase())){
@@ -993,15 +1038,15 @@ function getItemCategory(it){
 }
 
 /* ============ ADMIN: MENU CRUD ============ */
-async function addMenuItem(name, price, category, unit){
-  const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona'};
+async function addMenuItem(name, price, category, unit, recipe){
+  const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona', recipe: recipe||[]};
   state.menu.push(item);
   await saveMenu(state.menu);
   showToast('Хӯрок илова шуд');
 }
-async function updateMenuItem(id, name, price, category, unit){
+async function updateMenuItem(id, name, price, category, unit, recipe){
   const item = state.menu.find(m=>m.id===id);
-  if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; }
+  if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; item.recipe = recipe||[]; }
   await saveMenu(state.menu);
   showToast('Тағйирот сабт шуд');
 }
@@ -1409,6 +1454,7 @@ async function submitTakeaway(cashAmount, noncashAmount){
     prepared: false
   };
   state.orders.push(order);
+  await deductForOrderDelta(order, items);
   await saveOrders(state.orders);
   showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
   closeTakeaway();
@@ -1476,6 +1522,7 @@ async function submitScheduled(name, phone, time){
     prepared: false
   };
   state.orders.push(order);
+  await deductForOrderDelta(order, items);
   await saveOrders(state.orders);
   showToast('Фармоиши вақтдор сабт шуд ва ба ошпаз фиристода шуд');
   closeScheduled();
@@ -2572,38 +2619,63 @@ function renderAdminMenu(){
     return `<div class="cat-group"><h3>${escapeHtml(c)}</h3>${rows}</div>`;
   }).join('');
 
+  const invOptions = state.inventory.map(i=>`<option value="${i.id}">${escapeHtml(i.name)} (${i.unit==='kg'?'кг':i.unit==='l'?'литр':'дона'})</option>`).join('');
+  const recipeKeys = Object.keys(state.recipeDraft);
+  const recipeListHtml = recipeKeys.length ? recipeKeys.map(invId=>{
+    const inv = state.inventory.find(i=>i.id===invId);
+    if(!inv) return '';
+    const qty = state.recipeDraft[invId];
+    return `
+    <div class="receipt-line">
+      <span>${escapeHtml(inv.name)}: ${qty} ${inv.unit==='kg'?'кг':inv.unit==='l'?'литр':'дона'}</span>
+      <button class="qty-btn" data-removerecipe="${invId}">✕</button>
+    </div>`;
+  }).join('') : `<div class="receipt-empty" style="padding:6px 0;">— рецепт холист (ками анбор ҳисоб намешавад) —</div>`;
+  const recipePickerHtml = state.inventory.length ? `
+    <div style="width:100%;border-top:1px dashed var(--line);margin-top:12px;padding-top:12px;">
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Рецепт (барои ҳар 1 ${'{{UNITLABEL}}'} — маводи анбор)</label>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+        <div class="field"><label>Маводи анбор</label><select id="recipeInvSelect">${invOptions}</select></div>
+        <div class="field small"><label>Миқдор</label><input type="number" id="recipeQtyInput" value="0.1" min="0.01" step="0.01"></div>
+        <button class="btn-ghost" type="button" id="addRecipeBtn">+ Илова</button>
+      </div>
+      <div style="margin-top:8px;">${recipeListHtml}</div>
+    </div>` : `<p style="font-size:12px;color:#9c8f78;width:100%;">Аввал дар «Анбор» маводи хом илова кунед, то рецепт таъин карда тавонед.</p>`;
+
   const addFormHtml = state.showAddForm ? `
     <div class="form-box" id="addForm">
-      <div class="field"><label>Ном</label><input type="text" id="newName" placeholder="Номи хӯрок"></div>
-      <div class="field small"><label>Нарх (смн)</label><input type="number" id="newPrice" placeholder="0"></div>
-      <div class="field"><label>Категория</label><input type="text" id="newCat" placeholder="масалан: Хӯрок" list="catList">
+      <div class="field"><label>Ном</label><input type="text" id="newName" value="${escapeHtml(state.menuFormDraft.name)}" placeholder="Номи хӯрок"></div>
+      <div class="field small"><label>Нарх (смн)</label><input type="number" id="newPrice" value="${escapeHtml(state.menuFormDraft.price)}" placeholder="0"></div>
+      <div class="field"><label>Категория</label><input type="text" id="newCat" value="${escapeHtml(state.menuFormDraft.cat)}" placeholder="масалан: Хӯрок" list="catList">
         <datalist id="catList">${cats.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
       </div>
       <div class="field"><label>Воҳид</label>
         <select id="newUnit">
-          <option value="dona">Дона / порсия</option>
-          <option value="kg">Кило (вазн)</option>
+          <option value="dona" ${state.menuFormDraft.unit!=='kg'?'selected':''}>Дона / порсия</option>
+          <option value="kg" ${state.menuFormDraft.unit==='kg'?'selected':''}>Кило (вазн)</option>
         </select>
       </div>
-      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAdd">Илова кардан</button>
+      ${recipePickerHtml.replace('{{UNITLABEL}}','дона/кг')}
+      <button class="btn-primary" style="flex:none;padding:9px 18px;margin-top:12px;" id="submitAdd">Илова кардан</button>
       <button class="btn-ghost" id="cancelAdd">Бекор</button>
     </div>` : `<button class="btn-ghost" id="showAddBtn" style="margin-bottom:18px;">+ Иловаи хӯрок</button>`;
 
   const editTarget = state.editingId ? state.menu.find(m=>m.id===state.editingId) : null;
   const editFormHtml = editTarget ? `
     <div class="form-box" id="editForm">
-      <div class="field"><label>Ном</label><input type="text" id="editName" value="${escapeHtml(editTarget.name)}"></div>
-      <div class="field small"><label>Нарх (смн)</label><input type="number" id="editPrice" value="${editTarget.price}"></div>
-      <div class="field"><label>Категория</label><input type="text" id="editCat" value="${escapeHtml(editTarget.category)}" list="catList2">
+      <div class="field"><label>Ном</label><input type="text" id="editName" value="${escapeHtml(state.menuFormDraft.name)}"></div>
+      <div class="field small"><label>Нарх (смн)</label><input type="number" id="editPrice" value="${escapeHtml(state.menuFormDraft.price)}"></div>
+      <div class="field"><label>Категория</label><input type="text" id="editCat" value="${escapeHtml(state.menuFormDraft.cat)}" list="catList2">
         <datalist id="catList2">${cats.map(c=>`<option value="${escapeHtml(c)}">`).join('')}</datalist>
       </div>
       <div class="field"><label>Воҳид</label>
         <select id="editUnit">
-          <option value="dona" ${editTarget.unit!=='kg'?'selected':''}>Дона / порсия</option>
-          <option value="kg" ${editTarget.unit==='kg'?'selected':''}>Кило (вазн)</option>
+          <option value="dona" ${state.menuFormDraft.unit!=='kg'?'selected':''}>Дона / порсия</option>
+          <option value="kg" ${state.menuFormDraft.unit==='kg'?'selected':''}>Кило (вазн)</option>
         </select>
       </div>
-      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEdit">Нигоҳ доштан</button>
+      ${recipePickerHtml.replace('{{UNITLABEL}}','дона/кг')}
+      <button class="btn-primary" style="flex:none;padding:9px 18px;margin-top:12px;" id="submitEdit">Нигоҳ доштан</button>
       <button class="btn-ghost" id="cancelEdit">Бекор</button>
     </div>` : '';
 
@@ -2806,6 +2878,7 @@ function attachAdminEvents(){
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
       state.confirmClearReport=false;
       state.showAddInvForm=false; state.editingInvId=null; state.confirmDeleteInvId=null;
+      state.recipeDraft={}; state.menuFormDraft={name:'', price:'', cat:'', unit:'dona'};
       if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
       if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings' || el.dataset.atab==='inventory'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
       render();
@@ -3065,10 +3138,27 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='menu'){
+    function captureMenuFormFields(prefix){
+      const n = document.getElementById(prefix+'Name'); if(n) state.menuFormDraft.name = n.value;
+      const p = document.getElementById(prefix+'Price'); if(p) state.menuFormDraft.price = p.value;
+      const c = document.getElementById(prefix+'Cat'); if(c) state.menuFormDraft.cat = c.value;
+      const u = document.getElementById(prefix+'Unit'); if(u) state.menuFormDraft.unit = u.value;
+    }
+    const formPrefix = ()=> state.showAddForm ? 'new' : (state.editingId ? 'edit' : 'new');
+
     const showBtn = document.getElementById('showAddBtn');
-    if(showBtn) showBtn.addEventListener('click', ()=>{ state.showAddForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+    if(showBtn) showBtn.addEventListener('click', ()=>{
+      state.showAddForm=true; state.formOpen=true; state.formOpenAt=Date.now();
+      state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'};
+      state.recipeDraft = {};
+      render();
+    });
     const cancelAdd = document.getElementById('cancelAdd');
-    if(cancelAdd) cancelAdd.addEventListener('click', ()=>{ state.showAddForm=false; state.formOpen=false; render(); });
+    if(cancelAdd) cancelAdd.addEventListener('click', ()=>{
+      state.showAddForm=false; state.formOpen=false;
+      state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
+      render();
+    });
     const submitAdd = document.getElementById('submitAdd');
     if(submitAdd) submitAdd.addEventListener('click', async ()=>{
       const name = document.getElementById('newName').value.trim();
@@ -3076,13 +3166,22 @@ function attachAdminEvents(){
       const cat = document.getElementById('newCat').value.trim();
       const unit = document.getElementById('newUnit').value;
       if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
-      await addMenuItem(name, price, cat, unit);
+      const recipe = Object.keys(state.recipeDraft).map(invId=>({invId, qty:state.recipeDraft[invId]}));
+      await addMenuItem(name, price, cat, unit, recipe);
       state.showAddForm=false; state.formOpen=false;
+      state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
       render();
     });
 
     document.querySelectorAll('[data-edit]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.editingId = el.dataset.edit; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
+      el.addEventListener('click', ()=>{
+        const item = state.menu.find(m=>m.id===el.dataset.edit);
+        state.editingId = el.dataset.edit; state.formOpen=true; state.formOpenAt=Date.now();
+        state.menuFormDraft = item ? {name:item.name, price:String(item.price), cat:item.category, unit:item.unit||'dona'} : {name:'',price:'',cat:'',unit:'dona'};
+        state.recipeDraft = {};
+        if(item && item.recipe){ item.recipe.forEach(r=>{ state.recipeDraft[r.invId] = r.qty; }); }
+        render();
+      });
     });
     document.querySelectorAll('[data-del]').forEach(el=>{
       el.addEventListener('click', ()=>{ state.confirmDeleteId = el.dataset.del; render(); });
@@ -3094,7 +3193,11 @@ function attachAdminEvents(){
       el.addEventListener('click', ()=>{ state.confirmDeleteId = null; render(); });
     });
     const cancelEdit = document.getElementById('cancelEdit');
-    if(cancelEdit) cancelEdit.addEventListener('click', ()=>{ state.editingId=null; state.formOpen=false; render(); });
+    if(cancelEdit) cancelEdit.addEventListener('click', ()=>{
+      state.editingId=null; state.formOpen=false;
+      state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
+      render();
+    });
     const submitEdit = document.getElementById('submitEdit');
     if(submitEdit) submitEdit.addEventListener('click', async ()=>{
       const name = document.getElementById('editName').value.trim();
@@ -3102,9 +3205,27 @@ function attachAdminEvents(){
       const cat = document.getElementById('editCat').value.trim();
       const unit = document.getElementById('editUnit').value;
       if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
-      await updateMenuItem(state.editingId, name, price, cat, unit);
+      const recipe = Object.keys(state.recipeDraft).map(invId=>({invId, qty:state.recipeDraft[invId]}));
+      await updateMenuItem(state.editingId, name, price, cat, unit, recipe);
       state.editingId=null; state.formOpen=false;
+      state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
       render();
+    });
+
+    const addRecipeBtn = document.getElementById('addRecipeBtn');
+    if(addRecipeBtn) addRecipeBtn.addEventListener('click', ()=>{
+      captureMenuFormFields(formPrefix());
+      const invId = document.getElementById('recipeInvSelect').value;
+      const qty = Math.max(0.01, Number(document.getElementById('recipeQtyInput').value)||0);
+      if(invId){ state.recipeDraft[invId] = qty; }
+      render();
+    });
+    document.querySelectorAll('[data-removerecipe]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        captureMenuFormFields(formPrefix());
+        delete state.recipeDraft[el.dataset.removerecipe];
+        render();
+      });
     });
   }
 
