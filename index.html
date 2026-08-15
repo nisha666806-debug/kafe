@@ -334,7 +334,7 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, failed:{}};
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -350,6 +350,7 @@ async function loadAll(){
   await parseField('accounts', 'accounts');
   await parseField('inventory', 'inventory');
   await parseField('activityLog', 'activityLog');
+  await parseField('bonuses', 'bonuses');
   return out;
 }
 async function saveMenu(menu){
@@ -393,13 +394,30 @@ async function logActivity(actionText){
   if(state.activityLog.length > 200) state.activityLog = state.activityLog.slice(0, 200);
   await saveActivityLog(state.activityLog);
 }
+async function saveBonuses(bonuses){
+  await fsSet('bonuses', JSON.stringify(bonuses));
+}
+async function giveBonus(username, amount, reason){
+  const amt = Math.max(0, Number(amount)||0);
+  if(!username || amt<=0){ showToast('Кормандро ва маблағро дуруст ворид кунед'); return; }
+  state.bonuses = state.bonuses || [];
+  state.bonuses.unshift({id:uid('bon'), username, amount:amt, reason:reason||'', ts:Date.now(), awardedBy:actingUsername()});
+  await saveBonuses(state.bonuses);
+  await logActivity('Бонус дод ба '+username+': '+fmtMoney(amt)+(reason?' ('+reason+')':''));
+  showToast('Бонус дода шуд');
+}
+async function deleteBonus(id){
+  state.bonuses = (state.bonuses||[]).filter(b=>b.id!==id);
+  await saveBonuses(state.bonuses);
+  showToast('Бонус нест шуд');
+}
 function downloadBackup(){
   const data = {
     exportedAt: new Date().toISOString(),
     cafeName: state.settings.cafeName,
     menu: state.menu, orders: state.orders, settings: state.settings,
     reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
-    accounts: state.accounts, inventory: state.inventory, activityLog: state.activityLog
+    accounts: state.accounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -428,7 +446,8 @@ const DEFAULT_MENU = [
   {id:'m10', name:'Тарбуз', price:12, category:'Мевагиҳо', unit:'kg'},
   {id:'m11', name:'Банан', price:20, category:'Мевагиҳо', unit:'kg'},
 ];
-const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15};
+const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
+  checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0};
 
 /* ============ STATE ============ */
 let state = {
@@ -449,6 +468,9 @@ let state = {
   needsSetup:false,
   inventory:[],
   activityLog:[],
+  bonuses:[],
+  showBonusForm:true,
+  confirmDeleteBonusId:null,
   seenPendingIds:null,
   showAddInvForm:false,
   recipeDraft:{},
@@ -469,6 +491,9 @@ let state = {
   confirmDeleteId:null,
   confirmResetMenu:false,
   confirmClearReport:false,
+  confirmClearChefQueue:false,
+  clientSearchQuery:'',
+  confirmClearLog:false,
   showAddTableForm:false,
   takeawayOpen:false,
   takeawayItems:{},
@@ -529,7 +554,7 @@ function oshOrderedKgToday(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, failed} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, failed} = await loadAll();
 
   // Accounts are load-bearing for login — if we couldn't even confirm whether they exist
   // (network blip etc.), we must NEVER guess "empty" and reseed, or real staff data gets
@@ -576,6 +601,7 @@ async function init(){
   }
   state.inventory = inventory || [];
   state.activityLog = activityLog || [];
+  state.bonuses = bonuses || [];
 
   const session = loadSession();
   if(session){
@@ -624,7 +650,7 @@ async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
   if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
   if(state.formOpen) state.formOpen = false; // safety: don't let a stuck form block sync forever
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses} = await loadAll();
   if(menu) state.menu = menu;
   if(orders) state.orders = orders;
   if(settings) state.settings = settings;
@@ -634,12 +660,24 @@ async function pollRefresh(){
   if(accounts) state.accounts = accounts;
   if(inventory) state.inventory = inventory;
   if(activityLog) state.activityLog = activityLog;
+  if(bonuses) state.bonuses = bonuses;
   render();
 }
 
 /* ============ ORDER HELPERS ============ */
 function activeOrderForTable(t){
   return state.orders.find(o=>o.table===t && o.status==='active');
+}
+// Active dine-in orders whose table id no longer exists in state.tables (e.g. the table was
+// renamed/removed while somehow still holding an order) — these must never be silently counted
+// as "occupied" without showing up as any actual card, which is confusing and looks like a bug.
+function orphanedActiveOrders(){
+  const tableIds = new Set(state.tables.map(t=>t.id));
+  return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && !tableIds.has(o.table));
+}
+function occupiedTableCount(){
+  const tableIds = new Set(state.tables.map(t=>t.id));
+  return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && tableIds.has(o.table)).length;
 }
 function openTable(t){
   const existing = activeOrderForTable(t);
@@ -756,6 +794,27 @@ async function payTicket(cashAmount, noncashAmount){
 }
 function actingUsername(){
   return state.previewUsername || (state.currentUser ? state.currentUser.username : null);
+}
+function isRealAdmin(){
+  return !!(state.currentUser && state.currentUser.role==='admin');
+}
+async function clearChefQueue(){
+  const relevant = state.orders.filter(o=>{
+    if(o.type==='takeaway' || o.type==='scheduled') return isToday(o.createdAt);
+    return o.status==='active';
+  });
+  relevant.forEach(o=>{
+    o.items.forEach(it=>{ if(getItemCategory(it)==='Ош') it.servedQty = 0; });
+    o.prepared = false;
+  });
+  await saveOrders(state.orders);
+  await logActivity('Навбати ошпазро пок кард (ҳама аз сар)');
+  showToast('Навбати ошпаз пок карда шуд');
+}
+async function clearActivityLog(){
+  state.activityLog = [];
+  await logActivity('Журнали амалҳоро пок кард');
+  showToast('Журнали амалҳо пок карда шуд');
 }
 function renderSplitPaymentForm(idPrefix, total){
   return `
@@ -905,6 +964,12 @@ async function deleteTableConfig(id){
   }
   await logActivity('Мизро нест кард: '+(t?t.name:id));
   showToast('Миз нест шуд');
+}
+async function cancelOrphanOrder(id){
+  state.orders = state.orders.filter(o=>o.id!==id);
+  await saveOrders(state.orders);
+  await logActivity('Фармоиши бесоҳибро бекор кард (мизи нест)');
+  showToast('Фармоиш бекор карда шуд');
 }
 /* ---------- Inventory (анбор) ---------- */
 async function addInventoryItem(name, unit, qty, unitCost, minThreshold){
@@ -1078,19 +1143,44 @@ function staffCommissionBreakdown(username, role, scope){
 function staffCommission(username, role, scope){
   return staffCommissionBreakdown(username, role, scope).total;
 }
+function manualBonusSum(username, scope){
+  return (state.bonuses||[]).filter(b=>b.username===username && (scope==='today' ? isToday(b.ts) : isThisMonth(b.ts)))
+    .reduce((s,b)=>s+(Number(b.amount)||0), 0);
+}
+// Automatic bonuses are evaluated live against TODAY's performance only (we don't retroactively
+// re-earn past days), for waiters and cashiers.
+function autoBonusToday(username, role){
+  const empty = {checkCountBonus:0, revenueBonus:0, total:0, orderCount:0, commissionTotal:0};
+  if(role!=='waiter' && role!=='cashier') return empty;
+  const breakdown = staffCommissionBreakdown(username, role, 'today');
+  let checkCountBonus = 0, revenueBonus = 0;
+  const cThresh = Number(state.settings.checkCountBonusThreshold)||0;
+  const cAmt = Number(state.settings.checkCountBonusAmount)||0;
+  if(cThresh>0 && cAmt>0 && breakdown.orderCount > cThresh) checkCountBonus = cAmt;
+  const rThresh = Number(state.settings.revenueBonusThreshold)||0;
+  const rAmt = Number(state.settings.revenueBonusAmount)||0;
+  if(rThresh>0 && rAmt>0 && breakdown.total > rThresh) revenueBonus = rAmt;
+  return {checkCountBonus, revenueBonus, total: checkCountBonus+revenueBonus, orderCount: breakdown.orderCount, commissionTotal: breakdown.total};
+}
 function computeWages(acc){
   if(acc.wageType==='commission'){
+    const auto = autoBonusToday(acc.username, acc.role);
+    const manualToday = manualBonusSum(acc.username, 'today');
+    const manualMonth = manualBonusSum(acc.username, 'month');
     return {
-      daily: staffCommission(acc.username, acc.role, 'today'),
-      monthly: staffCommission(acc.username, acc.role, 'month')
+      daily: staffCommission(acc.username, acc.role, 'today') + auto.total + manualToday,
+      monthly: staffCommission(acc.username, acc.role, 'month') + manualMonth,
+      bonusToday: auto.total + manualToday
     };
   }
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   const amount = Number(acc.wageAmount) || 0;
+  const manualToday = manualBonusSum(acc.username, 'today');
+  const manualMonth = manualBonusSum(acc.username, 'month');
   if(acc.wageType==='monthly'){
-    return {daily: amount/days, monthly: amount};
+    return {daily: amount/days + manualToday, monthly: amount + manualMonth, bonusToday: manualToday};
   }
-  return {daily: amount, monthly: amount*days};
+  return {daily: amount + manualToday, monthly: amount*days + manualMonth, bonusToday: manualToday};
 }
 function formatQtyLabel(it){
   if(it.unit==='kg'){
@@ -1380,7 +1470,7 @@ function attachTableGridEvents(){
 
 /* ---------- Waiter view ---------- */
 function renderWaiter(){
-  const occCount = state.orders.filter(o=>o.status==='active').length;
+  const occCount = occupiedTableCount();
   const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active')
     .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
   const freeTables = state.tables.filter(t=>!activeOrderForTable(t.id));
@@ -1423,7 +1513,7 @@ function attachWaiterEvents(){
 
 /* ---------- Cashier view ---------- */
 function renderCashier(){
-  const occCount = state.orders.filter(o=>o.status==='active').length;
+  const occCount = occupiedTableCount();
   const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) &&
     (!state.currentUser || o.paidBy===state.currentUser.username))
     .sort((a,b)=>b.createdAt-a.createdAt);
@@ -2041,8 +2131,21 @@ function renderChef(){
     state.seenPendingIds = new Set(currentIds);
   }
 
+  const adminClearControl = isRealAdmin() ? (
+    state.confirmClearChefQueue ? `
+    <div class="form-box" style="border-color:var(--brick);margin-bottom:14px;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин прогресси «кашида шуд»-и ҳамаи чекҳои ҳозираро ба сифр мебарорад ва ҳамаро ба навбат бармегардонад — аз сар.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearChefQueueBtn">Ҳа, пок кун</button>
+        <button class="btn-ghost" id="cancelClearChefQueueBtn">Бекор</button>
+      </div>
+    </div>` : `<button class="btn-ghost" style="margin-bottom:14px;color:var(--brick);border-color:var(--brick);" id="clearChefQueueBtn">🧹 Пок кардани навбати ошпаз</button>`
+  ) : '';
+
   return `
   <div class="container">
+    ${adminClearControl}
     <div class="section-title">Захираи ош — фақат шумо мебинед</div>
     <div class="stat-row">
       <div class="stat-card"><div class="label">Ош фармоишшуда (кило)</div><div class="value">${kgTotal.toFixed(2)} кг</div></div>
@@ -2056,6 +2159,16 @@ function renderChef(){
   </div>`;
 }
 function attachChefEvents(){
+  const clearBtn = document.getElementById('clearChefQueueBtn');
+  if(clearBtn) clearBtn.addEventListener('click', ()=>{ state.confirmClearChefQueue=true; render(); });
+  const cancelClearBtn = document.getElementById('cancelClearChefQueueBtn');
+  if(cancelClearBtn) cancelClearBtn.addEventListener('click', ()=>{ state.confirmClearChefQueue=false; render(); });
+  const confirmClearBtn = document.getElementById('confirmClearChefQueueBtn');
+  if(confirmClearBtn) confirmClearBtn.addEventListener('click', async ()=>{
+    state.confirmClearChefQueue=false;
+    await clearChefQueue();
+    render();
+  });
   document.querySelectorAll('[data-toggleprep]').forEach(el=>{
     el.addEventListener('click', async ()=>{
       await toggleOrderPrepared(el.dataset.toggleprep);
@@ -2365,8 +2478,64 @@ function renderAdminInventory(){
     ${rows || '<div class="empty-state">Анбор холист</div>'}
   `;
 }
+function allKnownClients(){
+  const list = [];
+  state.orders.forEach(o=>{
+    if(o.type==='scheduled' && (o.customerName || o.customerPhone)){
+      list.push({
+        name: o.customerName||'', phone: o.customerPhone||'', ts: o.createdAt,
+        source: 'Фармоиши вақтдор', when: o.readyTime||'', items: o.items, total: o.total,
+        statusLabel: o.status==='paid' ? '✅ гирифта шуд' : (o.table ? '🍽 ба миз гузошта шуд' : '⏳ интизор')
+      });
+    }
+  });
+  Object.keys(state.reservations||{}).forEach(tableId=>{
+    const r = state.reservations[tableId];
+    if(!r) return;
+    const tbl = state.tables.find(t=>t.id===Number(tableId));
+    list.push({
+      name: r.name||'', phone: r.phone||'', ts: r.bookedAt||0,
+      source: 'Брони миз', when: tbl?tbl.name:('Мизи '+tableId), items: r.preOrder||[], total: (r.preOrder||[]).reduce((s,it)=>s+lineTotal(it,it.qty),0),
+      statusLabel: '📅 брон фаъол'
+    });
+  });
+  return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
+}
 function renderAdminTables(){
-  const occCount = state.orders.filter(o=>o.status==='active').length;
+  const occCount = occupiedTableCount();
+  const clientQuery = (state.clientSearchQuery||'').trim().toLowerCase();
+  const allClients = allKnownClients();
+  const matchedClients = clientQuery
+    ? allClients.filter(c => c.name.toLowerCase().includes(clientQuery) || (c.phone||'').includes(clientQuery))
+    : allClients.slice(0, 15);
+  const clientSearchResultsHtml = matchedClients.length ? matchedClients.map(c=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${escapeHtml(c.name||'(бе ном)')} ${c.phone?'· 📞 '+escapeHtml(c.phone):''}</div>
+        <div class="l2">${escapeHtml(c.source)} · ${escapeHtml(c.when||'')} ${c.items&&c.items.length?'· '+c.items.map(i=>formatQtyLabel(i)).join(', '):''}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="l2">${c.statusLabel}</div>
+        ${c.total?`<div class="l2">${fmtMoney(c.total)}</div>`:''}
+        <div class="l2">${c.ts?new Date(c.ts).toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'}):''}</div>
+      </div>
+    </div>`).join('') : (clientQuery ? `<p style="font-size:13px;color:#9c8f78;">Ҳеҷ мизоҷе бо ин ном/рақам ёфт нашуд</p>` : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ мизоҷе брон/фармоиши вақтдор надодааст</p>`);
+  const orphans = orphanedActiveOrders();
+  const orphanHtml = orphans.length ? `
+    <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 6px;">⚠️ ${orphans.length} фармоиши бесоҳиб ёфт шуд (ба мизе тааллуқ дорад, ки дигар вуҷуд надорад)</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Барои ин, шумораи «банд» дуруст менамуд, вале дар корти мизҳо намоён намешуд. Онҳоро бекор кунед, то ҳисоб дуруст шавад.</p>
+        ${orphans.map(o=>`
+          <div class="receipt-item-row">
+            <div>
+              <div class="l1">Мизи №${o.table} (нест) — ${fmtMoney(o.total)}</div>
+              <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ') || 'холӣ'}</div>
+            </div>
+            <button class="btn-ghost" style="color:var(--brick);border-color:var(--brick);padding:6px 12px;font-size:12px;" data-cancelorphan="${o.id}">Бекор кардан</button>
+          </div>`).join('')}
+      </div>
+    </div>` : '';
   const reservedNums = Object.keys(state.reservations||{}).map(Number).sort((a,b)=>a-b);
   const freeForBooking = state.tables.filter(tbl=>{
     const occ = !!activeOrderForTable(tbl.id);
@@ -2500,7 +2669,13 @@ function renderAdminTables(){
     </div>
     <div class="section-title">Ҳолати мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед (пардохт танҳо аз ҷониби кассир)</p>
+    ${orphanHtml}
     <div class="table-grid">${buildTableCards()}</div>
+
+    <div class="section-title" style="margin-top:28px;">🔍 Поиски мизоҷон (брон / фармоиши вақтдор)</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Бо ном ё рақами телефон ҷустуҷӯ кунед — ҳамаи мизоҷоне, ки миз брон кардаанд ё фармоиши вақтдор додаанд.</p>
+    <input type="text" id="clientSearchInput" value="${escapeHtml(state.clientSearchQuery)}" placeholder="Ном ё рақами телефон..." style="width:100%;max-width:420px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:14px;">
+    ${clientSearchResultsHtml}
 
     <div class="section-title" style="margin-top:28px;">Номгузорӣ ва ҷои нишасти мизҳо</div>
     ${addTableFormHtml}
@@ -2522,6 +2697,7 @@ function renderAdminSalary(){
     totalMonthly += w.monthly;
     const isCommission = acc.wageType==='commission';
     const canCommission = acc.role==='waiter' || acc.role==='cashier';
+    const bonusNote = w.bonusToday>0 ? `<span style="color:var(--olive);font-weight:700;">+${w.bonusToday.toFixed(1)} смн бонуси имрӯза</span>` : '';
     return `
     <div class="salary-row">
       <div class="salary-name">
@@ -2538,10 +2714,29 @@ function renderAdminSalary(){
       <div class="salary-computed">
         <span>Имрӯз: <b class="mono">${w.daily.toFixed(1)} смн</b></span>
         <span>${isCommission?'Ин моҳ':'Моҳона'}: <b class="mono">${w.monthly.toFixed(1)} смн</b></span>
+        ${bonusNote}
       </div>
       <button class="btn-primary" data-savewage="${acc.id}" style="padding:7px 14px;font-size:12px;flex:none;">Сабт</button>
     </div>`;
   }).join('');
+
+  const staffOptions = state.accounts.map(a=>`<option value="${escapeHtml(a.username)}">${escapeHtml(a.username)} (${roleLabel[a.role]||a.role})</option>`).join('');
+  const bonusHistory = (state.bonuses||[]).slice(0,20);
+  const bonusHistoryHtml = bonusHistory.length ? bonusHistory.map(b=>{
+    const confirming = state.confirmDeleteBonusId===b.id;
+    return `
+    <div class="item-row">
+      <div class="info">
+        <div class="nm">${escapeHtml(b.username)} — ${fmtMoney(b.amount)}</div>
+        <div class="cat">${b.reason?escapeHtml(b.reason)+' · ':''}${new Date(b.ts).toLocaleString('tg-TJ',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})} · аз ${escapeHtml(b.awardedBy||'?')}</div>
+      </div>
+      ${confirming ? `
+        <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+        <button class="icon-btn danger" data-confirmdelbonus="${b.id}">Ҳа</button>
+        <button class="icon-btn" data-canceldelbonus="${b.id}">Не</button>
+      ` : `<button class="icon-btn danger" data-delbonus="${b.id}">🗑</button>`}
+    </div>`;
+  }).join('') : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз бонус дода нашудааст</p>`;
 
   return `
     <div class="section-title">Ҳисоби маоши кормандон</div>
@@ -2556,6 +2751,31 @@ function renderAdminSalary(){
     <div class="stat-row" style="margin-top:20px;">
       <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
     </div>
+
+    <div class="section-title" style="margin-top:32px;">🎁 Бонуси дастӣ</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Ба ҳар корманд, дар вақти дилхоҳ, маблағи иловагӣ (бонус) диҳед — масалан «беҳтарини ҳафта».</p>
+    <div class="form-box">
+      <div class="field"><label>Корманд</label><select id="bonusUserSelect">${staffOptions}</select></div>
+      <div class="field small"><label>Маблағ (смн)</label><input type="number" id="bonusAmountInput" min="1" step="1" placeholder="масалан 50"></div>
+      <div class="field"><label>Сабаб (ихтиёрӣ)</label><input type="text" id="bonusReasonInput" placeholder="масалан: беҳтарини ҳафта"></div>
+      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="giveBonusBtn">Додани бонус</button>
+    </div>
+    ${bonusHistoryHtml}
+
+    <div class="section-title" style="margin-top:32px;">⚡ Бонуси худкор — танзимот</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Барои official/кассир, агар шарт имрӯз иҷро шавад, бонус худкор ба маоши имрӯза илова мешавад. Ҳадди 0 — хомӯш.</p>
+    <div class="form-box">
+      <div class="field small"><label>Ҳадди шумораи чек (дар рӯз)</label><input type="number" id="checkCountThreshInput" value="${state.settings.checkCountBonusThreshold||0}" min="0" step="1"></div>
+      <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="checkCountAmountInput" value="${state.settings.checkCountBonusAmount||0}" min="0" step="1"></div>
+      <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveCheckCountBonusBtn">Сабт</button>
+    </div>
+    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 12px;">Мисол: агар ҳадд 15 бошад — official/кассире, ки имрӯз >15 чек хизмат кунад, бонусро мегирад.</p>
+    <div class="form-box">
+      <div class="field small"><label>Ҳадди даромад/комиссия (смн, дар рӯз)</label><input type="number" id="revenueThreshInput" value="${state.settings.revenueBonusThreshold||0}" min="0" step="1"></div>
+      <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="revenueAmountInput" value="${state.settings.revenueBonusAmount||0}" min="0" step="1"></div>
+      <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveRevenueBonusBtn">Сабт</button>
+    </div>
+    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 0;">Мисол: агар ҳадд 100 бошад — official/кассире, ки комиссияи имрӯзааш аз 100 смн зиёд шавад, бонусро мегирад.</p>
 
     <div class="section-title" style="margin-top:32px;">Ҷадвали тафсилоти имрӯза (комиссионӣ)</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Мисли Умед: чанд чек имрӯз гирифт/пардохт, аз онҳо чанд то ≥500г буд, чанд то камтар — ва маоши имрӯза.</p>
@@ -2680,6 +2900,16 @@ function renderAdminStaff(){
       <div class="l2">${new Date(e.ts).toLocaleString('tg-TJ',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
     </div>`).join('') : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз амале сабт нашудааст</p>`;
 
+  const clearLogControl = state.confirmClearLog ? `
+    <div class="form-box" style="border-color:var(--brick);margin:10px 0;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Тамоми таърихи журнал бебозгашт пок мешавад.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearLogBtn">Ҳа, пок кун</button>
+        <button class="btn-ghost" id="cancelClearLogBtn">Бекор</button>
+      </div>
+    </div>` : `<button class="btn-ghost" style="margin:10px 0 14px;color:var(--brick);border-color:var(--brick);" id="clearLogBtn">🗑 Пок кардани журнал</button>`;
+
   return `
     <div class="section-title">Кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:16px;">Барои ҳар корманд логин ва парол диҳед. Онҳо танҳо ба экрани нақши худ дастрасӣ доранд.</p>
@@ -2689,7 +2919,8 @@ function renderAdminStaff(){
     ${rows}
 
     <div class="section-title" style="margin-top:32px;">📋 Журнали амалҳо</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Кӣ, кай, чӣ тағйир дод (охирин 50 амал).</p>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Кӣ, кай, чӣ тағйир дод (охирин 50 амал).</p>
+    ${clearLogControl}
     ${logHtml}
   `;
 }
@@ -2994,6 +3225,8 @@ function attachAdminEvents(){
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
       state.confirmClearReport=false;
       state.showAddInvForm=false; state.editingInvId=null; state.confirmDeleteInvId=null;
+      state.confirmDeleteBonusId=null;
+      state.confirmClearLog=false;
       state.recipeDraft={}; state.menuFormDraft={name:'', price:'', cat:'', unit:'dona'};
       if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
       if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings' || el.dataset.atab==='inventory'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
@@ -3003,6 +3236,22 @@ function attachAdminEvents(){
 
   if(state.adminTab==='tables'){
     attachTableGridEvents();
+    const clientSearchInput = document.getElementById('clientSearchInput');
+    if(clientSearchInput){
+      clientSearchInput.addEventListener('input', ()=>{
+        state.clientSearchQuery = clientSearchInput.value;
+        render();
+        // restore focus + caret since render() rebuilds the input from scratch
+        const el = document.getElementById('clientSearchInput');
+        if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
+      });
+    }
+    document.querySelectorAll('[data-cancelorphan]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        await cancelOrphanOrder(el.dataset.cancelorphan);
+        render();
+      });
+    });
     document.querySelectorAll('[data-previewrole]').forEach(el=>{
       el.addEventListener('click', ()=>{
         const role = el.dataset.previewrole;
@@ -3102,6 +3351,16 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='staff'){
+    const clearLogBtn = document.getElementById('clearLogBtn');
+    if(clearLogBtn) clearLogBtn.addEventListener('click', ()=>{ state.confirmClearLog=true; render(); });
+    const cancelClearLogBtn = document.getElementById('cancelClearLogBtn');
+    if(cancelClearLogBtn) cancelClearLogBtn.addEventListener('click', ()=>{ state.confirmClearLog=false; render(); });
+    const confirmClearLogBtn = document.getElementById('confirmClearLogBtn');
+    if(confirmClearLogBtn) confirmClearLogBtn.addEventListener('click', async ()=>{
+      state.confirmClearLog=false;
+      await clearActivityLog();
+      render();
+    });
     const showAddAccountBtn = document.getElementById('showAddAccountBtn');
     if(showAddAccountBtn) showAddAccountBtn.addEventListener('click', ()=>{ state.showAddAccountForm=true; state.formOpen=true; state.formOpenAt=Date.now(); render(); });
     const cancelAddAccount = document.getElementById('cancelAddAccount');
@@ -3247,6 +3506,45 @@ function attachAdminEvents(){
     if(saveWorkDaysBtn) saveWorkDaysBtn.addEventListener('click', async ()=>{
       const days = Math.max(1, Math.min(31, Number(document.getElementById('workDaysInput').value) || 30));
       state.settings = {...state.settings, workDaysPerMonth: days};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+    const giveBonusBtn = document.getElementById('giveBonusBtn');
+    if(giveBonusBtn) giveBonusBtn.addEventListener('click', async ()=>{
+      const username = document.getElementById('bonusUserSelect').value;
+      const amount = document.getElementById('bonusAmountInput').value;
+      const reason = document.getElementById('bonusReasonInput').value.trim();
+      await giveBonus(username, amount, reason);
+      render();
+    });
+    document.querySelectorAll('[data-delbonus]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteBonusId = el.dataset.delbonus; render(); });
+    });
+    document.querySelectorAll('[data-confirmdelbonus]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        state.confirmDeleteBonusId = null;
+        await deleteBonus(el.dataset.confirmdelbonus);
+        render();
+      });
+    });
+    document.querySelectorAll('[data-canceldelbonus]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteBonusId = null; render(); });
+    });
+    const saveCheckCountBonusBtn = document.getElementById('saveCheckCountBonusBtn');
+    if(saveCheckCountBonusBtn) saveCheckCountBonusBtn.addEventListener('click', async ()=>{
+      const thresh = Math.max(0, Number(document.getElementById('checkCountThreshInput').value)||0);
+      const amt = Math.max(0, Number(document.getElementById('checkCountAmountInput').value)||0);
+      state.settings = {...state.settings, checkCountBonusThreshold: thresh, checkCountBonusAmount: amt};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+    const saveRevenueBonusBtn = document.getElementById('saveRevenueBonusBtn');
+    if(saveRevenueBonusBtn) saveRevenueBonusBtn.addEventListener('click', async ()=>{
+      const thresh = Math.max(0, Number(document.getElementById('revenueThreshInput').value)||0);
+      const amt = Math.max(0, Number(document.getElementById('revenueAmountInput').value)||0);
+      state.settings = {...state.settings, revenueBonusThreshold: thresh, revenueBonusAmount: amt};
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
