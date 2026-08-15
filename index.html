@@ -334,7 +334,7 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, failed:{}};
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -349,6 +349,7 @@ async function loadAll(){
   await parseField('oshStock', 'oshStock');
   await parseField('accounts', 'accounts');
   await parseField('inventory', 'inventory');
+  await parseField('activityLog', 'activityLog');
   return out;
 }
 async function saveMenu(menu){
@@ -383,6 +384,36 @@ async function saveInventory(inventory){
   const ok = await fsSet('inventory', JSON.stringify(inventory));
   if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
 }
+async function saveActivityLog(log){
+  await fsSet('activityLog', JSON.stringify(log));
+}
+async function logActivity(actionText){
+  state.activityLog = state.activityLog || [];
+  state.activityLog.unshift({ts: Date.now(), user: actingUsername()||'?', action: actionText});
+  if(state.activityLog.length > 200) state.activityLog = state.activityLog.slice(0, 200);
+  await saveActivityLog(state.activityLog);
+}
+function downloadBackup(){
+  const data = {
+    exportedAt: new Date().toISOString(),
+    cafeName: state.settings.cafeName,
+    menu: state.menu, orders: state.orders, settings: state.settings,
+    reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
+    accounts: state.accounts, inventory: state.inventory, activityLog: state.activityLog
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const d = new Date();
+  const dateStr = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  a.href = url;
+  a.download = 'kafe-backup-'+dateStr+'.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 5000);
+  showToast('Файли захиравӣ боргирӣ шуд');
+}
 
 const DEFAULT_MENU = [
   {id:'m1', name:'Оши палов (порсия)', price:25, category:'Ош', unit:'dona'},
@@ -397,7 +428,7 @@ const DEFAULT_MENU = [
   {id:'m10', name:'Тарбуз', price:12, category:'Мевагиҳо', unit:'kg'},
   {id:'m11', name:'Банан', price:20, category:'Мевагиҳо', unit:'kg'},
 ];
-const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120};
+const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15};
 
 /* ============ STATE ============ */
 let state = {
@@ -417,6 +448,8 @@ let state = {
   loginError:null,
   needsSetup:false,
   inventory:[],
+  activityLog:[],
+  seenPendingIds:null,
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -496,7 +529,7 @@ function oshOrderedKgToday(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, failed} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, failed} = await loadAll();
 
   // Accounts are load-bearing for login — if we couldn't even confirm whether they exist
   // (network blip etc.), we must NEVER guess "empty" and reseed, or real staff data gets
@@ -542,6 +575,7 @@ async function init(){
     await saveAccounts(state.accounts);
   }
   state.inventory = inventory || [];
+  state.activityLog = activityLog || [];
 
   const session = loadSession();
   if(session){
@@ -590,7 +624,7 @@ async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
   if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
   if(state.formOpen) state.formOpen = false; // safety: don't let a stuck form block sync forever
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog} = await loadAll();
   if(menu) state.menu = menu;
   if(orders) state.orders = orders;
   if(settings) state.settings = settings;
@@ -599,6 +633,7 @@ async function pollRefresh(){
   if(oshStock) state.oshStock = oshStock;
   if(accounts) state.accounts = accounts;
   if(inventory) state.inventory = inventory;
+  if(activityLog) state.activityLog = activityLog;
   render();
 }
 
@@ -782,6 +817,27 @@ function paymentMethodLabel(o){
   if(s.noncash>0) return '💳 ғайринақд';
   return '—';
 }
+let __alertAudioCtx = null;
+function playChefAlertSound(){
+  try{
+    __alertAudioCtx = __alertAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = __alertAudioCtx;
+    if(ctx.state==='suspended') ctx.resume().catch(()=>{});
+    const now = ctx.currentTime;
+    [0, 0.18].forEach(offset=>{
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, now+offset);
+      gain.gain.exponentialRampToValueAtTime(0.25, now+offset+0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now+offset+0.16);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(now+offset);
+      osc.stop(now+offset+0.18);
+    });
+  }catch(e){}
+}
 function orderLabel(o){
   if(o.type==='takeaway') return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?');
   if(o.type==='scheduled') return '🕐 '+(o.readyTime||'?')+' — '+(o.customerName||'мизожон');
@@ -825,24 +881,29 @@ function preOrderSummary(reservation){
 }
 async function addTableConfig(name, seats, assignedTo){
   const newId = state.tables.length ? Math.max(...state.tables.map(t=>t.id))+1 : 1;
-  state.tables.push({id:newId, name: name || ('Мизи '+newId), seats: Math.max(1, Number(seats)||4), assignedTo: assignedTo||null});
+  const finalName = name || ('Мизи '+newId);
+  state.tables.push({id:newId, name: finalName, seats: Math.max(1, Number(seats)||4), assignedTo: assignedTo||null});
   await saveTables(state.tables);
+  await logActivity('Мизи нав илова кард: '+finalName);
   showToast('Миз илова шуд');
 }
 async function updateTableConfig(id, name, seats, assignedTo){
   const t = state.tables.find(x=>x.id===id);
   if(t){ t.name = name || t.name; t.seats = Math.max(1, Number(seats)||4); t.assignedTo = assignedTo||null; }
   await saveTables(state.tables);
+  await logActivity('Мизро тағйир дод: '+(t?t.name:id));
   showToast('Тағйирот сабт шуд');
 }
 async function deleteTableConfig(id){
   if(activeOrderForTable(id)){ showToast('Аввал чеки ин мизро пӯшонед'); return; }
+  const t = state.tables.find(x=>x.id===id);
   state.tables = state.tables.filter(t=>t.id!==id);
   await saveTables(state.tables);
   if(state.reservations && state.reservations[id]){
     delete state.reservations[id];
     await saveReservations(state.reservations);
   }
+  await logActivity('Мизро нест кард: '+(t?t.name:id));
   showToast('Миз нест шуд');
 }
 /* ---------- Inventory (анбор) ---------- */
@@ -857,6 +918,7 @@ async function addInventoryItem(name, unit, qty, unitCost, minThreshold){
   };
   state.inventory.push(item);
   await saveInventory(state.inventory);
+  await logActivity('Ба анбор илова кард: '+name);
   showToast('Маҳсулот ба анбор илова шуд');
 }
 async function updateInventoryItem(id, name, unit, qty, unitCost, minThreshold){
@@ -869,11 +931,14 @@ async function updateInventoryItem(id, name, unit, qty, unitCost, minThreshold){
   item.minThreshold = Math.max(0, Number(minThreshold)||0);
   item.updatedAt = Date.now();
   await saveInventory(state.inventory);
+  await logActivity('Маҳсулоти анборро тағйир дод: '+item.name);
   showToast('Тағйирот сабт шуд');
 }
 async function deleteInventoryItem(id){
+  const item = state.inventory.find(i=>i.id===id);
   state.inventory = state.inventory.filter(i=>i.id!==id);
   await saveInventory(state.inventory);
+  await logActivity('Аз анбор нест кард: '+(item?item.name:id));
   showToast('Маҳсулот аз анбор нест шуд');
 }
 async function adjustInventoryQty(id, delta){
@@ -882,6 +947,7 @@ async function adjustInventoryQty(id, delta){
   item.qty = Math.max(0, (Number(item.qty)||0) + delta);
   item.updatedAt = Date.now();
   await saveInventory(state.inventory);
+  await logActivity((delta>0?'Ба анбор илова кард ':'Аз анбор кам кард ')+Math.abs(delta)+' '+(item.unit==='kg'?'кг':item.unit==='l'?'литр':'дона')+' '+item.name);
   showToast(delta>0 ? 'Илова шуд' : 'Кам карда шуд');
 }
 /* ---------- Recipe-based automatic inventory deduction ---------- */
@@ -932,6 +998,7 @@ async function addAccount(username, password, role){
   const id = 'acc_'+Date.now()+'_'+Math.floor(Math.random()*1000);
   state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
+  await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
   return true;
 }
@@ -947,6 +1014,7 @@ async function updateAccountFn(id, username, password, role){
   }
   acc.username=username; acc.password=password; acc.role=role;
   await saveAccounts(state.accounts);
+  await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
   return true;
 }
@@ -957,6 +1025,7 @@ async function deleteAccount(id){
   }
   state.accounts = state.accounts.filter(a=>a.id!==id);
   await saveAccounts(state.accounts);
+  await logActivity('Кормандро нест кард: '+(acc?acc.username:id));
   showToast('Корманд нест шуд');
 }
 async function saveWage(id, wageType, wageAmount){
@@ -1042,17 +1111,21 @@ async function addMenuItem(name, price, category, unit, recipe){
   const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona', recipe: recipe||[]};
   state.menu.push(item);
   await saveMenu(state.menu);
+  await logActivity('Хӯроки нав илова кард: '+name);
   showToast('Хӯрок илова шуд');
 }
 async function updateMenuItem(id, name, price, category, unit, recipe){
   const item = state.menu.find(m=>m.id===id);
   if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; item.recipe = recipe||[]; }
   await saveMenu(state.menu);
+  await logActivity('Хӯрокро тағйир дод: '+name);
   showToast('Тағйирот сабт шуд');
 }
 async function deleteMenuItem(id){
+  const item = state.menu.find(m=>m.id===id);
   state.menu = state.menu.filter(m=>m.id!==id);
   await saveMenu(state.menu);
+  await logActivity('Хӯрокро нест кард: '+(item?item.name:id));
   showToast('Хӯрок нест шуд');
   render();
 }
@@ -1265,6 +1338,9 @@ function buildTableCards(){
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
+      const mins = Math.floor((Date.now()-order.createdAt)/60000);
+      const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
+      extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${elapsedLabel}</span>`;
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
         extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
       }
@@ -1918,6 +1994,8 @@ function renderChef(){
     const isTakeaway = o.type==='takeaway' || o.table===null;
     const tbl = isTakeaway ? null : state.tables.find(t=>t.id===o.table);
     const title = orderLabel(o);
+    const ageMin = Math.floor((Date.now()-o.createdAt)/60000);
+    const isDelayed = !isDone && ageMin >= (state.settings.delayWarnMinutes||15);
     const oshItems = o.items.filter(it=>getItemCategory(it)==='Ош');
     const itemsHtml = oshItems.length ? oshItems.map(it=>{
       const cat = 'Ош';
@@ -1944,14 +2022,24 @@ function renderChef(){
       return `<div class="${lineClass}">${formatQtyLabel(it)}</div>${progressLine}${controlHtml}`;
     }).join('') : `<div class="receipt-empty">холӣ</div>`;
     return `
-    <div class="receipt" style="margin:0 0 14px;${isDone?'opacity:.55;':''}">
-      <div class="receipt-title">${escapeHtml(title)}</div>
+    <div class="receipt" style="margin:0 0 14px;${isDone?'opacity:.55;':''}${isDelayed?'border-color:var(--brick);box-shadow:0 0 0 2px var(--brick);':''}">
+      <div class="receipt-title" style="${isDelayed?'color:var(--brick);':''}">${escapeHtml(title)}${isDelayed?` · ⏰ ${ageMin} дақ дер`:''}</div>
       ${itemsHtml}
       <div style="margin-top:10px;">
         <button class="${isDone?'btn-ghost':'btn-primary'}" style="padding:8px 16px;font-size:12px;" data-toggleprep="${o.id}">${isDone?'Бозгашт ба навбат':'Тайёр шуд'}</button>
       </div>
     </div>`;
   };
+
+  // Play a short alert sound when a genuinely new order enters the pending queue.
+  const currentIds = pending.map(o=>o.id);
+  if(state.seenPendingIds === null){
+    state.seenPendingIds = new Set(currentIds); // first render: don't beep for pre-existing orders
+  } else {
+    const isNewArrival = currentIds.some(id=>!state.seenPendingIds.has(id));
+    if(isNewArrival) playChefAlertSound();
+    state.seenPendingIds = new Set(currentIds);
+  }
 
   return `
   <div class="container">
@@ -2582,6 +2670,16 @@ function renderAdminStaff(){
   const defaultPwWarning = state.accounts.some(a=>a.username==='admin' && a.password==='admin123')
     ? `<p style="font-size:12px;color:var(--brick);font-weight:600;margin:-8px 0 16px;">⚠️ Пароли пешфарзи «admin»-ро ҳатман иваз кунед!</p>` : '';
 
+  const logEntries = (state.activityLog||[]).slice(0, 50);
+  const logHtml = logEntries.length ? logEntries.map(e=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${escapeHtml(e.user)}</div>
+        <div class="l2">${escapeHtml(e.action)}</div>
+      </div>
+      <div class="l2">${new Date(e.ts).toLocaleString('tg-TJ',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>
+    </div>`).join('') : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз амале сабт нашудааст</p>`;
+
   return `
     <div class="section-title">Кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:16px;">Барои ҳар корманд логин ва парол диҳед. Онҳо танҳо ба экрани нақши худ дастрасӣ доранд.</p>
@@ -2589,6 +2687,10 @@ function renderAdminStaff(){
     ${addForm}
     ${editForm}
     ${rows}
+
+    <div class="section-title" style="margin-top:32px;">📋 Журнали амалҳо</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Кӣ, кай, чӣ тағйир дод (охирин 50 амал).</p>
+    ${logHtml}
   `;
 }
 
@@ -2834,6 +2936,12 @@ function renderAdminSettings(){
   </div>
   <p style="font-size:12px;color:#9c8f78;max-width:340px;">Барои иловаи миз, тағйири ном ё ҷои нишаст — ба варақаи «Мизҳо» гузаред.</p>
 
+  <div class="section-title" style="margin-top:32px;">Захираи эҳтиётӣ</div>
+  <div class="settings-form">
+    <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Файли пурраи маълумоти кафе (меню, кормандон, анбор, таърих)-ро ба дастгоҳи худ боргирӣ кунед — барои эҳтиёт.</p>
+    <button class="btn-ghost" style="flex:none;padding:10px 20px;align-self:flex-start;" id="downloadBackupBtn">📤 Захира гирифтан (JSON)</button>
+  </div>
+
   <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза</div>
   <div class="settings-form">
     <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Миқдори кг оше, ки имрӯз пухта шуд — ба ҳама (официант, кассир, ошпаз) нишон дода мешавад.</p>
@@ -2850,6 +2958,14 @@ function renderAdminSettings(){
     </div>
     <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Барои ҳисоби «оши боқимонда» — фармоишҳои порсиягӣ низ ба вазн табдил ёфта, ба ҳисоби умумии кг илова мешаванд.</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="savePorsiyaGramsBtn">Сабт кардан</button>
+  </div>
+  <div class="settings-form" style="margin-top:18px;">
+    <div class="field">
+      <label>Огоҳии дершавӣ (дақиқа)</label>
+      <input type="number" id="delayWarnInput" value="${state.settings.delayWarnMinutes||15}" min="1" step="1" style="width:120px;">
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Агар фармоише зиёда аз ин муддат дар навбати Ошпаз бимонад, картаи он бо ранги сурх огоҳ медиҳад.</p>
+    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveDelayWarnBtn">Сабт кардан</button>
   </div>
 
   <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
@@ -3242,6 +3358,8 @@ function attachAdminEvents(){
     if(resetBtn) resetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = true; render(); });
     const cancelResetBtn = document.getElementById('cancelResetBtn');
     if(cancelResetBtn) cancelResetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = false; render(); });
+    const downloadBackupBtn = document.getElementById('downloadBackupBtn');
+    if(downloadBackupBtn) downloadBackupBtn.addEventListener('click', downloadBackup);
     const saveOshBtn = document.getElementById('saveOshStockBtn');
     if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
       const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
@@ -3254,6 +3372,14 @@ function attachAdminEvents(){
     if(savePorsiyaBtn) savePorsiyaBtn.addEventListener('click', async ()=>{
       const g = Math.max(1, Number(document.getElementById('porsiyaGramsInput').value) || 120);
       state.settings = {...state.settings, porsiyaGrams: g};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+    const saveDelayWarnBtn = document.getElementById('saveDelayWarnBtn');
+    if(saveDelayWarnBtn) saveDelayWarnBtn.addEventListener('click', async ()=>{
+      const m = Math.max(1, Number(document.getElementById('delayWarnInput').value) || 15);
+      state.settings = {...state.settings, delayWarnMinutes: m};
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
