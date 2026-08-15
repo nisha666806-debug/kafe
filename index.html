@@ -656,6 +656,15 @@ function teardownRealtimeSync(){
   __realtimeUnsubs.forEach(unsub=>{ try{ unsub(); }catch(e){} });
   __realtimeUnsubs = [];
 }
+// Only defer a redraw while the person's cursor is literally inside a text field / select
+// right now — far more precise than a blanket "form is open" timer, and it means every OTHER
+// screen (or the same screen once you click away) stays truly real-time.
+function isActivelyEditingFormField(){
+  const el = document.activeElement;
+  if(!el) return false;
+  const tag = (el.tagName||'').toUpperCase();
+  return tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT';
+}
 function setupRealtimeSync(){
   teardownRealtimeSync();
   const fields = [
@@ -667,12 +676,14 @@ function setupRealtimeSync(){
     try{
       const unsub = docRef(key).onSnapshot((snap)=>{
         if(!state.role) return; // don't disturb the login screen while typing
-        if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
         if(!snap.exists) return;
         try{
           const parsed = JSON.parse(snap.data().value);
+          // Always keep the in-memory data fresh so it's instantly correct the moment any
+          // open form closes. Only the actual screen REDRAW is held back while someone's
+          // cursor is inside a field right now — never delays what other devices see.
           state[stateKey] = parsed;
-          render();
+          if(!isActivelyEditingFormField()) render();
         }catch(e){}
       }, (err)=>{ console.error('Realtime listener error for', key, err); });
       __realtimeUnsubs.push(unsub);
@@ -3791,23 +3802,14 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
-if(CAFE_ID){
-  try{
-    const manifest = {
-      name: 'Кафе', short_name: 'Кафе',
-      start_url: './index.html?cafe=' + encodeURIComponent(CAFE_ID),
-      scope: './', display: 'standalone',
-      background_color: '#0A0806', theme_color: '#0A0806',
-      icons: [
-        {src: new URL('icon-192.png', location.href).href, sizes:'192x192', type:'image/png', purpose:'any maskable'},
-        {src: new URL('icon-512.png', location.href).href, sizes:'512x512', type:'image/png', purpose:'any maskable'}
-      ]
-    };
-    const blob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
-    const link = document.querySelector('link[rel="manifest"]');
-    if(link) link.setAttribute('href', URL.createObjectURL(blob));
-  }catch(e){}
-}
+// Catch up on any real-time data that arrived while a field had focus: the moment focus
+// leaves an input/select/textarea (and doesn't immediately land on another one), redraw once
+// so the screen reflects whatever came in while it was deferred.
+document.addEventListener('focusout', ()=>{
+  setTimeout(()=>{
+    if(state.role && !isActivelyEditingFormField()) render();
+  }, 50);
+}, true);
 
 init();
 
