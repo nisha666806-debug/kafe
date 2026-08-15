@@ -493,6 +493,7 @@ let state = {
   confirmClearReport:false,
   confirmClearChefQueue:false,
   clientSearchQuery:'',
+  confirmDeleteClientKey:null,
   confirmClearLog:false,
   showAddTableForm:false,
   takeawayOpen:false,
@@ -2367,6 +2368,7 @@ function attachTicketEvents(){
 function renderAdmin(){
   let body = '';
   if(state.adminTab==='tables') body = renderAdminTables();
+  else if(state.adminTab==='orders') body = renderAdminOrders();
   else if(state.adminTab==='menu') body = renderAdminMenu();
   else if(state.adminTab==='inventory') body = renderAdminInventory();
   else if(state.adminTab==='report') body = renderAdminReport();
@@ -2377,6 +2379,7 @@ function renderAdmin(){
   return `
   <div class="admin-tabs">
     <button class="admin-tab ${state.adminTab==='tables'?'active':''}" data-atab="tables">Мизҳо</button>
+    <button class="admin-tab ${state.adminTab==='orders'?'active':''}" data-atab="orders">Фармоишҳо</button>
     <button class="admin-tab ${state.adminTab==='menu'?'active':''}" data-atab="menu">Меню</button>
     <button class="admin-tab ${state.adminTab==='inventory'?'active':''}" data-atab="inventory">Анбор</button>
     <button class="admin-tab ${state.adminTab==='report'?'active':''}" data-atab="report">Ҳисобот</button>
@@ -2483,6 +2486,7 @@ function allKnownClients(){
   state.orders.forEach(o=>{
     if(o.type==='scheduled' && (o.customerName || o.customerPhone)){
       list.push({
+        key: 'sched:'+o.id, delType: 'scheduled', delId: o.id,
         name: o.customerName||'', phone: o.customerPhone||'', ts: o.createdAt,
         source: 'Фармоиши вақтдор', when: o.readyTime||'', items: o.items, total: o.total,
         statusLabel: o.status==='paid' ? '✅ гирифта шуд' : (o.table ? '🍽 ба миз гузошта шуд' : '⏳ интизор')
@@ -2494,6 +2498,7 @@ function allKnownClients(){
     if(!r) return;
     const tbl = state.tables.find(t=>t.id===Number(tableId));
     list.push({
+      key: 'resv:'+tableId, delType: 'reservation', delId: tableId,
       name: r.name||'', phone: r.phone||'', ts: r.bookedAt||0,
       source: 'Брони миз', when: tbl?tbl.name:('Мизи '+tableId), items: r.preOrder||[], total: (r.preOrder||[]).reduce((s,it)=>s+lineTotal(it,it.qty),0),
       statusLabel: '📅 брон фаъол'
@@ -2501,25 +2506,62 @@ function allKnownClients(){
   });
   return list.sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
-function renderAdminTables(){
-  const occCount = occupiedTableCount();
+async function deleteClientRecord(delType, delId){
+  if(delType==='scheduled'){
+    const o = state.orders.find(x=>x.id===delId);
+    state.orders = state.orders.filter(x=>x.id!==delId);
+    await saveOrders(state.orders);
+    await logActivity('Сабти мизоҷро нест кард: '+(o?o.customerName:delId));
+  } else if(delType==='reservation'){
+    const r = state.reservations[delId];
+    delete state.reservations[delId];
+    await saveReservations(state.reservations);
+    await logActivity('Брони мизро нест кард: '+(r?r.name:delId));
+  }
+  showToast('Сабт нест шуд');
+}
+function renderAdminOrders(){
   const clientQuery = (state.clientSearchQuery||'').trim().toLowerCase();
   const allClients = allKnownClients();
   const matchedClients = clientQuery
     ? allClients.filter(c => c.name.toLowerCase().includes(clientQuery) || (c.phone||'').includes(clientQuery))
-    : allClients.slice(0, 15);
-  const clientSearchResultsHtml = matchedClients.length ? matchedClients.map(c=>`
+    : allClients;
+  const rowsHtml = matchedClients.length ? matchedClients.map(c=>{
+    const confirming = state.confirmDeleteClientKey === c.key;
+    return `
     <div class="receipt-item-row">
       <div>
         <div class="l1">${escapeHtml(c.name||'(бе ном)')} ${c.phone?'· 📞 '+escapeHtml(c.phone):''}</div>
         <div class="l2">${escapeHtml(c.source)} · ${escapeHtml(c.when||'')} ${c.items&&c.items.length?'· '+c.items.map(i=>formatQtyLabel(i)).join(', '):''}</div>
       </div>
-      <div style="text-align:right;">
-        <div class="l2">${c.statusLabel}</div>
-        ${c.total?`<div class="l2">${fmtMoney(c.total)}</div>`:''}
-        <div class="l2">${c.ts?new Date(c.ts).toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'}):''}</div>
+      <div style="text-align:right;display:flex;align-items:center;gap:8px;">
+        <div>
+          <div class="l2">${c.statusLabel}</div>
+          ${c.total?`<div class="l2">${fmtMoney(c.total)}</div>`:''}
+          <div class="l2">${c.ts?new Date(c.ts).toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'}):''}</div>
+        </div>
+        ${confirming ? `
+          <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
+          <button class="icon-btn danger" data-confirmdelclient="${c.key}" data-deltype="${c.delType}" data-delid="${c.delId}">Ҳа</button>
+          <button class="icon-btn" data-canceldelclient="${c.key}">Не</button>
+        ` : `<button class="icon-btn danger" data-delclient="${c.key}">🗑</button>`}
       </div>
-    </div>`).join('') : (clientQuery ? `<p style="font-size:13px;color:#9c8f78;">Ҳеҷ мизоҷе бо ин ном/рақам ёфт нашуд</p>` : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ мизоҷе брон/фармоиши вақтдор надодааст</p>`);
+    </div>`;
+  }).join('') : (clientQuery ? `<p style="font-size:13px;color:#9c8f78;">Ҳеҷ мизоҷе бо ин ном/рақам ёфт нашуд</p>` : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ мизоҷе брон/фармоиши вақтдор надодааст</p>`);
+
+  return `
+    <div class="section-title">📋 Фармоишҳо — брон ва вақтдор</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳамаи мизоҷоне, ки миз брон кардаанд ё фармоиши вақтдор додаанд. Бо ном ё рақами телефон ҷустуҷӯ кунед.</p>
+    <input type="text" id="clientSearchInput" value="${escapeHtml(state.clientSearchQuery)}" placeholder="Ном ё рақами телефон..." style="width:100%;max-width:420px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:16px;">
+    <div class="stat-row" style="margin-bottom:18px;">
+      <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
+      <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
+    </div>
+    ${rowsHtml}
+  `;
+}
+function renderAdminTables(){
+  const occCount = occupiedTableCount();
   const orphans = orphanedActiveOrders();
   const orphanHtml = orphans.length ? `
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
@@ -2672,11 +2714,6 @@ function renderAdminTables(){
     ${orphanHtml}
     <div class="table-grid">${buildTableCards()}</div>
 
-    <div class="section-title" style="margin-top:28px;">🔍 Поиски мизоҷон (брон / фармоиши вақтдор)</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Бо ном ё рақами телефон ҷустуҷӯ кунед — ҳамаи мизоҷоне, ки миз брон кардаанд ё фармоиши вақтдор додаанд.</p>
-    <input type="text" id="clientSearchInput" value="${escapeHtml(state.clientSearchQuery)}" placeholder="Ном ё рақами телефон..." style="width:100%;max-width:420px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:14px;">
-    ${clientSearchResultsHtml}
-
     <div class="section-title" style="margin-top:28px;">Номгузорӣ ва ҷои нишасти мизҳо</div>
     ${addTableFormHtml}
     ${editTableFormHtml}
@@ -2692,9 +2729,11 @@ function renderAdminSalary(){
   const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   let totalMonthly = 0;
+  let totalBonusToday = 0;
   const rows = state.accounts.map(acc=>{
     const w = computeWages(acc);
     totalMonthly += w.monthly;
+    totalBonusToday += w.bonusToday;
     const isCommission = acc.wageType==='commission';
     const canCommission = acc.role==='waiter' || acc.role==='cashier';
     const bonusNote = w.bonusToday>0 ? `<span style="color:var(--olive);font-weight:700;">+${w.bonusToday.toFixed(1)} смн бонуси имрӯза</span>` : '';
@@ -2742,15 +2781,16 @@ function renderAdminSalary(){
     <div class="section-title">Ҳисоби маоши кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
     <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ош дар чек ≥500г бошад — 12 смн аз ҳар чек; агар <500г — 5% аз арзиши он қисм; аз ҳама маҳсули дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
+    <div class="stat-row" style="margin-bottom:14px;">
+      <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
+      <div class="stat-card"><div class="label">Ҷамъи бонуси имрӯза (ҳама)</div><div class="value" style="color:${totalBonusToday>0?'var(--olive)':'inherit'};">${totalBonusToday.toFixed(1)} смн</div></div>
+    </div>
     <div class="field small" style="margin-bottom:18px;">
       <label>Рӯзҳои корӣ дар як моҳ (барои маоши собит)</label>
       <input type="number" id="workDaysInput" value="${days}" min="1" max="31" style="width:90px;">
       <button class="btn-ghost" id="saveWorkDaysBtn" style="margin-left:8px;padding:8px 14px;">Сабт</button>
     </div>
     ${rows || '<div class="empty-state">Ҳанӯз кормандон нест</div>'}
-    <div class="stat-row" style="margin-top:20px;">
-      <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
-    </div>
 
     <div class="section-title" style="margin-top:32px;">🎁 Бонуси дастӣ</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Ба ҳар корманд, дар вақти дилхоҳ, маблағи иловагӣ (бонус) диҳед — масалан «беҳтарини ҳафта».</p>
@@ -2789,10 +2829,17 @@ function renderSalaryXlsTable(){
   if(!commissionAccounts.length){
     return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ корманде ба навъи «Комиссия аз чек» гузошта нашудааст.</p>`;
   }
-  let grandTotal = 0;
+  let grandTotal = 0, grandBonus = 0;
   const rows = commissionAccounts.map(acc=>{
     const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
+    const auto = autoBonusToday(acc.username, acc.role);
+    const manualToday = manualBonusSum(acc.username, 'today');
+    const bonusTotal = auto.total + manualToday;
     grandTotal += b.total;
+    grandBonus += bonusTotal;
+    const bonusCell = bonusTotal>0
+      ? `<span style="color:var(--olive);font-weight:700;">+${bonusTotal.toFixed(1)} ✅</span>`
+      : `<span style="color:#9c8f78;">— не</span>`;
     return `
     <tr>
       <td>${escapeHtml(acc.username)} <span style="color:#9c8f78;font-weight:400;">(${roleLabel[acc.role]})</span></td>
@@ -2803,6 +2850,7 @@ function renderSalaryXlsTable(){
       <td>${b.oshSum.toFixed(1)}</td>
       <td>${b.otherSum.toFixed(1)}</td>
       <td class="total-cell">${b.total.toFixed(1)}</td>
+      <td>${bonusCell}</td>
     </tr>`;
   }).join('');
   return `
@@ -2817,6 +2865,7 @@ function renderSalaryXlsTable(){
         <th>Аз ош (смн)</th>
         <th>Аз дигар (смн)</th>
         <th>Ҳамагӣ (смн)</th>
+        <th>Бонуси имрӯза</th>
       </tr>
     </thead>
     <tbody>
@@ -2825,6 +2874,7 @@ function renderSalaryXlsTable(){
         <td style="font-weight:700;">Ҳамагӣ</td>
         <td></td><td></td><td></td><td></td><td></td><td></td>
         <td class="total-cell">${grandTotal.toFixed(1)}</td>
+        <td class="total-cell">${grandBonus.toFixed(1)}</td>
       </tr>
     </tbody>
   </table>`;
@@ -3214,7 +3264,7 @@ function renderAdminSettings(){
 
 function attachAdminEvents(){
   // keep typing safe from the 6s poll wipe while on tabs with persistent free-typed fields
-  if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings' || state.adminTab==='inventory'){
+  if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings' || state.adminTab==='inventory' || state.adminTab==='orders'){
     state.formOpen = true;
     state.formOpenAt = Date.now();
   }
@@ -3227,25 +3277,16 @@ function attachAdminEvents(){
       state.showAddInvForm=false; state.editingInvId=null; state.confirmDeleteInvId=null;
       state.confirmDeleteBonusId=null;
       state.confirmClearLog=false;
+      state.confirmDeleteClientKey=null;
       state.recipeDraft={}; state.menuFormDraft={name:'', price:'', cat:'', unit:'dona'};
       if(el.dataset.atab!=='tables'){ state.bookingPreOrder = {}; state.bookingName=''; state.bookingPhone=''; }
-      if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings' || el.dataset.atab==='inventory'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
+      if(el.dataset.atab==='salary' || el.dataset.atab==='tables' || el.dataset.atab==='settings' || el.dataset.atab==='inventory' || el.dataset.atab==='orders'){ state.formOpen=true; state.formOpenAt=Date.now(); } else { state.formOpen=false; }
       render();
     });
   });
 
   if(state.adminTab==='tables'){
     attachTableGridEvents();
-    const clientSearchInput = document.getElementById('clientSearchInput');
-    if(clientSearchInput){
-      clientSearchInput.addEventListener('input', ()=>{
-        state.clientSearchQuery = clientSearchInput.value;
-        render();
-        // restore focus + caret since render() rebuilds the input from scratch
-        const el = document.getElementById('clientSearchInput');
-        if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
-      });
-    }
     document.querySelectorAll('[data-cancelorphan]').forEach(el=>{
       el.addEventListener('click', async ()=>{
         await cancelOrphanOrder(el.dataset.cancelorphan);
@@ -3548,6 +3589,31 @@ function attachAdminEvents(){
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
+    });
+  }
+
+  if(state.adminTab==='orders'){
+    const clientSearchInput = document.getElementById('clientSearchInput');
+    if(clientSearchInput){
+      clientSearchInput.addEventListener('input', ()=>{
+        state.clientSearchQuery = clientSearchInput.value;
+        render();
+        const el = document.getElementById('clientSearchInput');
+        if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
+      });
+    }
+    document.querySelectorAll('[data-delclient]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = el.dataset.delclient; render(); });
+    });
+    document.querySelectorAll('[data-canceldelclient]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = null; render(); });
+    });
+    document.querySelectorAll('[data-confirmdelclient]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        state.confirmDeleteClientKey = null;
+        await deleteClientRecord(el.dataset.deltype, el.dataset.delid);
+        render();
+      });
     });
   }
 
