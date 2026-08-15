@@ -541,7 +541,8 @@ function todayKey(){
 function oshOrderedKgToday(){
   let kgTotal = 0;
   const porsiyaKg = (Number(state.settings.porsiyaGrams) || 120) / 1000;
-  state.orders.filter(o=>isToday(o.createdAt)).forEach(o=>{
+  const clearedAt = Number(state.settings.chefQueueClearedAt) || 0;
+  state.orders.filter(o=>isToday(o.createdAt) && (o.updatedAt||o.createdAt) > clearedAt).forEach(o=>{
     o.items.forEach(it=>{
       if(getItemCategory(it)==='Ош'){
         if(it.unit==='kg') kgTotal += it.qty/1000;
@@ -800,16 +801,9 @@ function isRealAdmin(){
   return !!(state.currentUser && state.currentUser.role==='admin');
 }
 async function clearChefQueue(){
-  const relevant = state.orders.filter(o=>{
-    if(o.type==='takeaway' || o.type==='scheduled') return isToday(o.createdAt);
-    return o.status==='active';
-  });
-  relevant.forEach(o=>{
-    o.items.forEach(it=>{ if(getItemCategory(it)==='Ош') it.servedQty = 0; });
-    o.prepared = false;
-  });
-  await saveOrders(state.orders);
-  await logActivity('Навбати ошпазро пок кард (ҳама аз сар)');
+  state.settings = {...state.settings, chefQueueClearedAt: Date.now()};
+  await saveSettings(state.settings);
+  await logActivity('Навбати ошпазро пурра пок кард (чекҳои кӯҳна аз навбат нест шуданд)');
   showToast('Навбати ошпаз пок карда шуд');
 }
 async function clearActivityLog(){
@@ -2059,7 +2053,9 @@ function renderChef(){
   });
   const kgTotal = oshOrderedKgToday();
   const hasOsh = (o)=> o.items.some(it=>getItemCategory(it)==='Ош');
+  const chefClearedAt = Number(state.settings.chefQueueClearedAt) || 0;
   const pending = state.orders.filter(o=>{
+    if((o.updatedAt||o.createdAt) <= chefClearedAt) return false;
     if(o.prepared) return false;
     if(!hasOsh(o)) return false;
     if(o.type==='takeaway') return o.status==='paid';
@@ -2067,6 +2063,7 @@ function renderChef(){
     return o.status==='active' && o.sentToKitchen===true;
   }).sort((a,b)=>a.createdAt-b.createdAt);
   const done = state.orders.filter(o=>{
+    if((o.updatedAt||o.createdAt) <= chefClearedAt) return false;
     if(!o.prepared) return false;
     if(!hasOsh(o)) return false;
     if(o.type==='takeaway') return isToday(o.createdAt);
@@ -2137,7 +2134,7 @@ function renderChef(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:14px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин прогресси «кашида шуд»-и ҳамаи чекҳои ҳозираро ба сифр мебарорад ва ҳамаро ба навбат бармегардонад — аз сар.</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ҳамаи чекҳои ҳозира (аз ҷумла ҳанӯз тайёрнашуда!) аз навбати ошпаз пурра нест мешаванд ва «Оши фармоишшуда» ба сифр бармегардад. Танҳо чекҳое, ки БАЪД аз ин фиристода/тағйир дода шаванд, дар навбат намоён мешаванд.</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearChefQueueBtn">Ҳа, пок кун</button>
         <button class="btn-ghost" id="cancelClearChefQueueBtn">Бекор</button>
       </div>
