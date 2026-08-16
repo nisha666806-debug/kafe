@@ -447,7 +447,8 @@ const DEFAULT_MENU = [
   {id:'m11', name:'Банан', price:20, category:'Мевагиҳо', unit:'kg'},
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
-  checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0};
+  checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
+  takeawayDiscountPct:0};
 
 /* ============ STATE ============ */
 let state = {
@@ -505,6 +506,7 @@ let state = {
   scheduledName:'',
   scheduledPhone:'',
   scheduledTime:'',
+  scheduledDeliveryType:'dinein',
   viewingOrderId:null,
   viewingMode:null,
   previewUsername:null,     // when admin is previewing AS a specific staff account
@@ -795,11 +797,14 @@ function removeDraftItem(mid){
 async function saveTicket(sendFlag){
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? order.items : [];
+  let droppedAny = false;
   const items = Object.keys(state.draftItems).map(mid=>{
     const m = state.menu.find(x=>x.id===mid);
+    if(!m){ droppedAny = true; return null; }
     const prev = prevItems.find(p=>p.menuId===mid);
     return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
-  });
+  }).filter(Boolean);
+  if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
   const total = draftTotal();
   let isNew = false;
   if(!order){
@@ -936,9 +941,9 @@ function playChefAlertSound(){
 }
 function orderLabel(o){
   if(o.type==='takeaway') return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?');
-  if(o.type==='scheduled') return '🕐 '+(o.readyTime||'?')+' — '+(o.customerName||'мизожон');
+  if(o.type==='scheduled') return '🕐 '+escapeHtml(o.readyTime||'?')+' — '+escapeHtml(o.customerName||'мизожон');
   const tbl = state.tables.find(t=>t.id===o.table);
-  return tbl ? tbl.name : ('Мизи №'+o.table);
+  return tbl ? escapeHtml(tbl.name) : ('Мизи №'+o.table);
 }
 async function bookTable(t, name, phone, preOrder){
   state.reservations = state.reservations || {};
@@ -1220,12 +1225,13 @@ function computeWages(acc){
   return {daily: amount + manualToday, monthly: amount*days + manualMonth, bonusToday: manualToday};
 }
 function formatQtyLabel(it){
+  const safeName = escapeHtml(it.name||'');
   if(it.unit==='kg'){
     const g = it.qty;
     const label = g>=1000 ? (Math.round((g/1000)*100)/100)+' кг' : Math.round(g)+' г';
-    return label+' '+it.name;
+    return label+' '+safeName;
   }
-  return it.qty+'× '+it.name;
+  return it.qty+'× '+safeName;
 }
 function getItemCategory(it){
   if(it.category) return it.category;
@@ -1306,6 +1312,13 @@ function render(){
     if(openSchedBtn) openSchedBtn.addEventListener('click', openScheduled);
     document.querySelectorAll('[data-vieworder]').forEach(el=>{
       el.addEventListener('click', ()=> openOrderView(el.dataset.vieworder, el.dataset.viewmode||'pay'));
+    });
+    document.querySelectorAll('[data-sendschedtakeaway]').forEach(el=>{
+      el.addEventListener('click', async (e)=>{
+        e.stopPropagation();
+        await sendScheduledTakeawayToKitchen(el.dataset.sendschedtakeaway);
+        render();
+      });
     });
   }
   if(state.role==='chef') attachChefEvents();
@@ -1468,6 +1481,9 @@ function buildTableCards(){
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
       extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${elapsedLabel}</span>`;
+      if(order.customerPhone){
+        extra += `<span class="reserve-detail">📞 ${escapeHtml(order.customerPhone)}</span>`;
+      }
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
         extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
       }
@@ -1508,7 +1524,7 @@ function attachTableGridEvents(){
 /* ---------- Waiter view ---------- */
 function renderWaiter(){
   const occCount = occupiedTableCount();
-  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active')
+  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType!=='takeaway')
     .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
   const freeTables = state.tables.filter(t=>!activeOrderForTable(t.id));
   const scheduledHtml = pendingScheduled.length ? pendingScheduled.map(o=>{
@@ -1552,10 +1568,24 @@ function attachWaiterEvents(){
 function renderCashier(){
   const occCount = occupiedTableCount();
   const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) &&
-    (!state.currentUser || o.paidBy===state.currentUser.username))
+    (o.status==='active' || !state.currentUser || o.paidBy===state.currentUser.username))
     .sort((a,b)=>b.createdAt-a.createdAt);
   const takeawayHtml = myTakeaway.length ? myTakeaway.map(o=>`
-    <div class="receipt-item-row">
+    <div class="receipt-item-row" ${o.status==='active' ? `data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;"` : ''}>
+      <div>
+        <div class="l1">${orderLabel(o)}</div>
+        <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
+      </div>
+      <div style="text-align:right;">
+        <div>${fmtMoney(o.total)}</div>
+        <div class="l2">${o.status==='active' ? '⏳ интизори пардохт' : (o.prepared?'тайёр':'дар навбат')}</div>
+      </div>
+    </div>`).join('') : '';
+
+  const pendingScheduledDinein = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType!=='takeaway')
+    .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
+  const scheduledDineinHtml = pendingScheduledDinein.length ? pendingScheduledDinein.map(o=>`
+    <div class="receipt-item-row" data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;">
       <div>
         <div class="l1">${orderLabel(o)}</div>
         <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
@@ -1566,17 +1596,17 @@ function renderCashier(){
       </div>
     </div>`).join('') : '';
 
-  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active')
+  const pendingScheduledTakeaway = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType==='takeaway')
     .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
-  const scheduledHtml = pendingScheduled.length ? pendingScheduled.map(o=>`
-    <div class="receipt-item-row" data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;">
+  const scheduledTakeawayHtml = pendingScheduledTakeaway.length ? pendingScheduledTakeaway.map(o=>`
+    <div class="receipt-item-row">
       <div>
-        <div class="l1">${orderLabel(o)}</div>
+        <div class="l1">🥡 ${orderLabel(o)}</div>
         <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
       </div>
-      <div style="text-align:right;">
+      <div style="text-align:right;display:flex;align-items:center;gap:10px;">
         <div>${fmtMoney(o.total)}</div>
-        <div class="l2">${o.prepared?'тайёр':'дар навбат'}</div>
+        <button class="btn-ghost" style="padding:6px 12px;font-size:12px;" data-sendschedtakeaway="${o.id}">🍚 Ба ошпаз фиристодан</button>
       </div>
     </div>`).join('') : '';
 
@@ -1589,19 +1619,27 @@ function renderCashier(){
     <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
     <div class="table-grid">${buildTableCards()}</div>
-    ${pendingScheduled.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledHtml}` : ''}
+    ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои вақтдор — бо худ бурдан (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
+    ${pendingScheduledDinein.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledDineinHtml}` : ''}
     ${myTakeaway.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои бо худ бурдани имрӯза</div>${takeawayHtml}` : ''}
   </div>`;
 }
 
 /* ---------- Takeaway (cashier -> chef, no waiter, no table) ---------- */
-function takeawayTotal(){
+function takeawaySubtotal(){
   let total = 0;
   Object.keys(state.takeawayItems).forEach(mid=>{
     const item = state.menu.find(m=>m.id===mid);
     if(item) total += lineTotal(item, state.takeawayItems[mid]);
   });
   return total;
+}
+function takeawayDiscountAmount(){
+  const pct = Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0));
+  return takeawaySubtotal() * (pct/100);
+}
+function takeawayTotal(){
+  return Math.max(0, takeawaySubtotal() - takeawayDiscountAmount());
 }
 function openTakeaway(){
   state.takeawayOpen = true;
@@ -1639,10 +1677,13 @@ function removeTakeawayItem(mid){
   render();
 }
 async function submitTakeaway(cashAmount, noncashAmount){
+  let droppedAny = false;
   const items = Object.keys(state.takeawayItems).map(mid=>{
     const m = state.menu.find(x=>x.id===mid);
+    if(!m){ droppedAny = true; return null; }
     return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.takeawayItems[mid]};
-  });
+  }).filter(Boolean);
+  if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
   if(!items.length) return;
   const total = takeawayTotal();
   const todayCount = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt)).length;
@@ -1676,6 +1717,7 @@ function openScheduled(){
   state.scheduledOpen = true;
   state.scheduledItems = {};
   state.scheduledCat = (state.menu[0] && state.menu[0].category) || null;
+  state.scheduledDeliveryType = 'dinein';
   state.formOpen = true; state.formOpenAt = Date.now();
   render();
 }
@@ -1683,6 +1725,7 @@ function closeScheduled(){
   state.scheduledOpen = false;
   state.scheduledItems = {};
   state.scheduledName = ''; state.scheduledPhone = ''; state.scheduledTime = '';
+  state.scheduledDeliveryType = 'dinein';
   state.formOpen = false;
   render();
 }
@@ -1710,11 +1753,14 @@ function removeScheduledItem(mid){
   delete state.scheduledItems[mid];
   render();
 }
-async function submitScheduled(name, phone, time){
+async function submitScheduled(name, phone, time, deliveryType){
+  let droppedAny = false;
   const items = Object.keys(state.scheduledItems).map(mid=>{
     const m = state.menu.find(x=>x.id===mid);
+    if(!m){ droppedAny = true; return null; }
     return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.scheduledItems[mid]};
-  });
+  }).filter(Boolean);
+  if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
   if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
   if(!time){ showToast('Соатро таъин кунед'); return; }
   const total = scheduledTotal();
@@ -1722,13 +1768,23 @@ async function submitScheduled(name, phone, time){
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
     items, total, createdAt: Date.now(), updatedAt: Date.now(),
     createdBy: null, readyTime: time, customerName: name||'', customerPhone: phone||'',
+    deliveryType: deliveryType==='takeaway' ? 'takeaway' : 'dinein',
     prepared: false
   };
   state.orders.push(order);
   await deductForOrderDelta(order, items);
   await saveOrders(state.orders);
-  showToast('Фармоиши вақтдор сабт шуд ва ба ошпаз фиристода шуд');
+  showToast('Фармоиши вақтдор сабт шуд');
   closeScheduled();
+}
+async function sendScheduledTakeawayToKitchen(orderId){
+  const order = state.orders.find(o=>o.id===orderId);
+  if(!order) return;
+  order.type = 'takeaway';
+  order.sentToKitchen = true;
+  order.updatedAt = Date.now();
+  await saveOrders(state.orders);
+  showToast('Ба ошпаз фиристода шуд');
 }
 function openOrderView(id, mode){
   state.viewingOrderId = id;
@@ -1829,6 +1885,8 @@ function renderTakeawayOverlay(){
     });
   }
   const total = takeawayTotal();
+  const subtotal = takeawaySubtotal();
+  const discountAmt = takeawayDiscountAmount();
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
   return `
@@ -1843,6 +1901,7 @@ function renderTakeawayOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек — Бо худ бурдан</div>
         ${receiptLines}
+        ${discountAmt>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line" style="color:var(--olive);"><span>Тахфиф (${state.settings.takeawayDiscountPct}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
       </div>
       <div class="ticket-actions" style="flex-direction:column;align-items:stretch;">
@@ -1960,6 +2019,13 @@ function renderScheduledOverlay(){
         <div class="field"><label>Рақами телефон</label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
         <div class="field small"><label>То соати</label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime)}"></div>
       </div>
+      <div style="padding:12px 20px 0;">
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Навъи фармоиш</label>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="cat-tab ${state.scheduledDeliveryType!=='takeaway'?'active':''}" data-schedtype="dinein">🍽 Дар кафе (миз)</button>
+          <button type="button" class="cat-tab ${state.scheduledDeliveryType==='takeaway'?'active':''}" data-schedtype="takeaway">🥡 Бо худ бурдан</button>
+        </div>
+      </div>
       <div class="cat-tabs">${tabs}</div>
       <div class="menu-list">${items}</div>
       <div class="receipt">
@@ -2007,12 +2073,15 @@ function attachScheduledEvents(){
   document.querySelectorAll('[data-sremoveitem]').forEach(el=>{
     el.addEventListener('click', ()=>{ captureScheduledFields(); removeScheduledItem(el.dataset.sremoveitem); });
   });
+  document.querySelectorAll('[data-schedtype]').forEach(el=>{
+    el.addEventListener('click', ()=>{ captureScheduledFields(); state.scheduledDeliveryType = el.dataset.schedtype; render(); });
+  });
   const submitBtn = document.getElementById('submitScheduledBtn');
   if(submitBtn) submitBtn.addEventListener('click', ()=>{
     const name = document.getElementById('schedNameInput').value.trim();
     const phone = document.getElementById('schedPhoneInput').value.trim();
     const time = document.getElementById('schedTimeInput').value;
-    submitScheduled(name, phone, time);
+    submitScheduled(name, phone, time, state.scheduledDeliveryType);
   });
 }
 
@@ -2100,8 +2169,8 @@ function renderChef(){
     if((o.updatedAt||o.createdAt) <= chefClearedAt) return false;
     if(o.prepared) return false;
     if(!hasOsh(o)) return false;
-    if(o.type==='takeaway') return o.status==='paid';
-    if(o.type==='scheduled') return o.status==='active';
+    if(o.type==='takeaway') return o.status==='paid' || o.sentToKitchen===true;
+    if(o.type==='scheduled') return false; // hidden until sent to kitchen (assigned to a table, or sent as takeaway)
     return o.status==='active' && o.sentToKitchen===true;
   }).sort((a,b)=>a.createdAt-b.createdAt);
   const done = state.orders.filter(o=>{
@@ -2109,7 +2178,7 @@ function renderChef(){
     if(!o.prepared) return false;
     if(!hasOsh(o)) return false;
     if(o.type==='takeaway') return isToday(o.createdAt);
-    if(o.type==='scheduled') return isToday(o.createdAt);
+    if(o.type==='scheduled') return false;
     return o.status==='active' && o.sentToKitchen===true;
   }).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
 
@@ -3287,6 +3356,14 @@ function renderAdminSettings(){
     <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Агар фармоише зиёда аз ин муддат дар навбати Ошпаз бимонад, картаи он бо ранги сурх огоҳ медиҳад.</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveDelayWarnBtn">Сабт кардан</button>
   </div>
+  <div class="settings-form" style="margin-top:18px;">
+    <div class="field">
+      <label>Тахфифи «Бо худ бурдан» (%)</label>
+      <input type="number" id="takeawayDiscountInput" value="${state.settings.takeawayDiscountPct||0}" min="0" max="100" step="1" style="width:120px;">
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ин фоиз худкор аз ҳамаи фармоишҳои «Бо худ бурдан» кам карда мешавад (0 = бе тахфиф).</p>
+    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveTakeawayDiscountBtn">Сабт кардан</button>
+  </div>
 
   <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
   <div class="form-box" style="max-width:420px;flex-direction:column;align-items:flex-start;">
@@ -3783,6 +3860,14 @@ function attachAdminEvents(){
     if(saveDelayWarnBtn) saveDelayWarnBtn.addEventListener('click', async ()=>{
       const m = Math.max(1, Number(document.getElementById('delayWarnInput').value) || 15);
       state.settings = {...state.settings, delayWarnMinutes: m};
+      await saveSettings(state.settings);
+      showToast('Сабт шуд');
+      render();
+    });
+    const saveTakeawayDiscountBtn = document.getElementById('saveTakeawayDiscountBtn');
+    if(saveTakeawayDiscountBtn) saveTakeawayDiscountBtn.addEventListener('click', async ()=>{
+      const pct = Math.max(0, Math.min(100, Number(document.getElementById('takeawayDiscountInput').value) || 0));
+      state.settings = {...state.settings, takeawayDiscountPct: pct};
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
