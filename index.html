@@ -785,8 +785,8 @@ function openTable(t){
   const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
   const actingName = actingUsername();
   if(state.role==='waiter' && tbl && tbl.assignedTo && actingName && tbl.assignedTo!==actingName){
-    if(isRealAdmin && !state.previewUsername){
-      // admin viewing the generic waiter screen (no specific waiter chosen) — full access
+    if(isRealAdmin){
+      // admin previewing (generically or as any specific waiter) — always full access
     } else {
       showToast('Ин миз ба официанти дигар тахсис дода шудааст');
       return;
@@ -1527,7 +1527,7 @@ function buildTableCards(){
     const reservation = !occ && state.reservations ? state.reservations[t] : null;
     const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
     const actingName = actingUsername();
-    const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !(isRealAdmin && !state.previewUsername);
+    const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !isRealAdmin;
     let dotClass = 'free', statusText = 'Озод', extra = '';
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
