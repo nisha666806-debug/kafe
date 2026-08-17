@@ -74,6 +74,13 @@
   .brand .tag{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--text-dim);font-weight:700;display:none;}
   @media(min-width:480px){.brand .name{max-width:none;} .brand .tag{display:inline;}}
   .top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+  @media(max-width:479px){
+    .user-name-label:not(.preview-label){display:none;}
+    .preview-label .preview-word{display:none;}
+    .top-right{gap:6px;}
+    .role-pill{padding:5px 9px;font-size:11px;}
+    #logoutBtn, #backToAdminBtn{padding:6px 10px;font-size:12px;}
+  }
   .clock{font-family:'Inter',sans-serif;font-variant-numeric:tabular-nums;font-size:13px;color:var(--text-dim);display:none;}
   @media(min-width:560px){.clock{display:block;}}
   .role-pill{
@@ -1391,8 +1398,8 @@ function renderTopbar(){
   const isAdmin = state.currentUser && state.currentUser.role==='admin';
   const previewing = isAdmin && state.role!=='admin';
   const nameLabel = previewing && state.previewUsername
-    ? `<span style="font-size:12px;color:var(--brick);font-weight:700;">👁 ${escapeHtml(state.previewUsername)} (пешнамоиш)</span>`
-    : (state.currentUser ? `<span style="font-size:12px;color:#6b5f4d;">${escapeHtml(state.currentUser.username)}</span>` : '');
+    ? `<span class="user-name-label preview-label" style="font-size:12px;color:var(--brick);font-weight:700;">👁 ${escapeHtml(state.previewUsername)} <span class="preview-word">(пешнамоиш)</span></span>`
+    : (state.currentUser ? `<span class="user-name-label" style="font-size:12px;color:#6b5f4d;">${escapeHtml(state.currentUser.username)}</span>` : '');
   return `
   <div class="topbar">
     <div class="brand">
@@ -3923,6 +3930,17 @@ document.addEventListener('focusout', ()=>{
     if(state.role && !isActivelyEditingFormField()) render();
   }, 50);
 }, true);
+
+// Mobile OSes routinely suspend a backgrounded tab's network/JS to save battery, so a real-time
+// listener can sit stale for as long as the phone was locked or the app was switched away from.
+// The instant the app becomes visible again, force one fresh fetch of everything (not just wait
+// for Firestore's listeners to reconnect on their own) so the screen is correct within moments
+// of the person looking at it again, regardless of how long it was backgrounded.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
+    pollRefresh();
+  }
+});
 
 init();
 
