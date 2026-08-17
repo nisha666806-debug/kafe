@@ -1535,6 +1535,9 @@ function buildTableCards(){
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
       extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${elapsedLabel}</span>`;
+      if(order.createdBy){
+        extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
+      }
       if(order.customerPhone){
         extra += `<span class="reserve-detail">📞 ${escapeHtml(order.customerPhone)}</span>`;
       }
@@ -2149,6 +2152,8 @@ function renderOrderViewOverlay(){
     </div>`).join('') : `<div class="receipt-empty">холӣ</div>`;
   const contactLine = (order.customerName || order.customerPhone)
     ? `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">${escapeHtml(order.customerName||'')} ${order.customerPhone?('· '+escapeHtml(order.customerPhone)):''}</p>` : '';
+  const waiterLine = order.createdBy
+    ? `<p style="padding:0 20px;font-size:12px;color:#9c8f78;margin:0 0 4px;">👤 официант: ${escapeHtml(order.createdBy)}</p>` : '';
   const actionBtn = state.viewingMode==='pay'
     ? `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('payvo', order.total)}</div>` : '';
   return `
@@ -2159,6 +2164,7 @@ function renderOrderViewOverlay(){
         <button class="close-x" id="closeViewOrder">✕</button>
       </div>
       ${contactLine}
+      ${waiterLine}
       <div class="receipt">
         <div class="receipt-title">Чек</div>
         ${itemsHtml}
@@ -2277,6 +2283,7 @@ function renderChef(){
     return `
     <div class="receipt" style="margin:0 0 14px;${isDone?'opacity:.55;':''}${isDelayed?'border-color:var(--brick);box-shadow:0 0 0 2px var(--brick);':''}">
       <div class="receipt-title" style="${isDelayed?'color:var(--brick);':''}">${escapeHtml(title)}${isDelayed?` · ⏰ ${ageMin} дақ дер`:''}</div>
+      ${o.createdBy ? `<div style="text-align:center;font-size:11px;color:#9c8f78;margin:-6px 0 8px;">👤 ${escapeHtml(o.createdBy)}</div>` : ''}
       ${itemsHtml}
       <div style="margin-top:10px;">
         <button class="${isDone?'btn-ghost':'btn-primary'}" style="padding:8px 16px;font-size:12px;" data-toggleprep="${o.id}">${isDone?'Бозгашт ба навбат':'Тайёр шуд'}</button>
@@ -2477,6 +2484,7 @@ function renderTicketOverlay(){
         <h2>Мизи №${state.activeTable}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
+      ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
       ${menuSection}
       <div class="receipt">
         <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
@@ -2798,7 +2806,7 @@ function renderAdminTables(){
 
   /* --- table management (name + seats + assignment) --- */
   const waiterAccounts = state.accounts.filter(a=>a.role==='waiter');
-  const assignLabel = (uname)=> uname ? (state.accounts.find(a=>a.username===uname)?.username || uname) : 'Ҳама official';
+  const assignLabel = (uname)=> uname ? (state.accounts.find(a=>a.username===uname)?.username || uname) : 'Ҳама официант';
   const tableRows = state.tables.map(tbl=>{
     const confirming = state.confirmDeleteTableId === tbl.id;
     return `
@@ -2820,14 +2828,14 @@ function renderAdminTables(){
     </div>`;
   }).join('');
 
-  const waiterOptions = (selected)=> `<option value="">Ҳама official</option>` +
+  const waiterOptions = (selected)=> `<option value="">Ҳама официант</option>` +
     waiterAccounts.map(a=>`<option value="${escapeHtml(a.username)}" ${selected===a.username?'selected':''}>${escapeHtml(a.username)}</option>`).join('');
 
   const addTableFormHtml = state.showAddTableForm ? `
     <div class="form-box" id="addTableForm">
       <div class="field"><label>Номи миз</label><input type="text" id="newTableName" placeholder="масалан: Мизи 9 ё Тарраса-1"></div>
       <div class="field small"><label>Ҷои нишаст</label><input type="number" id="newTableSeats" value="4" min="1"></div>
-      <div class="field"><label>Тахсис ба official</label><select id="newTableAssign">${waiterOptions('')}</select></div>
+      <div class="field"><label>Тахсис ба официант</label><select id="newTableAssign">${waiterOptions('')}</select></div>
       <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitAddTable">Илова кардан</button>
       <button class="btn-ghost" id="cancelAddTable">Бекор</button>
     </div>` : `<button class="btn-ghost" id="showAddTableBtn" style="margin-bottom:14px;">+ Иловаи миз</button>`;
@@ -2837,7 +2845,7 @@ function renderAdminTables(){
     <div class="form-box" id="editTableForm">
       <div class="field"><label>Номи миз</label><input type="text" id="editTableName" value="${escapeHtml(editTableTarget.name)}"></div>
       <div class="field small"><label>Ҷои нишаст</label><input type="number" id="editTableSeats" value="${editTableTarget.seats}" min="1"></div>
-      <div class="field"><label>Тахсис ба official</label><select id="editTableAssign">${waiterOptions(editTableTarget.assignedTo||'')}</select></div>
+      <div class="field"><label>Тахсис ба официант</label><select id="editTableAssign">${waiterOptions(editTableTarget.assignedTo||'')}</select></div>
       <button class="btn-primary" style="flex:none;padding:9px 18px;" id="submitEditTable">Нигоҳ доштан</button>
       <button class="btn-ghost" id="cancelEditTable">Бекор</button>
     </div>` : '';
@@ -2859,8 +2867,8 @@ function renderAdminTables(){
   return `
     <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:18px;">
       <div>
-        <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">👤 Экрани official</div>
-        ${previewPicker('waiter', waiterAccs2, '👤', 'official')}
+        <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">👤 Экрани официант</div>
+        ${previewPicker('waiter', waiterAccs2, '👤', 'официант')}
       </div>
       <div>
         <div style="font-size:11px;color:#6b5f4d;font-weight:600;margin-bottom:4px;">💰 Экрани кассир</div>
@@ -2965,19 +2973,19 @@ function renderAdminSalary(){
     ${bonusHistoryHtml}
 
     <div class="section-title" style="margin-top:32px;">⚡ Бонуси худкор — танзимот</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Барои official/кассир, агар шарт имрӯз иҷро шавад, бонус худкор ба маоши имрӯза илова мешавад. Ҳадди 0 — хомӯш.</p>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Барои официант/кассир, агар шарт имрӯз иҷро шавад, бонус худкор ба маоши имрӯза илова мешавад. Ҳадди 0 — хомӯш.</p>
     <div class="form-box">
       <div class="field small"><label>Ҳадди шумораи чек (дар рӯз)</label><input type="number" id="checkCountThreshInput" value="${state.settings.checkCountBonusThreshold||0}" min="0" step="1"></div>
       <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="checkCountAmountInput" value="${state.settings.checkCountBonusAmount||0}" min="0" step="1"></div>
       <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveCheckCountBonusBtn">Сабт</button>
     </div>
-    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 12px;">Мисол: агар ҳадд 15 бошад — official/кассире, ки имрӯз >15 чек хизмат кунад, бонусро мегирад.</p>
+    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 12px;">Мисол: агар ҳадд 15 бошад — официант/кассире, ки имрӯз >15 чек хизмат кунад, бонусро мегирад.</p>
     <div class="form-box">
       <div class="field small"><label>Ҳадди даромад/комиссия (смн, дар рӯз)</label><input type="number" id="revenueThreshInput" value="${state.settings.revenueBonusThreshold||0}" min="0" step="1"></div>
       <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="revenueAmountInput" value="${state.settings.revenueBonusAmount||0}" min="0" step="1"></div>
       <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveRevenueBonusBtn">Сабт</button>
     </div>
-    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 0;">Мисол: агар ҳадд 100 бошад — official/кассире, ки комиссияи имрӯзааш аз 100 смн зиёд шавад, бонусро мегирад.</p>
+    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 0;">Мисол: агар ҳадд 100 бошад — официант/кассире, ки комиссияи имрӯзааш аз 100 смн зиёд шавад, бонусро мегирад.</p>
 
     <div class="section-title" style="margin-top:32px;">Ҷадвали тафсилоти имрӯза (комиссионӣ)</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Мисли Умед: чанд чек имрӯз гирифт/пардохт, аз онҳо чанд то ≥500г буд, чанд то камтар — ва маоши имрӯза.</p>
