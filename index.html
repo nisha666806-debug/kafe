@@ -528,6 +528,7 @@ let state = {
   confirmResetMenu:false,
   confirmClearReport:false,
   confirmClearChefQueue:false,
+  confirmCancelOrderId:null,
   clientSearchQuery:'',
   confirmDeleteClientKey:null,
   confirmClearLog:false,
@@ -811,6 +812,7 @@ function openTable(t){
 function closeTicket(){
   state.activeTable = null;
   state.draftItems = {};
+  state.confirmCancelOrderId = null;
   render();
 }
 function draftTotal(){
@@ -1065,6 +1067,31 @@ async function cancelOrphanOrder(id){
   state.orders = state.orders.filter(o=>o.id!==id);
   await saveOrders(state.orders);
   await logActivity('Фармоиши бесоҳибро бекор кард (мизи нест)');
+  showToast('Фармоиш бекор карда шуд');
+}
+// Cancel an active (not-yet-paid) order — e.g. the customer changed their mind. Any inventory
+// already deducted for it (recipe-based, from sending to kitchen) is restored, since the food
+// was never actually used.
+async function cancelOrder(id){
+  const order = state.orders.find(o=>o.id===id);
+  if(!order) return;
+  if(order.status==='paid'){ showToast('Фармоиши пардохтшударо бекор кардан лозим нест'); return; }
+  if(order.inventoryDeductedFor && Object.keys(order.inventoryDeductedFor).length){
+    const restoreItems = Object.keys(order.inventoryDeductedFor).map(menuId=>({
+      menuId, qty: order.inventoryDeductedFor[menuId],
+      unit: (order.items.find(it=>it.menuId===menuId)||{}).unit
+    }));
+    const deduction = computeInventoryDeduction(restoreItems);
+    Object.keys(deduction).forEach(invId=>{
+      const item = state.inventory.find(i=>i.id===invId);
+      if(item){ item.qty = (Number(item.qty)||0) + deduction[invId]; item.updatedAt = Date.now(); }
+    });
+    if(Object.keys(deduction).length) await saveInventory(state.inventory);
+  }
+  const label = orderLabel(order);
+  state.orders = state.orders.filter(o=>o.id!==id);
+  await saveOrders(state.orders);
+  await logActivity('Фармоишро бекор кард: '+label);
   showToast('Фармоиш бекор карда шуд');
 }
 /* ---------- Inventory (анбор) ---------- */
@@ -1851,6 +1878,7 @@ function openOrderView(id, mode){
 function closeOrderView(){
   state.viewingOrderId = null;
   state.viewingMode = null;
+  state.confirmCancelOrderId = null;
   render();
 }
 async function payOrderById(id, cashAmount, noncashAmount){
@@ -2156,6 +2184,15 @@ function renderOrderViewOverlay(){
     ? `<p style="padding:0 20px;font-size:12px;color:#9c8f78;margin:0 0 4px;">👤 официант: ${escapeHtml(order.createdBy)}</p>` : '';
   const actionBtn = state.viewingMode==='pay'
     ? `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('payvo', order.total)}</div>` : '';
+  const cancelBlock = state.confirmCancelOrderId===order.id ? `
+    <div class="form-box" style="border-color:var(--brick);margin:10px 20px 0;width:auto;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Фармоишро бекор кунем?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Агар маводе аз анбор кам шуда бошад, баргардонида мешавад. Ин амал бозгашт надорад.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCancelOrderBtn">Ҳа, бекор кун</button>
+        <button class="btn-ghost" id="cancelCancelOrderBtn">Не</button>
+      </div>
+    </div>` : `<div style="padding:8px 20px 0;"><button class="btn-ghost" style="color:var(--brick);border-color:var(--brick);width:100%;" id="cancelOrderBtn">✕ Бекор кардани фармоиш (мизоҷ рад кард)</button></div>`;
   return `
   <div class="overlay" id="viewOrderOverlay">
     <div class="ticket-wrap">
@@ -2171,6 +2208,7 @@ function renderOrderViewOverlay(){
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(order.total)}</span></div>
       </div>
       ${actionBtn}
+      ${cancelBlock}
     </div>
   </div>`;
 }
@@ -2182,6 +2220,21 @@ function attachOrderViewEvents(){
   if(state.viewingMode==='pay' && order){
     attachSplitPaymentEvents('payvo', order.total, (cash, noncash)=> payOrderById(state.viewingOrderId, cash, noncash));
   }
+  const cancelOrderBtn = document.getElementById('cancelOrderBtn');
+  if(cancelOrderBtn) cancelOrderBtn.addEventListener('click', ()=>{
+    state.confirmCancelOrderId = state.viewingOrderId; render();
+  });
+  const confirmCancelOrderBtn = document.getElementById('confirmCancelOrderBtn');
+  if(confirmCancelOrderBtn) confirmCancelOrderBtn.addEventListener('click', async ()=>{
+    const id = state.confirmCancelOrderId;
+    state.confirmCancelOrderId = null;
+    await cancelOrder(id);
+    closeOrderView();
+  });
+  const cancelCancelOrderBtn = document.getElementById('cancelCancelOrderBtn');
+  if(cancelCancelOrderBtn) cancelCancelOrderBtn.addEventListener('click', ()=>{
+    state.confirmCancelOrderId = null; render();
+  });
 }
 
 /* ---------- Chef view ---------- */
@@ -2464,6 +2517,17 @@ function renderTicketOverlay(){
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
   let actions = '';
+  const cancelBlock = currentOrder ? (
+    state.confirmCancelOrderId===currentOrder.id ? `
+    <div class="form-box" style="border-color:var(--brick);margin:10px 20px 0;width:auto;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Фармоишро бекор кунем?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Агар маводе аз анбор кам шуда бошад, баргардонида мешавад. Ин амал бозгашт надорад.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCancelOrderBtn">Ҳа, бекор кун</button>
+        <button class="btn-ghost" id="cancelCancelOrderBtn">Не</button>
+      </div>
+    </div>` : `<div style="padding:8px 20px 0;"><button class="btn-ghost" style="color:var(--brick);border-color:var(--brick);width:100%;" id="cancelOrderBtn">✕ Бекор кардани фармоиш (мизоҷ рад кард)</button></div>`
+  ) : '';
   if(mode==='edit'){
     const alreadySent = currentOrder && currentOrder.sentToKitchen;
     const statusLine = currentOrder
@@ -2472,9 +2536,9 @@ function renderTicketOverlay(){
     actions = `${statusLine}<div class="ticket-actions" style="gap:8px;">
       <button class="btn-ghost" style="flex:1;" id="saveTicketBtn" ${disabled}>Захира</button>
       <button class="btn-pay" style="flex:1;" id="sendKitchenBtn" ${disabled}>🍚 Ба ошпаз фиристодан</button>
-    </div>`;
+    </div>${cancelBlock}`;
   } else if(mode==='pay'){
-    actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>`;
+    actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
   }
 
   return `
@@ -2500,6 +2564,23 @@ function attachTicketEvents(){
   const overlay = document.getElementById('ticketOverlay');
   overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeTicket(); });
   document.getElementById('closeTicket').addEventListener('click', closeTicket);
+  const cancelOrderBtn = document.getElementById('cancelOrderBtn');
+  if(cancelOrderBtn) cancelOrderBtn.addEventListener('click', ()=>{
+    const o = activeOrderForTable(state.activeTable);
+    state.confirmCancelOrderId = o ? o.id : null;
+    render();
+  });
+  const confirmCancelOrderBtn = document.getElementById('confirmCancelOrderBtn');
+  if(confirmCancelOrderBtn) confirmCancelOrderBtn.addEventListener('click', async ()=>{
+    const id = state.confirmCancelOrderId;
+    state.confirmCancelOrderId = null;
+    await cancelOrder(id);
+    closeTicket();
+  });
+  const cancelCancelOrderBtn = document.getElementById('cancelCancelOrderBtn');
+  if(cancelCancelOrderBtn) cancelCancelOrderBtn.addEventListener('click', ()=>{
+    state.confirmCancelOrderId = null; render();
+  });
   if(mode==='edit'){
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
