@@ -369,7 +369,7 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, failed:{}};
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -386,6 +386,7 @@ async function loadAll(){
   await parseField('inventory', 'inventory');
   await parseField('activityLog', 'activityLog');
   await parseField('bonuses', 'bonuses');
+  await parseField('dailyClosures', 'dailyClosures');
   return out;
 }
 async function saveMenu(menu){
@@ -431,6 +432,9 @@ async function logActivity(actionText){
 }
 async function saveBonuses(bonuses){
   await fsSet('bonuses', JSON.stringify(bonuses));
+}
+async function saveDailyClosures(closures){
+  await fsSet('dailyClosures', JSON.stringify(closures));
 }
 async function giveBonus(username, amount, reason){
   const amt = Math.max(0, Number(amount)||0);
@@ -505,9 +509,11 @@ let state = {
   inventory:[],
   activityLog:[],
   bonuses:[],
+  dailyClosures:[],
   showBonusForm:true,
   confirmDeleteBonusId:null,
   seenPendingIds:null,
+  seenCashierOrderIds:null,
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -527,6 +533,8 @@ let state = {
   confirmDeleteId:null,
   confirmResetMenu:false,
   confirmClearReport:false,
+  showCloseDayConfirm:false,
+  confirmDeleteClosureId:null,
   confirmClearChefQueue:false,
   confirmCancelOrderId:null,
   clientSearchQuery:'',
@@ -594,7 +602,7 @@ function oshOrderedKgToday(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, failed} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = await loadAll();
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
@@ -626,6 +634,7 @@ async function init(){
   state.inventory = inventory || [];
   state.activityLog = activityLog || [];
   state.bonuses = bonuses || [];
+  state.dailyClosures = dailyClosures || [];
 
   if(tables && tables.length){
     state.tables = tables;
@@ -710,7 +719,7 @@ function setupRealtimeSync(){
   const fields = [
     ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
     ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
-    ['activityLog','activityLog'], ['bonuses','bonuses']
+    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
   ];
   fields.forEach(([key, stateKey])=>{
     try{
@@ -751,7 +760,7 @@ function startSyncWatchdog(){
 async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
   if(isActivelyEditingFormField()) return; // same precise check the real-time path uses
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses} = await loadAll();
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
   if(menu) state.menu = menu;
   if(orders) state.orders = orders;
   if(settings) state.settings = settings;
@@ -762,6 +771,7 @@ async function pollRefresh(){
   if(inventory) state.inventory = inventory;
   if(activityLog) state.activityLog = activityLog;
   if(bonuses) state.bonuses = bonuses;
+  if(dailyClosures) state.dailyClosures = dailyClosures;
   render();
 }
 
@@ -993,6 +1003,28 @@ function playChefAlertSound(){
       osc.start(now+offset);
       osc.stop(now+offset+0.18);
     });
+  }catch(e){}
+}
+// Spoken alert for the cashier when a new order becomes active — e.g. "Фармоиши нав, мизи 1".
+// Note: a Tajik voice is rarely available on phones, so this uses the closest available voice
+// (usually Russian, since it shares the Cyrillic alphabet) — pronunciation may sound accented.
+function speakCashierAlert(order){
+  try{
+    if(!('speechSynthesis' in window)) return;
+    let text;
+    if(order.type==='takeaway') text = 'Фармоиши нав. Бо худ бурдан.';
+    else if(order.type==='scheduled') text = 'Фармоиши нав, вақтдор.';
+    else {
+      const tbl = state.tables.find(t=>t.id===order.table);
+      text = 'Фармоиши нав, ' + (tbl ? tbl.name : ('мизи '+order.table)) + '.';
+    }
+    const utter = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const ruVoice = voices.find(v=>v.lang && v.lang.toLowerCase().startsWith('ru'));
+    if(ruVoice) utter.voice = ruVoice;
+    utter.lang = 'ru-RU';
+    utter.rate = 0.95;
+    window.speechSynthesis.speak(utter);
   }catch(e){}
 }
 function orderLabel(o){
@@ -1651,6 +1683,18 @@ function attachWaiterEvents(){
 /* ---------- Cashier view ---------- */
 function renderCashier(){
   const occCount = occupiedTableCount();
+
+  // Speak an alert when a genuinely new order becomes active — not on first render (that would
+  // announce every order already on the books when the cashier simply opens the screen).
+  const activeForCashier = state.orders.filter(o=>o.status==='active');
+  const currentCashierIds = activeForCashier.map(o=>o.id);
+  if(state.seenCashierOrderIds === null){
+    state.seenCashierOrderIds = new Set(currentCashierIds);
+  } else {
+    const newOnes = activeForCashier.filter(o=>!state.seenCashierOrderIds.has(o.id));
+    newOnes.forEach(o=> speakCashierAlert(o));
+    state.seenCashierOrderIds = new Set(currentCashierIds);
+  }
   const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) &&
     (o.status==='active' || !state.currentUser || o.paidBy===state.currentUser.username))
     .sort((a,b)=>b.createdAt-a.createdAt);
@@ -3327,6 +3371,41 @@ async function clearAllReportHistory(){
   state.confirmClearReport = false;
   showToast('Ҳисобот пурра пок карда шуд');
 }
+async function closeDailyReport(){
+  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const revenue = paidToday.reduce((s,o)=>s+o.total,0);
+  const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
+  const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+  const activeCount = state.orders.filter(o=>o.status==='active').length;
+
+  const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
+  const staffSummary = commissionAccounts.map(acc=>{
+    const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
+    return {username: acc.username, role: acc.role, total: b.total, checks: b.orderCount};
+  }).filter(s=>s.checks>0);
+
+  const lowStock = state.inventory.filter(i => i.minThreshold>0 && i.qty <= i.minThreshold).map(i=>i.name);
+
+  const closure = {
+    id: uid('close'), date: todayKey(), closedAt: Date.now(), closedBy: actingUsername(),
+    revenue, cashToday, noncashToday, checkCount: paidToday.length,
+    activeCount, staffSummary, lowStock
+  };
+  state.dailyClosures = state.dailyClosures || [];
+  state.dailyClosures.unshift(closure);
+  if(state.dailyClosures.length > 90) state.dailyClosures = state.dailyClosures.slice(0, 90);
+  await saveDailyClosures(state.dailyClosures);
+  await logActivity('Рӯзро пӯшид — даромад: '+fmtMoney(revenue));
+  state.showCloseDayConfirm = false;
+  showToast('Рӯз пӯшида шуд ва сабт гардид');
+}
+async function deleteDailyClosure(id){
+  const c = (state.dailyClosures||[]).find(x=>x.id===id);
+  state.dailyClosures = (state.dailyClosures||[]).filter(x=>x.id!==id);
+  await saveDailyClosures(state.dailyClosures);
+  await logActivity('Сабти пӯшидани рӯзро нест кард'+(c?' ('+new Date(c.closedAt).toLocaleDateString('tg-TJ')+')':''));
+  showToast('Сабт нест карда шуд');
+}
 function renderAdminReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
@@ -3367,8 +3446,39 @@ function renderAdminReport(){
       </div>
     </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--brick);border-color:var(--brick);" id="clearReportBtn">🗑 Пок кардани ҳисобот</button>`;
 
+  const closeDayControl = state.showCloseDayConfirm ? `
+    <div class="form-box" style="border-color:var(--olive);margin-bottom:18px;">
+      <div style="width:100%;">
+        <p style="font-size:13px;color:var(--olive);font-weight:700;margin:0 0 4px;">📋 Пӯшидани рӯз тасдиқ мешавад?</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза (даромад, комиссия, огоҳии анбор) сабт мешавад. Маълумоти чекҳо нест намешавад — ин танҳо як сабти таърихӣ аст.
+        ${active.length ? `<br><strong style="color:var(--brick);">⚠️ ${active.length} миз/фармоиш ҳанӯз фаъол аст!</strong>` : ''}</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCloseDayBtn">Ҳа, рӯзро пӯш</button>
+        <button class="btn-ghost" id="cancelCloseDayBtn">Бекор</button>
+      </div>
+    </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--olive);border-color:var(--olive);" id="closeDayBtn">📋 Пӯшидани рӯз</button>`;
+
+  const closuresHtml = (state.dailyClosures||[]).slice(0,14).map(c=>`
+    <div class="receipt-item-row">
+      <div>
+        <div class="l1">${new Date(c.closedAt).toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'})} · ${escapeHtml(c.closedBy||'')}</div>
+        <div class="l2">${c.checkCount} чек ${c.lowStock&&c.lowStock.length?' · ⚠️ '+c.lowStock.length+' маҳсулоти кам':''}${c.activeCount?' · ⚠️ '+c.activeCount+' фаъол монда буд':''}</div>
+      </div>
+      <div style="text-align:right;display:flex;align-items:center;gap:10px;">
+        <div>
+          <div>${fmtMoney(c.revenue)}</div>
+          <div class="l2">💵${fmtMoney(c.cashToday)} 💳${fmtMoney(c.noncashToday)}</div>
+        </div>
+        ${state.confirmDeleteClosureId===c.id ? `
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <button class="icon-btn danger" data-confirmdelclosure="${c.id}" title="Ҳа, нест кун">✓</button>
+            <button class="icon-btn" data-canceldelclosure="${c.id}" title="Бекор">✕</button>
+          </div>` : `<button class="icon-btn danger" data-delclosure="${c.id}" title="Нест кардани ин сабт">🗑</button>`}
+      </div>
+    </div>`).join('');
+
   return `
     ${clearControl}
+    ${closeDayControl}
     <div class="stat-row">
       <div class="stat-card"><div class="label">Даромади имрӯз</div><div class="value">${fmtMoney(revenue)}</div></div>
       <div class="stat-card"><div class="label">💵 Нақд имрӯз</div><div class="value">${fmtMoney(cashToday)}</div></div>
@@ -3385,6 +3495,8 @@ function renderAdminReport(){
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
     <div class="section-title" style="margin-top:24px;">Чекҳои имрӯза</div>
     ${receiptsHtml}
+
+    ${(state.dailyClosures&&state.dailyClosures.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}
   `;
 }
 function renderDailyPaymentTable(){
@@ -3778,6 +3890,29 @@ function attachAdminEvents(){
     if(confirmClearBtn) confirmClearBtn.addEventListener('click', async ()=>{
       await clearAllReportHistory();
       render();
+    });
+    const closeDayBtn = document.getElementById('closeDayBtn');
+    if(closeDayBtn) closeDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=true; render(); });
+    const cancelCloseDayBtn = document.getElementById('cancelCloseDayBtn');
+    if(cancelCloseDayBtn) cancelCloseDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=false; render(); });
+    const confirmCloseDayBtn = document.getElementById('confirmCloseDayBtn');
+    if(confirmCloseDayBtn) confirmCloseDayBtn.addEventListener('click', async ()=>{
+      await closeDailyReport();
+      render();
+    });
+    document.querySelectorAll('[data-delclosure]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = el.dataset.delclosure; render(); });
+    });
+    document.querySelectorAll('[data-confirmdelclosure]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        const id = el.dataset.confirmdelclosure;
+        state.confirmDeleteClosureId = null;
+        await deleteDailyClosure(id);
+        render();
+      });
+    });
+    document.querySelectorAll('[data-canceldelclosure]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = null; render(); });
     });
   }
 
