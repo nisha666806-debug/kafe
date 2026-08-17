@@ -689,6 +689,8 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
    Uses Firestore's onSnapshot listeners instead of polling — changes on one device now
    reach every other device almost instantly, not after up to 6 seconds. */
 let __realtimeUnsubs = [];
+let __watchdogInterval = null;
+let __resubscribeTimer = null;
 function teardownRealtimeSync(){
   __realtimeUnsubs.forEach(unsub=>{ try{ unsub(); }catch(e){} });
   __realtimeUnsubs = [];
@@ -722,15 +724,32 @@ function setupRealtimeSync(){
           state[stateKey] = parsed;
           if(!isActivelyEditingFormField()) render();
         }catch(e){}
-      }, (err)=>{ console.error('Realtime listener error for', key, err); });
+      }, (err)=>{
+        console.error('Realtime listener error for', key, err);
+        // A flaky connection can make a listener die without the SDK cleanly reconnecting on
+        // its own. Rather than leave that one field silently stale until the person manually
+        // logs out and back in, re-subscribe everything shortly after any listener errors.
+        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
+        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 4000);
+      });
       __realtimeUnsubs.push(unsub);
     }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
   });
+  startSyncWatchdog();
+}
+// Belt-and-suspenders safety net: on a weak/flaky (not fully offline) connection, a real-time
+// listener can quietly stop delivering updates without ever firing an error at all — nothing
+// to react to, it just goes stale. Every 25s, do one plain fetch-and-compare regardless of
+// listener health, so the screen is never wrong for longer than that even in the worst case.
+function startSyncWatchdog(){
+  if(__watchdogInterval) clearInterval(__watchdogInterval);
+  __watchdogInterval = setInterval(()=>{
+    if(state.role && document.visibilityState==='visible') pollRefresh();
+  }, 25000);
 }
 async function pollRefresh(){
   if(!state.role) return; // don't wipe the login form while the person is typing
-  if(state.formOpen && state.formOpenAt && (Date.now()-state.formOpenAt) < 120000) return;
-  if(state.formOpen) state.formOpen = false; // safety: don't let a stuck form block sync forever
+  if(isActivelyEditingFormField()) return; // same precise check the real-time path uses
   const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses} = await loadAll();
   if(menu) state.menu = menu;
   if(orders) state.orders = orders;
@@ -3940,6 +3959,12 @@ document.addEventListener('visibilitychange', ()=>{
   if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
     pollRefresh();
   }
+});
+
+// The browser fires this the moment it detects the connection is back after being down —
+// catch up immediately rather than waiting for the next watchdog tick.
+window.addEventListener('online', ()=>{
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollRefresh();
 });
 
 init();
