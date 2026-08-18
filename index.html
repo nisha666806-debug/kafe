@@ -329,6 +329,10 @@ function getCafeId(){
   }catch(e){ return ''; }
 }
 const CAFE_ID = getCafeId();
+// Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
+// has been open since before a fix shipped) so it can prompt a reload instead of silently
+// staying out of date until someone thinks to close and reopen the app.
+const APP_VERSION = '2026-08-18-1';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -4190,6 +4194,36 @@ document.addEventListener('visibilitychange', ()=>{
 window.addEventListener('online', ()=>{
   if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollRefresh();
 });
+
+/* ============ UPDATE CHECK ============
+   A PWA that's been left open for hours (a whole shift) keeps running the JS it loaded at
+   launch — a fix shipped after that stays invisible until the person happens to fully close
+   and reopen the app. Periodically check a small version file (never cached) and, if it no
+   longer matches what's running, show a banner offering an immediate reload. */
+let __updateBannerShown = false;
+function showUpdateBanner(){
+  if(__updateBannerShown) return;
+  __updateBannerShown = true;
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999;background:var(--ink);color:var(--paper);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;box-shadow:0 -2px 10px rgba(0,0,0,.2);';
+  bar.innerHTML = `<span>🔄 Нусхаи нави барнома дастрас аст</span><button style="background:var(--brick);color:#fff;border:none;padding:8px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;">Навсозӣ</button>`;
+  bar.querySelector('button').addEventListener('click', ()=>{ window.location.reload(); });
+  document.body.appendChild(bar);
+}
+async function checkForUpdate(){
+  try{
+    const res = await fetch('./version.json?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) return;
+    const data = await res.json();
+    if(data && data.version && data.version !== APP_VERSION) showUpdateBanner();
+  }catch(e){}
+}
+setInterval(checkForUpdate, 3*60*1000); // every 3 minutes
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible') checkForUpdate();
+});
+window.addEventListener('online', checkForUpdate);
+setTimeout(checkForUpdate, 5000); // one soon after launch too, not just on the long timer
 
 init();
 
