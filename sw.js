@@ -1,6 +1,6 @@
 // Minimal service worker — required for the browser to treat this as an installable app.
 // Data lives in Firebase (needs internet), so this does not attempt offline caching of app data.
-const CACHE_NAME = 'kafe-app-shell-v1';
+const CACHE_NAME = 'kafe-app-shell-v4';
 const SHELL_FILES = ['./index.html', './manifest.json', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
