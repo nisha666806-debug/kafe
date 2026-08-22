@@ -333,7 +333,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-21-6';
+const APP_VERSION = '2026-08-22-7';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1607,7 +1607,7 @@ function orderCommission(order){
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
-    if(o.status!=='paid') return false;
+    if(o.status!=='paid' || o.archived) return false;
     const ts = o.paidAt || o.updatedAt || o.createdAt;
     if(scope==='today' && !isToday(ts)) return false;
     if(scope==='month' && !isThisMonth(ts)) return false;
@@ -3762,11 +3762,11 @@ async function clearAllReportHistory(){
   });
   const ok=await saveOrders(state.orders); if(!ok) return;
   state.confirmClearReport=false;
-  await logActivity('Таърихи ҳисобот архив шуд — ҳеҷ фармоиш нест карда нашуд');
-  showToast('Ҳисобот архив шуд; маълумот нест карда нашуд');
+  await logActivity('Ҳисоботи ҷорӣ тоза шуд — маълумот ба архив гузашт');
+  showToast('Ҳисоботи ҷорӣ тоза шуд; маълумот дар архив боқӣ монд');
 }
 async function closeDailyReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -3801,7 +3801,7 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -3834,8 +3834,8 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи чекҳои пардохтшударо (ҳисобот, даромад, комиссияи кормандон барои гузашта) пурра ва бебозгашт нест мекунад. Мизҳои фаъол дахл намеёбанд.</p>
-        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал чекҳои пардохтшударо аз ҳисоботи ҷорӣ пинҳон мекунад. Маълумот дар архив боқӣ мемонад ва нест карда намешавад. Мизҳои фаъол дахл намеёбанд.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, аз ҳисоботи ҷорӣ тоза кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
     </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--brick);border-color:var(--brick);" id="clearReportBtn">🗑 Пок кардани ҳисобот</button>`;
@@ -3895,7 +3895,7 @@ function renderAdminReport(){
   `;
 }
 function renderDailyPaymentTable(){
-  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt);
+  const paid = state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt);
   if(!paid.length) return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ чек пардохт нашудааст</p>`;
   const map = {};
   paid.forEach(o=>{
@@ -3967,7 +3967,7 @@ function renderProductBreakdownTable(orders){
 // as its own sheet — and triggers a browser download.
 function exportReportToExcel(){
   if(typeof XLSX === 'undefined'){ showToast('Китобхонаи Excel бор нашуд — интернетро санҷед'); return; }
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4011,7 +4011,7 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(receiptRows), 'Чекҳои имрӯза');
 
   const dayMap = {};
-  state.orders.filter(o=>o.status==='paid' && o.paidAt).forEach(o=>{
+  state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt).forEach(o=>{
     const d = new Date(o.paidAt);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     if(!dayMap[key]) dayMap[key] = {cash:0, noncash:0, count:0, label: d.toLocaleDateString('tg-TJ')};
