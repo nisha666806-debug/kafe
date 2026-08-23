@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-19';
+const APP_VERSION = '2026-08-23-21';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -3865,31 +3865,62 @@ async function clearAllReportHistory(){
 }
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
-  const revenue = paidToday.reduce((s,o)=>s+o.total,0);
+  const active = state.orders.filter(o=>o.status==='active' && isToday(o.updatedAt||o.createdAt));
+
+  if(active.length){
+    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед');
+    return;
+  }
+
+  if(!paidToday.length){
+    showToast('Имрӯз барои архив ҳисоботи пардохтшуда нест');
+    return;
+  }
+
+  const revenue = paidToday.reduce((s,o)=>s+(Number(o.total)||0),0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
-  const activeCount = state.orders.filter(o=>o.status==='active').length;
 
   const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
   const staffSummary = commissionAccounts.map(acc=>{
     const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
-    return {username: acc.username, role: acc.role, total: b.total, checks: b.orderCount};
+    return {username:acc.username, role:acc.role, total:b.total, checks:b.orderCount};
   }).filter(s=>s.checks>0);
 
-  const lowStock = state.inventory.filter(i => i.minThreshold>0 && i.qty <= i.minThreshold).map(i=>i.name);
+  const lowStock = state.inventory.filter(i=>i.minThreshold>0 && i.qty<=i.minThreshold).map(i=>i.name);
 
+  const closedAt = Date.now();
   const closure = {
-    id: uid('close'), date: todayKey(), closedAt: Date.now(), closedBy: actingUsername(),
-    revenue, cashToday, noncashToday, checkCount: paidToday.length,
-    activeCount, staffSummary, lowStock
+    id:uid('close'),
+    date:todayKey(),
+    closedAt,
+    closedBy:actingUsername(),
+    revenue,
+    cashToday,
+    noncashToday,
+    checkCount:paidToday.length,
+    activeCount:active.length,
+    staffSummary,
+    lowStock,
+    // Keep a full snapshot in the archive for historical viewing/export.
+    orders:paidToday.map(o=>JSON.parse(JSON.stringify(o)))
   };
-  state.dailyClosures = state.dailyClosures || [];
+
+  state.dailyClosures=state.dailyClosures||[];
   state.dailyClosures.unshift(closure);
-  if(state.dailyClosures.length > 90) state.dailyClosures = state.dailyClosures.slice(0, 90);
+  if(state.dailyClosures.length>90) state.dailyClosures=state.dailyClosures.slice(0,90);
   await saveDailyClosures(state.dailyClosures);
-  await logActivity('Рӯзро пӯшид — даромад: '+fmtMoney(revenue));
-  state.showCloseDayConfirm = false;
-  showToast('Рӯз пӯшида шуд ва сабт гардид');
+
+  // IMPORTANT: do not delete paid orders from the accounting collection.
+  // Store a report cutoff instead. This makes the current report empty while
+  // preserving all orders for audit/history and preventing multi-device resurrection.
+  state.settings={...state.settings, reportClosedAt:closedAt};
+  await saveSettings(state.settings);
+
+  await logActivity('Рӯзро пӯшид — ҳисобот ба архив гузашт: '+fmtMoney(revenue));
+  state.showCloseDayConfirm=false;
+  state.confirmClearReport=false;
+  showToast('Рӯз пӯшида шуд — ҳисоботи имрӯз архив шуд');
 }
 async function deleteDailyClosure(id){
   const c = (state.dailyClosures||[]).find(x=>x.id===id);
@@ -3899,7 +3930,8 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
+  const reportCutoff = Number(state.settings.reportClosedAt)||0;
+  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && Number(o.paidAt||0)>reportCutoff);
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -3942,7 +3974,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--olive);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--olive);font-weight:700;margin:0 0 4px;">📋 Пӯшидани рӯз тасдиқ мешавад?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза (даромад, комиссия, огоҳии анбор) сабт мешавад. Маълумоти чекҳо нест намешавад — ин танҳо як сабти таърихӣ аст.
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза ба архив сабт мешавад ва чекҳои пардохтшуда аз ҳисоботи ҷорӣ хориҷ мешаванд. Маълумоти чекҳо дар база нигоҳ дошта мешавад. Мизҳои фаъол пӯшида намешаванд.
         ${active.length ? `<br><strong style="color:var(--brick);">⚠️ ${active.length} миз/фармоиш ҳанӯз фаъол аст!</strong>` : ''}</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCloseDayBtn">Ҳа, рӯзро пӯш</button>
         <button class="btn-ghost" id="cancelCloseDayBtn">Бекор</button>
