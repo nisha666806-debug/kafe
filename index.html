@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-23';
+const APP_VERSION = '2026-08-23-24';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -415,7 +415,7 @@ async function saveMenu(menu){
 // left deleted rather than resurrected. This does not fully resolve two devices editing the
 // very same order at once (that still keeps whichever write lands last for that one record),
 // but it protects the far more common case: an entirely different order disappearing.
-async async function saveOrders(orders){
+async function saveOrders(orders){
   if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
   // ACCOUNTING SAFETY:
   // - Never physically delete an order from this accounting collection.
