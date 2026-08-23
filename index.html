@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-21';
+const APP_VERSION = '2026-08-23-23';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -415,7 +415,7 @@ async function saveMenu(menu){
 // left deleted rather than resurrected. This does not fully resolve two devices editing the
 // very same order at once (that still keeps whichever write lands last for that one record),
 // but it protects the far more common case: an entirely different order disappearing.
-async function saveOrders(orders){
+async async function saveOrders(orders){
   if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
   // ACCOUNTING SAFETY:
   // - Never physically delete an order from this accounting collection.
@@ -455,8 +455,18 @@ async function saveOrders(orders){
           return;
         }
         if(r.status==='paid' && l.status==='paid'){
-          // Preserve the most recent payment lock/audit metadata.
-          merged.push((Number(r.lockedAt||r.paidAt||0) >= Number(l.lockedAt||l.paidAt||0)) ? r : l);
+          // Preserve the newest payment metadata AND never lose an archive flag.
+          // A paid order can be archived by one device while another still holds
+          // the older paid copy. The archive state must win in that merge.
+          const newest = (Number(r.lockedAt||r.paidAt||0) >= Number(l.lockedAt||l.paidAt||0)) ? r : l;
+          const older = newest===r ? l : r;
+          const mergedPaid = {...newest};
+          if(r.archived===true || l.archived===true){
+            mergedPaid.archived = true;
+            mergedPaid.archivedAt = Math.max(Number(r.archivedAt||0), Number(l.archivedAt||0), Date.now());
+            mergedPaid.archivedBy = (newest.archivedBy || older.archivedBy || actingUsername() || '?');
+          }
+          merged.push(mergedPaid);
           return;
         }
 
@@ -3851,21 +3861,20 @@ function renderAdminMenu(){
 }
 
 async function clearAllReportHistory(){
-  // Accounting records are archived, never physically deleted.
   const now=Date.now();
-  state.orders.forEach(o=>{
-    if(o.status==='paid'){
-      o.archived=true; o.archivedAt=now; o.archivedBy=actingUsername()||'?'; o.updatedAt=now;
-    }
-  });
-  const ok=await saveOrders(state.orders); if(!ok) return;
+  const actor=actingUsername()||'?';
+  state.orders=(state.orders||[]).map(o=>o.status==='paid'
+    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
+    : o);
+  const ok=await saveOrders(state.orders);
+  if(!ok) return;
   state.confirmClearReport=false;
   await logActivity('Таърихи ҳисобот архив шуд — ҳеҷ фармоиш нест карда нашуд');
   showToast('Ҳисобот архив шуд; маълумот нест карда нашуд');
 }
 async function closeDailyReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt));
-  const active = state.orders.filter(o=>o.status==='active' && isToday(o.updatedAt||o.createdAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && o.archived!==true);
+  const active = state.orders.filter(o=>o.status==='active');
 
   if(active.length){
     showToast('Аввал ҳамаи мизҳои фаъолро пӯшед');
@@ -3877,20 +3886,20 @@ async function closeDailyReport(){
     return;
   }
 
-  const revenue = paidToday.reduce((s,o)=>s+(Number(o.total)||0),0);
-  const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
-  const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+  const revenue=paidToday.reduce((s,o)=>s+(Number(o.total)||0),0);
+  const cashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
+  const noncashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
 
-  const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
-  const staffSummary = commissionAccounts.map(acc=>{
-    const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
-    return {username:acc.username, role:acc.role, total:b.total, checks:b.orderCount};
+  const commissionAccounts=state.accounts.filter(a=>a.wageType==='commission'&&(a.role==='waiter'||a.role==='cashier'));
+  const staffSummary=commissionAccounts.map(acc=>{
+    const b=staffCommissionBreakdown(acc.username,acc.role,'today');
+    return {username:acc.username,role:acc.role,total:b.total,checks:b.orderCount};
   }).filter(s=>s.checks>0);
 
-  const lowStock = state.inventory.filter(i=>i.minThreshold>0 && i.qty<=i.minThreshold).map(i=>i.name);
+  const lowStock=state.inventory.filter(i=>i.minThreshold>0&&i.qty<=i.minThreshold).map(i=>i.name);
+  const closedAt=Date.now();
 
-  const closedAt = Date.now();
-  const closure = {
+  const closure={
     id:uid('close'),
     date:todayKey(),
     closedAt,
@@ -3902,7 +3911,6 @@ async function closeDailyReport(){
     activeCount:active.length,
     staffSummary,
     lowStock,
-    // Keep a full snapshot in the archive for historical viewing/export.
     orders:paidToday.map(o=>JSON.parse(JSON.stringify(o)))
   };
 
@@ -3911,16 +3919,24 @@ async function closeDailyReport(){
   if(state.dailyClosures.length>90) state.dailyClosures=state.dailyClosures.slice(0,90);
   await saveDailyClosures(state.dailyClosures);
 
-  // IMPORTANT: do not delete paid orders from the accounting collection.
-  // Store a report cutoff instead. This makes the current report empty while
-  // preserving all orders for audit/history and preventing multi-device resurrection.
+  // Mark the exact paid orders as archived instead of deleting them.
+  // This survives realtime sync because the accounting record itself carries the flag.
+  const ids=new Set(paidToday.map(o=>o.id));
+  state.orders=state.orders.map(o=>ids.has(o.id)
+    ? {...o, archived:true, archivedAt:closedAt, archivedBy:actingUsername(), updatedAt:closedAt}
+    : o);
+  const saved=await saveOrders(state.orders);
+  if(!saved) return;
+
+  // Keep a simple settings marker for informational purposes, but the report itself
+  // relies on order.archived so stale settings cannot make archived orders reappear.
   state.settings={...state.settings, reportClosedAt:closedAt};
   await saveSettings(state.settings);
 
-  await logActivity('Рӯзро пӯшид — ҳисобот ба архив гузашт: '+fmtMoney(revenue));
+  await logActivity('Рӯзро пӯшид — '+paidToday.length+' чек ба архив гузашт');
   state.showCloseDayConfirm=false;
   state.confirmClearReport=false;
-  showToast('Рӯз пӯшида шуд — ҳисоботи имрӯз архив шуд');
+  showToast('Рӯз пӯшида шуд — ҳисобот архив шуд');
 }
 async function deleteDailyClosure(id){
   const c = (state.dailyClosures||[]).find(x=>x.id===id);
@@ -3930,8 +3946,10 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  const reportCutoff = Number(state.settings.reportClosedAt)||0;
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && Number(o.paidAt||0)>reportCutoff);
+  // Current report contains only today's paid orders that have NOT been archived.
+  // Archived orders remain in the accounting database and in the archive, but never
+  // reappear on the current report after realtime sync or refresh.
+  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && o.archived!==true);
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
