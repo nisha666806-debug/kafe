@@ -333,7 +333,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-14';
+const APP_VERSION = '2026-08-23-15';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -960,8 +960,12 @@ function setCustomerArrivalType(type){
   render();
 }
 function setCustomerPhoneLast4(value){
-  state.customerPhoneLast4 = String(value||'').replace(/\D/g,'').slice(0,4);
-  render();
+  // Do not re-render the whole screen on every keystroke: re-rendering replaces
+  // the input element and makes the keyboard lose focus after the first digit.
+  const clean = String(value||'').replace(/\D/g,'').slice(0,4);
+  state.customerPhoneLast4 = clean;
+  const input = document.getElementById('arrivalPhoneLast4');
+  if(input && input.value !== clean) input.value = clean;
 }
 function validateCustomerArrival(){
   // Existing orders do not need the arrival choice again.
@@ -3064,7 +3068,14 @@ function attachTicketEvents(){
     const arrivalWithoutOrder = document.getElementById('arrivalWithoutOrder');
     if(arrivalWithoutOrder) arrivalWithoutOrder.addEventListener('click', ()=>setCustomerArrivalType('without_order'));
     const arrivalPhoneLast4 = document.getElementById('arrivalPhoneLast4');
-    if(arrivalPhoneLast4) arrivalPhoneLast4.addEventListener('input', e=>setCustomerPhoneLast4(e.target.value));
+    if(arrivalPhoneLast4){
+      arrivalPhoneLast4.addEventListener('input', e=>setCustomerPhoneLast4(e.target.value));
+      arrivalPhoneLast4.addEventListener('keydown', e=>{
+        if(e.ctrlKey || e.metaKey || e.altKey) return;
+        if(['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) return;
+        if(!/^[0-9]$/.test(e.key)) e.preventDefault();
+      });
+    }
 
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
