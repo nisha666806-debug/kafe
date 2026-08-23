@@ -299,6 +299,10 @@
   .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-weight:600;}
   .xls-table tr:nth-child(even) td{background:var(--paper-dim);}
   .xls-table td.total-cell{font-weight:700;color:var(--blue);}
+
+  .arrival-badge{display:block;width:max-content;max-width:100%;margin:0 0 7px;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .arrival-badge.with-order{background:#eef5ff;color:#1f5fbf;border:1px solid #cfe0ff;}
+  .arrival-badge.without-order{background:#f4f1eb;color:#6b5f4d;border:1px solid #ded7ca;}
 </style>
 </head>
 <body>
@@ -333,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-15';
+const APP_VERSION = '2026-08-23-19';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -495,8 +499,18 @@ async function saveOrders(orders){
   }
 }
 async function saveSettings(settings){
-  const ok = await fsSet('settings', JSON.stringify(settings));
-  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+  try{
+    const ok = await fsSet('settings', JSON.stringify(settings));
+    if(!ok){
+      showToast('Хатогӣ дар нигоҳдорӣ');
+      return false;
+    }
+    return true;
+  }catch(e){
+    console.error('saveSettings failed',e);
+    showToast('Хатогӣ дар нигоҳдорӣ');
+    return false;
+  }
 }
 async function saveReservations(reservations){
   const ok = await fsSet('reservations', JSON.stringify(reservations));
@@ -621,7 +635,7 @@ const DEFAULT_MENU = [
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
   checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
-  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0};
+  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}'};
 
 /* ============ STATE ============ */
 let state = {
@@ -1205,22 +1219,17 @@ async function payTicket(cashAmount, noncashAmount){
 function speakPaymentSuccess(order){
   try{
     if(!('speechSynthesis' in window)) return;
-    const tbl = state.tables.find(t=>t.id===order.table);
-    const tableName = tbl ? String(tbl.name || tbl.number || order.table || '').trim() : String(order.table || '').trim();
-    const customer = String(
-      order.customerName || order.clientName || order.customer || ''
-    ).trim();
-
-    let text = tableName
-      ? `Пардохти мизи рақами ${tableName} иҷро шуд.`
-      : `Пардохт иҷро шуд.`;
-    if(customer) text += ` Номи клиент: ${customer}.`;
-
+    if(state.settings && state.settings.paymentVoiceEnabled===false) return;
+    const tbl=state.tables.find(t=>t.id===order.table);
+    const tableName=tbl ? String(tbl.name||tbl.number||order.table||'').trim() : String(order.table||'').trim();
+    const customer=String(order.customerName||order.clientName||order.customer||'').trim();
+    const template=String((state.settings && state.settings.paymentVoiceText)||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}');
+    const namePart=customer ? ` Номи клиент: ${customer}.` : '';
+    const spoken=template.replace(/\{TABLE\}/gi,tableName||'—').replace(/\{NAME\}/gi,namePart);
+    if(!spoken.trim()) return;
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'ru-RU';
-    utter.rate = 0.9;
-    utter.pitch = 1;
+    const utter=new SpeechSynthesisUtterance(spoken);
+    utter.lang='ru-RU'; utter.rate=0.9; utter.pitch=1;
     window.speechSynthesis.speak(utter);
   }catch(e){}
 }
@@ -1975,9 +1984,19 @@ function buildTableCards(){
     const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
     const actingName = actingUsername();
     const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !isRealAdmin;
-    let dotClass = 'free', statusText = 'Озод', extra = '';
+    let dotClass = 'free', statusText = 'Озод', extra = '', arrivalBadge = '';
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
+
+      // Show the customer's arrival type prominently above the table number.
+      // "With order" shows only the last 4 phone digits; "without order" is explicit.
+      if(order.customerType === 'with_order'){
+        const last4 = String(order.customerPhoneLast4 || '').replace(/\D/g,'').slice(-4);
+        arrivalBadge = `<span class="arrival-badge with-order">🧾 Бо заказ${last4 ? ` · 📞 ****${escapeHtml(last4)}` : ''}</span>`;
+      }else if(order.customerType === 'without_order'){
+        arrivalBadge = `<span class="arrival-badge without-order">👤 Беззаказ</span>`;
+      }
+
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
@@ -2005,6 +2024,7 @@ function buildTableCards(){
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
     cards += `
     <button class="table-card ${reservation?'reserved-table':''} ${lockedForMe?'locked-table':''}" data-table="${t}">
+      ${arrivalBadge}
       <div class="row1">
         <span class="tnum">${escapeHtml(tbl.name)}</span>
         <span class="dot ${dotClass}"></span>
@@ -4183,6 +4203,24 @@ function renderAdminSettings(){
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveServiceChargeBtn">Сабт кардан</button>
   </div>
 
+  <div class="section-title" style="margin-top:32px;">🔊 Овози пардохт</div>
+  <div class="settings-form">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+      <input type="checkbox" id="paymentVoiceEnabled" ${state.settings.paymentVoiceEnabled!==false?'checked':''}>
+      Овози пардохт фаъол бошад
+    </label>
+    <div class="field" style="width:100%;">
+      <label>Матни овози пардохт</label>
+      <input type="text" id="paymentVoiceText"
+        value="${escapeHtml(state.settings.paymentVoiceText||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}')}"
+        placeholder="Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}">
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">
+      <b>{TABLE}</b> = рақами миз · <b>{NAME}</b> = номи клиент, агар бошад.
+    </p>
+    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="savePaymentVoiceBtn">Сабт кардан</button>
+  </div>
+
   <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
   <div class="form-box" style="max-width:420px;flex-direction:column;align-items:flex-start;">
     <p style="font-size:13px;color:#6b5f4d;margin:0 0 6px;">Тамоми хӯрокҳои ҳозираро нест карда, менюро ба ҳолати пешфарз бармегардонад. Барои хӯрокҳои шумо мувофиқ нест — фақат нуқтаи оғоз аст, баъд аз он дар варақаи «Меню» тағйир диҳед.</p>
@@ -4737,6 +4775,33 @@ function attachAdminEvents(){
       showToast('Сабт шуд');
       render();
     });
+    const savePaymentVoice = async ()=>{
+      const enabled = !!document.getElementById('paymentVoiceEnabled').checked;
+      const input = document.getElementById('paymentVoiceText');
+      const voiceText = String(input ? input.value : '').trim()
+        || 'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}';
+
+      const nextSettings = Object.assign({}, state.settings, {
+        paymentVoiceEnabled: enabled,
+        paymentVoiceText: voiceText
+      });
+
+      const ok = await saveSettings(nextSettings);
+      if(!ok) return;
+
+      state.settings = nextSettings;
+      showToast('Матни овози пардохт сабт шуд');
+      render();
+    };
+
+    const savePaymentVoiceBtn = document.getElementById('savePaymentVoiceBtn');
+    if(savePaymentVoiceBtn) savePaymentVoiceBtn.addEventListener('click', savePaymentVoice);
+
+    const paymentVoiceTextInput = document.getElementById('paymentVoiceText');
+    if(paymentVoiceTextInput) paymentVoiceTextInput.addEventListener('keydown', e=>{
+      if(e.key==='Enter'){ e.preventDefault(); savePaymentVoice(); }
+    });
+
     const confirmResetBtn = document.getElementById('confirmResetBtn');
     if(confirmResetBtn) confirmResetBtn.addEventListener('click', async ()=>{
       state.menu = DEFAULT_MENU.map(m=>({...m}));
