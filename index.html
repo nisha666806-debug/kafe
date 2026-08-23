@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-26';
+const APP_VERSION = '2026-08-23-28';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1676,7 +1676,7 @@ function orderCommission(order){
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
-    if(o.status!=='paid') return false;
+    if(o.status!=='paid' || o.archived===true) return false;
     const ts = o.paidAt || o.updatedAt || o.createdAt;
     if(scope==='today' && !isToday(ts)) return false;
     if(scope==='month' && !isThisMonth(ts)) return false;
@@ -1719,24 +1719,42 @@ function autoBonusToday(username, role){
   return {checkCountBonus, revenueBonus, total: checkCountBonus+revenueBonus, orderCount: breakdown.orderCount, commissionTotal: breakdown.total};
 }
 function computeWages(acc){
+  const reportClearedToday = !!(state.settings && state.settings.reportClosedAt && isToday(state.settings.reportClosedAt));
+  const salaryResetAt = Number(state.settings && state.settings.salaryResetAt) || 0;
+  const salaryResetThisMonth = salaryResetAt && isThisMonth(salaryResetAt);
+  const salaryResetForToday = salaryResetAt && isToday(salaryResetAt);
+
   if(acc.wageType==='commission'){
-    const auto = autoBonusToday(acc.username, acc.role);
-    const manualToday = manualBonusSum(acc.username, 'today');
-    const manualMonth = manualBonusSum(acc.username, 'month');
+    const auto = (salaryResetForToday || reportClearedToday) ? {total:0} : autoBonusToday(acc.username, acc.role);
+    const manualToday = (salaryResetForToday || reportClearedToday) ? 0 : manualBonusSum(acc.username, 'today');
+    const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
+    const dailyCommission = (salaryResetForToday || reportClearedToday) ? 0 : staffCommission(acc.username, acc.role, 'today');
+    const monthlyCommission = salaryResetThisMonth ? 0 : staffCommission(acc.username, acc.role, 'month');
     return {
-      daily: staffCommission(acc.username, acc.role, 'today') + auto.total + manualToday,
-      monthly: staffCommission(acc.username, acc.role, 'month') + manualMonth,
+      daily: dailyCommission + auto.total + manualToday,
+      monthly: monthlyCommission + manualMonth,
       bonusToday: auto.total + manualToday
     };
   }
+
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   const amount = Number(acc.wageAmount) || 0;
-  const manualToday = manualBonusSum(acc.username, 'today');
-  const manualMonth = manualBonusSum(acc.username, 'month');
+  const manualToday = (salaryResetForToday || reportClearedToday) ? 0 : manualBonusSum(acc.username, 'today');
+  const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
+
   if(acc.wageType==='monthly'){
-    return {daily: amount/days + manualToday, monthly: amount + manualMonth, bonusToday: manualToday};
+    return {
+      daily: (salaryResetForToday || reportClearedToday) ? 0 : amount/days + manualToday,
+      monthly: salaryResetThisMonth ? 0 : amount + manualMonth,
+      bonusToday: manualToday
+    };
   }
-  return {daily: amount + manualToday, monthly: amount*days + manualMonth, bonusToday: manualToday};
+
+  return {
+    daily: (salaryResetForToday || reportClearedToday) ? 0 : amount + manualToday,
+    monthly: salaryResetThisMonth ? 0 : amount*days + manualMonth,
+    bonusToday: manualToday
+  };
 }
 function formatQtyLabel(it){
   const safeName = escapeHtml(it.name||'');
@@ -3880,7 +3898,7 @@ async function clearAllReportHistory(){
   // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
   // It is rendered from state.dailyClosures, so the next render must show no rows.
   state.dailyReportRows=[];
-  state.settings={...state.settings, reportClosedAt:now};
+  state.settings={...state.settings, reportClosedAt:now, salaryResetAt:now};
   await saveSettings(state.settings);
 
   state.confirmClearReport=false;
