@@ -333,7 +333,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-13';
+const APP_VERSION = '2026-08-23-14';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -650,6 +650,8 @@ let state = {
   confirmDeleteBonusId:null,
   seenPendingIds:null,
   seenCashierOrderIds:null,
+  customerArrivalType:null,
+  customerPhoneLast4:'',
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -951,6 +953,26 @@ function occupiedTableCount(){
   const tableIds = new Set(state.tables.map(t=>t.id));
   return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && tableIds.has(o.table)).length;
 }
+
+function setCustomerArrivalType(type){
+  state.customerArrivalType = type;
+  if(type!=='with_order') state.customerPhoneLast4='';
+  render();
+}
+function setCustomerPhoneLast4(value){
+  state.customerPhoneLast4 = String(value||'').replace(/\D/g,'').slice(0,4);
+  render();
+}
+function validateCustomerArrival(){
+  // Existing orders do not need the arrival choice again.
+  if(activeOrderForTable(state.activeTable)) return true;
+  if(state.role!=='waiter') return true;
+  if(state.customerArrivalType==='without_order') return true;
+  if(state.customerArrivalType==='with_order' && /^\d{4}$/.test(state.customerPhoneLast4||'')) return true;
+  showToast('Интихоб кунед: «Бо заказ» ё «Бе заказ». Барои «Бо заказ» 4 рақами телефонро нависед.');
+  return false;
+}
+
 function openTable(t){
   const existing = activeOrderForTable(t);
   const tbl = state.tables.find(x=>x.id===t);
@@ -969,6 +991,10 @@ function openTable(t){
   state.ticketMode = state.role==='waiter' ? 'edit' : (state.role==='cashier' ? 'pay' : 'view');
   state.activeTable = t;
   state.draftItems = {};
+  if(!existing && state.role==='waiter'){
+    state.customerArrivalType = null;
+    state.customerPhoneLast4 = '';
+  }
   if(existing){
     existing.items.forEach(it=>{ state.draftItems[it.menuId] = it.qty; });
   } else if(state.role==='waiter' && state.reservations && state.reservations[t] && state.reservations[t].preOrder && state.reservations[t].preOrder.length){
@@ -983,6 +1009,8 @@ function openTable(t){
 function closeTicket(){
   state.activeTable = null;
   state.draftItems = {};
+  state.customerArrivalType = null;
+  state.customerPhoneLast4 = '';
   state.confirmCancelOrderId = null;
   render();
 }
@@ -1031,6 +1059,7 @@ function removeDraftItem(mid){
   render();
 }
 async function saveTicket(sendFlag){
+  if(!validateCustomerArrival()) return;
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? order.items : [];
   let droppedAny = false;
@@ -1047,8 +1076,14 @@ async function saveTicket(sendFlag){
   if(!order){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
-      createdBy: actingUsername(), sentToKitchen:false};
+      createdBy: actingUsername(), sentToKitchen:false,
+      customerType: state.customerArrivalType || 'without_order',
+      customerPhoneLast4: state.customerArrivalType==='with_order' ? state.customerPhoneLast4 : null};
     state.orders.push(order);
+  }
+  if(isNew && state.role==='waiter'){
+    order.customerType = state.customerArrivalType || 'without_order';
+    order.customerPhoneLast4 = state.customerArrivalType==='with_order' ? state.customerPhoneLast4 : null;
   }
   order.items = items;
   order.total = total;
@@ -2974,6 +3009,22 @@ function renderTicketOverlay(){
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
+      ${currentOrder && currentOrder.customerType ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">${currentOrder.customerType==='with_order' ? `🧾 Бо заказ · 📞 ****${escapeHtml(currentOrder.customerPhoneLast4||'')}` : '👤 Бе заказ'}</p>` : ''}
+      ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
+      <div class="form-box" style="margin:10px 20px 14px;display:block;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Клиент бо заказ омадааст?</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="${state.customerArrivalType==='with_order'?'btn-primary':'btn-ghost'}" style="flex:none;padding:9px 14px;" id="arrivalWithOrder">🧾 Бо заказ</button>
+          <button type="button" class="${state.customerArrivalType==='without_order'?'btn-primary':'btn-ghost'}" style="flex:none;padding:9px 14px;" id="arrivalWithoutOrder">👤 Бе заказ</button>
+        </div>
+        ${state.customerArrivalType==='with_order' ? `
+          <div style="margin-top:10px;">
+            <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);font-weight:700;">4 рақами охири телефон</label>
+            <input id="arrivalPhoneLast4" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
+              value="${escapeHtml(state.customerPhoneLast4||'')}" placeholder="4521"
+              style="display:block;width:140px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;">
+          </div>` : ''}
+      </div>` : ''}
       ${menuSection}
       <div class="receipt">
         <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
@@ -3008,6 +3059,13 @@ function attachTicketEvents(){
     state.confirmCancelOrderId = null; render();
   });
   if(mode==='edit'){
+    const arrivalWithOrder = document.getElementById('arrivalWithOrder');
+    if(arrivalWithOrder) arrivalWithOrder.addEventListener('click', ()=>setCustomerArrivalType('with_order'));
+    const arrivalWithoutOrder = document.getElementById('arrivalWithoutOrder');
+    if(arrivalWithoutOrder) arrivalWithoutOrder.addEventListener('click', ()=>setCustomerArrivalType('without_order'));
+    const arrivalPhoneLast4 = document.getElementById('arrivalPhoneLast4');
+    if(arrivalPhoneLast4) arrivalPhoneLast4.addEventListener('input', e=>setCustomerPhoneLast4(e.target.value));
+
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
     });
