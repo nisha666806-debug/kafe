@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-23-24';
+const APP_VERSION = '2026-08-23-26';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -3863,14 +3863,30 @@ function renderAdminMenu(){
 async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
+
+  // Archive records are the daily reports. When the user explicitly chooses
+  // to clear report history, delete both the current report records and the
+  // archived daily summaries.
   state.orders=(state.orders||[]).map(o=>o.status==='paid'
     ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
     : o);
+
   const ok=await saveOrders(state.orders);
   if(!ok) return;
+
+  state.dailyClosures=[];
+  await saveDailyClosures([]);
+
+  // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
+  // It is rendered from state.dailyClosures, so the next render must show no rows.
+  state.dailyReportRows=[];
+  state.settings={...state.settings, reportClosedAt:now};
+  await saveSettings(state.settings);
+
   state.confirmClearReport=false;
-  await logActivity('Таърихи ҳисобот архив шуд — ҳеҷ фармоиш нест карда нашуд');
-  showToast('Ҳисобот архив шуд; маълумот нест карда нашуд');
+  render();
+  await logActivity('Ҳисобот ва архиви ҳисоботҳои ҳаррӯза пурра нест карда шуд');
+  showToast('Ҳисобот ва архиви ҳаррӯза нест карда шуд');
 }
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && o.archived!==true);
