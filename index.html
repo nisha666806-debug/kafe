@@ -71,7 +71,7 @@
     background:linear-gradient(135deg,#171310,#3A2E1F 60%,var(--gold));
     box-shadow:inset 0 0 0 1px rgba(201,162,39,.5);
   }
-  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
+  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:visible;text-overflow:clip;max-width:150px;}
   .brand .tag{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--text-dim);font-weight:700;display:none;}
   @media(min-width:480px){.brand .name{max-width:none;} .brand .tag{display:inline;}}
   .top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-24-final';
+const APP_VERSION = '2026-08-24-31';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -2072,8 +2072,9 @@ function buildTableCards(){
       // Show the customer's arrival type prominently above the table number.
       // "With order" shows only the last 4 phone digits; "without order" is explicit.
       if(order.customerType === 'with_order'){
-        const last4 = String(order.customerPhoneLast4 || '').replace(/\D/g,'').slice(-4);
-        arrivalBadge = `<span class="arrival-badge with-order">🧾 Бо заказ${last4 ? ` · 📞 ${escapeHtml(last4)}` : ''}</span>`;
+        const phoneSource = order.customerPhoneLast4 || order.customerPhone || '';
+        const last4 = String(phoneSource).replace(/\D/g,'').slice(-4);
+        arrivalBadge = `<span class="arrival-badge with-order">🧾 Бо заказ${last4 ? ` · 📞 ${escapeHtml(last4)}` : ' · 📞 —'}</span>`;
       }else if(order.customerType === 'without_order'){
         arrivalBadge = `<span class="arrival-badge without-order">👤 Беззаказ</span>`;
       }
@@ -3114,7 +3115,7 @@ function renderTicketOverlay(){
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
-      ${currentOrder && currentOrder.customerType ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">${currentOrder.customerType==='with_order' ? `🧾 Бо заказ · 📞 ****${escapeHtml(currentOrder.customerPhoneLast4||'')}` : '👤 Бе заказ'}</p>` : ''}
+      ${currentOrder && currentOrder.customerType ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">${currentOrder.customerType==='with_order' ? `🧾 Бо заказ · 📞 ${escapeHtml(String(currentOrder.customerPhoneLast4 || currentOrder.customerPhone || '').replace(/\D/g,'').slice(-4) || '—')}` : '👤 Бе заказ'}</p>` : ''}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
       <div class="form-box" style="margin:10px 20px 14px;display:block;">
         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Клиент бо заказ омадааст?</div>
@@ -4130,7 +4131,9 @@ function renderAdminReport(){
   `;
 }
 function renderDailyPaymentTable(){
-  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt);
+  // The daily payment history is a report view. Archived orders belong to the
+  // closed/cleared accounting archive and must never reappear in this table.
+  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true);
   if(!paid.length) return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ чек пардохт нашудааст</p>`;
   const map = {};
   paid.forEach(o=>{
@@ -4246,7 +4249,9 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(receiptRows), 'Чекҳои имрӯза');
 
   const dayMap = {};
-  state.orders.filter(o=>o.status==='paid' && o.paidAt).forEach(o=>{
+  // Exported daily history must match the on-screen report and exclude archived
+  // orders, including orders archived when the report history was cleared.
+  state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true).forEach(o=>{
     const d = new Date(o.paidAt);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     if(!dayMap[key]) dayMap[key] = {cash:0, noncash:0, count:0, label: d.toLocaleDateString('tg-TJ')};
