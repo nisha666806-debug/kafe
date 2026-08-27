@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-39';
+const APP_VERSION = '2026-08-28-41';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -359,7 +359,19 @@ async function migrateOrdersToV2(){
     const marker=await markerRef.get();
     if(marker.exists && marker.data().done===true) return true;
     const legacy=await fsGet('orders');
-    if(!legacy.ok) return false;
+    if(!legacy.ok){
+      // If V2 already contains orders, do not block the application because
+      // the legacy backup is unavailable (for example after security rules
+      // were tightened). Mark migration complete without deleting V2.
+      try{
+        const existing = await ordersCollectionRef().limit(1).get();
+        if(!existing.empty){
+          await markerRef.set({done:true,migratedAt:Date.now(),count:-1,legacyUnavailable:true},{merge:true});
+          return true;
+        }
+      }catch(e){}
+      return false;
+    }
     let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
     if(!Array.isArray(orders)) orders=[];
     for(let i=0;i<orders.length;i+=400){
@@ -469,7 +481,9 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
+  // Orders are intentionally excluded here. They live in the V2 subcollection
+  // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
+  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -477,7 +491,6 @@ async function loadAll(){
     catch(e){ out.failed[outKey] = true; }
   };
   await parseField('menu', 'menu');
-  await parseField('orders', 'orders');
   await parseField('settings', 'settings');
   await parseField('reservations', 'reservations');
   await parseField('tables', 'tables');
