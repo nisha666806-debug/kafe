@@ -337,12 +337,67 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-35';
+const APP_VERSION = '2026-08-28-37';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
     : db.collection('cafeData').doc(key);
 }
+function ordersCollectionRef(){
+  return CAFE_ID
+    ? db.collection('cafes').doc(CAFE_ID).collection('orders')
+    : db.collection('cafeData').doc('orders').collection('items');
+}
+function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
+const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
+async function migrateOrdersToV2(){
+  if(!db) return false;
+  try{
+    const markerRef=db.collection('cafeDataMeta').doc(ORDER_MIGRATION_KEY);
+    const marker=await markerRef.get();
+    if(marker.exists && marker.data().done===true) return true;
+    const legacy=await fsGet('orders');
+    if(!legacy.ok) return false;
+    let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
+    if(!Array.isArray(orders)) orders=[];
+    for(let i=0;i<orders.length;i+=400){
+      const batch=db.batch(), chunk=orders.slice(i,i+400);
+      chunk.forEach(o=>{if(o&&o.id) batch.set(orderDocRef(o.id),{...o,_migratedAt:Date.now()},{merge:true});});
+      if(chunk.length) await batch.commit();
+    }
+    await markerRef.set({done:true,migratedAt:Date.now(),count:orders.length},{merge:true});
+    return true;
+  }catch(e){console.error('Orders V2 migration failed',e);return false;}
+}
+async function loadOrdersV2(){
+  try{
+    const snap=await ordersCollectionRef().get(), orders=[];
+    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
+    orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    return {ok:true,value:orders};
+  }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
+}
+async function saveOrderV2(order){
+  if(!db||!order||!order.id)return false;
+  try{
+    await db.runTransaction(async tx=>{
+      const ref=orderDocRef(order.id), snap=await tx.get(ref), remote=snap.exists?(snap.data()||{}):{};
+      const terminal=remote.status==='paid'||remote.status==='cancelled';
+      const incomingTerminal=order.status==='paid'||order.status==='cancelled';
+      const merged={...remote,...order};
+      if(terminal&&!incomingTerminal) merged.status=remote.status;
+      merged.updatedAt=Date.now();
+      tx.set(ref,merged,{merge:true});
+    });
+    return true;
+  }catch(e){console.error('saveOrderV2 failed',e);return false;}
+}
+async function saveOrdersV2(orders){
+  if(!Array.isArray(orders))return false;
+  for(const o of orders){if(o&&o.id&&!await saveOrderV2(o))return false;}
+  return true;
+}
+
 
 /* ============ SESSION PERSISTENCE ============
    Keeps the logged-in user through accidental reloads (pull-to-refresh, phone killing the
@@ -418,97 +473,10 @@ async function saveMenu(menu){
 // very same order at once (that still keeps whichever write lands last for that one record),
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
-  if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
-  // ACCOUNTING SAFETY:
-  // - Never physically delete an order from this accounting collection.
-  // - If two devices edited different fields of the same order, merge those fields.
-  // - A terminal remote state (paid/cancelled) cannot be silently downgraded by a stale waiter.
-  try{
-    const localOrders = Array.isArray(orders) ? orders : [];
-    await db.runTransaction(async(tx)=>{
-      const ref = docRef('orders');
-      const snap = await tx.get(ref);
-      let remote = [];
-      if(snap.exists){
-        try{ remote = JSON.parse(snap.data().value)||[]; }catch(e){ remote=[]; }
-      }
-
-      const localMap = new Map(localOrders.map(o=>[o.id,o]));
-      const remoteMap = new Map(remote.map(o=>[o.id,o]));
-      const knownMap = state.__lastKnownOrderSnapshots || new Map();
-      const allIds = new Set([...remoteMap.keys(), ...localMap.keys()]);
-      const merged = [];
-
-      allIds.forEach(id=>{
-        const l = localMap.get(id);
-        const r = remoteMap.get(id);
-        const known = knownMap.get(id);
-
-        if(!r){ merged.push(l); return; }
-        if(!l){ merged.push(r); return; }
-
-        // If the remote order became paid/cancelled after this device last saw it,
-        // never let a stale local active copy resurrect/downgrade it.
-        const terminal = s => s==='paid' || s==='cancelled';
-        if(terminal(r.status) && l.status!==r.status){
-          // A terminal Firestore state is authoritative. Never resurrect a paid/cancelled
-          // order from a stale local copy after a payment has committed.
-          merged.push(r);
-          return;
-        }
-        if(r.status==='paid' && l.status==='paid'){
-          // Preserve the newest payment metadata AND never lose an archive flag.
-          // A paid order can be archived by one device while another still holds
-          // the older paid copy. The archive state must win in that merge.
-          const newest = (Number(r.lockedAt||r.paidAt||0) >= Number(l.lockedAt||l.paidAt||0)) ? r : l;
-          const older = newest===r ? l : r;
-          const mergedPaid = {...newest};
-          if(r.archived===true || l.archived===true){
-            mergedPaid.archived = true;
-            mergedPaid.archivedAt = Math.max(Number(r.archivedAt||0), Number(l.archivedAt||0), Date.now());
-            mergedPaid.archivedBy = (newest.archivedBy || older.archivedBy || actingUsername() || '?');
-          }
-          merged.push(mergedPaid);
-          return;
-        }
-
-        // For an order this device already knew, apply only fields changed locally
-        // since the last known snapshot onto the current remote record.
-        if(known){
-          const result = {...r};
-          const keys = new Set([...Object.keys(known), ...Object.keys(l)]);
-          keys.forEach(k=>{
-            if(k==='updatedAt') return;
-            if(JSON.stringify(l[k]) !== JSON.stringify(known[k])) result[k] = l[k];
-          });
-          result.updatedAt = Math.max(
-            Number(r.updatedAt||r.createdAt||0),
-            Number(l.updatedAt||l.createdAt||0),
-            Date.now()
-          );
-          merged.push(result);
-        }else{
-          // Unknown to this device: newest complete record wins.
-          const lt = Number(l.updatedAt||l.createdAt||0);
-          const rt = Number(r.updatedAt||r.createdAt||0);
-          merged.push(lt>=rt ? l : r);
-        }
-      });
-
-      merged.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-      tx.set(ref,{value:JSON.stringify(merged),updatedAt:Date.now()});
-
-      state.__lastKnownOrderIds = new Set(merged.map(o=>o.id));
-      state.__lastKnownOrderSnapshots = new Map(
-        merged.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
-      );
-    });
-    return true;
-  }catch(e){
-    console.error('saveOrders transaction failed:',e);
-    showToast('Хатогӣ: фармоиш нигоҳ дошта нашуд — маълумот ҳифз шуд');
-    return false;
-  }
+  if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
+  const ok=await saveOrdersV2(Array.isArray(orders)?orders:[]);
+  if(!ok)showToast('Хатогӣ дар нигоҳдорӣ');
+  return ok;
 }
 async function saveSettings(settings){
   try{
@@ -947,55 +915,88 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  const fields = [
-    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
-    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
-    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
-  ];
-  fields.forEach(([key, stateKey])=>{
+  migrateOrdersToV2().catch(console.error);
+  try{
+    const unsub=ordersCollectionRef().onSnapshot({includeMetadataChanges:true},snap=>{
+      if(!state.role)return;
+      const parsed=[];
+      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
+      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+      state.orders=parsed;
+      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+      state.__ordersFromCache=!!snap.metadata.fromCache;
+      if(!isActivelyEditingFormField())render();
+    },err=>{
+      console.error('Orders realtime error',err);
+      clearTimeout(__resubscribeTimer);
+      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+    });
+    __realtimeUnsubs.push(unsub);
+  }catch(e){console.error('orders listener attach failed',e);}
+  const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
+  fields.forEach(([key,stateKey])=>{
     try{
-      const unsub = docRef(key).onSnapshot((snap)=>{
-        if(!state.role) return; // don't disturb the login screen while typing
-        if(!snap.exists) return;
-        try{
-          const parsed = JSON.parse(snap.data().value);
-          // Always keep the in-memory data fresh so it's instantly correct the moment any
-          // open form closes. Only the actual screen REDRAW is held back while someone's
-          // cursor is inside a field right now — never delays what other devices see.
-          state[stateKey] = parsed;
-          if(stateKey==='orders'){
-            state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-            state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-          }
-          if(!isActivelyEditingFormField()) render();
-        }catch(e){}
-      }, (err)=>{
-        console.error('Realtime listener error for', key, err);
-        // A flaky connection can make a listener die without the SDK cleanly reconnecting on
-        // its own. Rather than leave that one field silently stale until the person manually
-        // logs out and back in, re-subscribe everything shortly after any listener errors.
-        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
-        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 4000);
+      const unsub=docRef(key).onSnapshot({includeMetadataChanges:true},snap=>{
+        if(!state.role||!snap.exists)return;
+        try{state[stateKey]=JSON.parse(snap.data().value);if(!isActivelyEditingFormField())render();}catch(e){}
+      },err=>{
+        console.error('Realtime listener error for',key,err);
+        clearTimeout(__resubscribeTimer);
+        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
+    }catch(e){console.error('listener attach failed',key,e);}
   });
   startSyncWatchdog();
 }
-// Belt-and-suspenders safety net: on a weak/flaky (not fully offline) connection, a real-time
-// listener can quietly stop delivering updates without ever firing an error at all — nothing
-// to react to, it just goes stale. Every 25s, do one plain fetch-and-compare regardless of
-// listener health, so the screen is never wrong for longer than that even in the worst case.
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
   __watchdogInterval = setInterval(()=>{
-    if(state.role && document.visibilityState==='visible') pollRefresh();
-  }, 25000);
+    if(state.role && state.loaded && document.visibilityState==='visible') pollOrdersFast();
+  }, 3000);
 }
+
+let __ordersPollInFlight = false;
+async function pollOrdersFast(){
+  if(__ordersPollInFlight || !state.role || !state.loaded) return;
+  __ordersPollInFlight = true;
+  try{
+    const snap = await docRef('orders').get({source:'server'});
+    if(!snap.exists) return;
+    const parsed = JSON.parse(snap.data().value || '[]');
+    const remoteStamp = Number(snap.data().updatedAt||0);
+    const localStamp = Number(state.__lastOrdersServerStamp||0);
+    if(remoteStamp && remoteStamp === localStamp) return;
+    state.orders = Array.isArray(parsed) ? parsed : [];
+    state.__lastKnownOrderIds = new Set(state.orders.map(o=>o.id));
+    state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp = remoteStamp || Date.now();
+    state.__lastOrdersServerAt = Date.now();
+    if(!isActivelyEditingFormField()) render();
+  }catch(e){
+    console.warn('Fast orders sync failed; realtime listener remains active', e);
+  }finally{
+    __ordersPollInFlight = false;
+  }
+}
+
+// Full fallback is intentionally less frequent because it reads many documents. It is still
+// useful for settings/tables/inventory if a listener silently goes stale.
+let __fullWatchdogInterval = null;
+function startFullSyncWatchdog(){
+  if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
+  __fullWatchdogInterval = setInterval(()=>{
+    if(state.role && state.loaded && document.visibilityState==='visible') pollRefresh();
+  }, 30000);
+}
+
 async function pollRefresh(){
-  if(!state.role) return; // don't wipe the login form while the person is typing
-  if(isActivelyEditingFormField()) return; // same precise check the real-time path uses
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
+  if(!state.role || !state.loaded) return;
+  if(isActivelyEditingFormField()) return;
+  const all = await loadAll();
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = all;
+  const ordersResult = await loadOrdersV2();
+  const orders = ordersResult.ok ? ordersResult.value : null;
   if(menu) state.menu = menu;
   if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
   if(settings) state.settings = settings;
@@ -4947,6 +4948,7 @@ document.addEventListener('focusout', ()=>{
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
   if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
+    pollOrdersFast();
     pollRefresh();
   }
 });
@@ -4954,7 +4956,8 @@ document.addEventListener('visibilitychange', ()=>{
 // The browser fires this the moment it detects the connection is back after being down —
 // catch up immediately rather than waiting for the next watchdog tick.
 window.addEventListener('online', ()=>{
-  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollRefresh();
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollOrdersFast();
+  pollRefresh();
 });
 
 /* ============ UPDATE CHECK ============
