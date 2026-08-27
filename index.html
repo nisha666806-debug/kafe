@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-37';
+const APP_VERSION = '2026-08-28-38';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -392,9 +392,41 @@ async function saveOrderV2(order){
     return true;
   }catch(e){console.error('saveOrderV2 failed',e);return false;}
 }
+async function deleteOrderV2(orderId){
+  if(!db || !orderId) return false;
+  try{
+    await orderDocRef(orderId).delete();
+    return true;
+  }catch(e){
+    console.error('deleteOrderV2 failed',e);
+    return false;
+  }
+}
+async function reconcileOrdersV2(orders){
+  if(!db || !Array.isArray(orders)) return false;
+  try{
+    const keep = new Set(orders.filter(o=>o&&o.id).map(o=>String(o.id)));
+    const snap = await ordersCollectionRef().get();
+    const batch = db.batch();
+    let deletes = 0;
+    snap.forEach(d=>{
+      if(!keep.has(String(d.id))){
+        batch.delete(d.ref);
+        deletes++;
+      }
+    });
+    if(deletes) await batch.commit();
+    return true;
+  }catch(e){
+    console.error('reconcileOrdersV2 failed',e);
+    return false;
+  }
+}
 async function saveOrdersV2(orders){
   if(!Array.isArray(orders))return false;
-  for(const o of orders){if(o&&o.id&&!await saveOrderV2(o))return false;}
+  for(const o of orders){
+    if(o&&o.id&&!await saveOrderV2(o))return false;
+  }
   return true;
 }
 
@@ -474,9 +506,28 @@ async function saveMenu(menu){
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
   if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-  const ok=await saveOrdersV2(Array.isArray(orders)?orders:[]);
-  if(!ok)showToast('Хатогӣ дар нигоҳдорӣ');
-  return ok;
+  const list = Array.isArray(orders) ? orders : [];
+  const previous = state.__lastKnownOrderIds || new Set();
+  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
+
+  // Save/update every current order first.
+  const ok = await saveOrdersV2(list);
+  if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
+
+  // Only delete documents that THIS device previously knew about and that the
+  // user intentionally removed from its local state. Never sweep unknown remote
+  // orders here, because another device may have just created them.
+  for(const id of previous){
+    if(!current.has(String(id))){
+      const deleted = await deleteOrderV2(id);
+      if(!deleted){
+        console.warn('Could not delete order document',id);
+      }
+    }
+  }
+  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
+  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+  return true;
 }
 async function saveSettings(settings){
   try{
@@ -793,7 +844,15 @@ function oshWeightForOrdersTab(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = await loadAll();
+  const all = await loadAll();
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = all;
+  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId}.
+  // Read them separately so the legacy data/orders document is never used as the active source.
+  const ordersResult = await loadOrdersV2();
+  if(!ordersResult.ok){
+    failed.orders = true;
+  }
+  const orders = ordersResult.ok ? ordersResult.value : null;
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
@@ -961,16 +1020,18 @@ async function pollOrdersFast(){
   if(__ordersPollInFlight || !state.role || !state.loaded) return;
   __ordersPollInFlight = true;
   try{
-    const snap = await docRef('orders').get({source:'server'});
-    if(!snap.exists) return;
-    const parsed = JSON.parse(snap.data().value || '[]');
-    const remoteStamp = Number(snap.data().updatedAt||0);
-    const localStamp = Number(state.__lastOrdersServerStamp||0);
-    if(remoteStamp && remoteStamp === localStamp) return;
-    state.orders = Array.isArray(parsed) ? parsed : [];
-    state.__lastKnownOrderIds = new Set(state.orders.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp = remoteStamp || Date.now();
+    const snap = await ordersCollectionRef().get({source:'server'});
+    const parsed = [];
+    snap.forEach(d=>{
+      const x = d.data() || {};
+      delete x._migratedAt;
+      parsed.push({...x, id:x.id || d.id});
+    });
+    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    state.orders = parsed;
+    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp = Date.now();
     state.__lastOrdersServerAt = Date.now();
     if(!isActivelyEditingFormField()) render();
   }catch(e){
