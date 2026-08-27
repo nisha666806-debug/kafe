@@ -7,6 +7,7 @@
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0A0806">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Оши Форам">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -337,134 +338,12 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-44';
+const APP_VERSION = '2026-08-28-STABLE';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
     : db.collection('cafeData').doc(key);
 }
-function ordersCollectionRef(){
-  return CAFE_ID
-    ? db.collection('cafes').doc(CAFE_ID).collection('orders')
-    : db.collection('cafeData').doc('orderItems').collection('items');
-}
-function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
-const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
-async function migrateOrdersToV2(){
-  if(!db) return false;
-  try{
-    // Migration state is local to this browser. We intentionally do not use
-    // a separate Firestore marker collection, so opening the app does not
-    // require any extra Firestore permission just for migration bookkeeping.
-    const localMarker = 'orders_v2_migrated_' + (CAFE_ID || 'default');
-    try{
-      if(localStorage.getItem(localMarker)==='1') return true;
-    }catch(e){}
-    const legacy=await fsGet('orders');
-    if(!legacy.ok){
-      // If V2 already contains orders, do not block the application because
-      // the legacy backup is unavailable (for example after security rules
-      // were tightened). Mark migration complete without deleting V2.
-      try{
-        const existing = await ordersCollectionRef().limit(1).get();
-        if(!existing.empty){
-          try{localStorage.setItem(localMarker,'1');}catch(e){}
-          return true;
-        }
-      }catch(e){}
-      return false;
-    }
-    let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
-    if(!Array.isArray(orders)) orders=[];
-    for(let i=0;i<orders.length;i+=400){
-      const batch=db.batch(), chunk=orders.slice(i,i+400);
-      chunk.forEach(o=>{if(o&&o.id) batch.set(orderDocRef(o.id),{...o,_migratedAt:Date.now()},{merge:true});});
-      if(chunk.length) await batch.commit();
-    }
-    try{localStorage.setItem(localMarker,'1');}catch(e){}
-    return true;
-  }catch(e){console.error('Orders V2 migration failed',e);return false;}
-}
-async function loadOrdersV2(){
-  try{
-    const snap=await ordersCollectionRef().get(), orders=[];
-    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
-    orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-    return {ok:true,value:orders};
-  }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
-}
-async function saveOrderV2(order){
-  if(!db || !order || !order.id) return false;
-  const ref=orderDocRef(order.id);
-  const clean={...order};
-  // Migration metadata is internal and must never be written by normal order saves.
-  delete clean._migratedAt;
-  clean.updatedAt=Date.now();
-
-  for(let attempt=0;attempt<3;attempt++){
-    try{
-      const snap=await ref.get({source:'server'});
-      const remote=snap.exists?(snap.data()||{}):{};
-      const remoteTerminal=remote.status==='paid'||remote.status==='cancelled';
-      const incomingTerminal=clean.status==='paid'||clean.status==='cancelled';
-
-      // Never downgrade a terminal order from a stale device.
-      const merged={...remote,...clean};
-      if(remoteTerminal && !incomingTerminal) merged.status=remote.status;
-
-      await ref.set(merged,{merge:true});
-      return true;
-    }catch(e){
-      const code=e && e.code ? String(e.code) : '';
-      if(code==='failed-precondition' || code==='aborted' || code==='unavailable'){
-        await new Promise(r=>setTimeout(r,250*(attempt+1)));
-        continue;
-      }
-      console.error('saveOrderV2 failed',e);
-      return false;
-    }
-  }
-  console.error('saveOrderV2 failed after retries');
-  return false;
-}
-async function deleteOrderV2(orderId){
-  if(!db || !orderId) return false;
-  try{
-    await orderDocRef(orderId).delete();
-    return true;
-  }catch(e){
-    console.error('deleteOrderV2 failed',e);
-    return false;
-  }
-}
-async function reconcileOrdersV2(orders){
-  if(!db || !Array.isArray(orders)) return false;
-  try{
-    const keep = new Set(orders.filter(o=>o&&o.id).map(o=>String(o.id)));
-    const snap = await ordersCollectionRef().get();
-    const batch = db.batch();
-    let deletes = 0;
-    snap.forEach(d=>{
-      if(!keep.has(String(d.id))){
-        batch.delete(d.ref);
-        deletes++;
-      }
-    });
-    if(deletes) await batch.commit();
-    return true;
-  }catch(e){
-    console.error('reconcileOrdersV2 failed',e);
-    return false;
-  }
-}
-async function saveOrdersV2(orders){
-  if(!Array.isArray(orders))return false;
-  for(const o of orders){
-    if(o&&o.id&&!await saveOrderV2(o))return false;
-  }
-  return true;
-}
-
 
 /* ============ SESSION PERSISTENCE ============
    Keeps the logged-in user through accidental reloads (pull-to-refresh, phone killing the
@@ -502,9 +381,7 @@ async function fsSet(key, value){
 
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  // Orders are intentionally excluded here. They live in the V2 subcollection
-  // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
-  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
+  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -512,6 +389,7 @@ async function loadAll(){
     catch(e){ out.failed[outKey] = true; }
   };
   await parseField('menu', 'menu');
+  await parseField('orders', 'orders');
   await parseField('settings', 'settings');
   await parseField('reservations', 'reservations');
   await parseField('tables', 'tables');
@@ -541,29 +419,97 @@ async function saveMenu(menu){
 // very same order at once (that still keeps whichever write lands last for that one record),
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
-  if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-  const list = Array.isArray(orders) ? orders : [];
-  const previous = state.__lastKnownOrderIds || new Set();
-  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
-
-  // Save/update every current order first.
-  const ok = await saveOrdersV2(list);
-  if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-
-  // Only delete documents that THIS device previously knew about and that the
-  // user intentionally removed from its local state. Never sweep unknown remote
-  // orders here, because another device may have just created them.
-  for(const id of previous){
-    if(!current.has(String(id))){
-      const deleted = await deleteOrderV2(id);
-      if(!deleted){
-        console.warn('Could not delete order document',id);
+  if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
+  // ACCOUNTING SAFETY:
+  // - Never physically delete an order from this accounting collection.
+  // - If two devices edited different fields of the same order, merge those fields.
+  // - A terminal remote state (paid/cancelled) cannot be silently downgraded by a stale waiter.
+  try{
+    const localOrders = Array.isArray(orders) ? orders : [];
+    await db.runTransaction(async(tx)=>{
+      const ref = docRef('orders');
+      const snap = await tx.get(ref);
+      let remote = [];
+      if(snap.exists){
+        try{ remote = JSON.parse(snap.data().value)||[]; }catch(e){ remote=[]; }
       }
-    }
+
+      const localMap = new Map(localOrders.map(o=>[o.id,o]));
+      const remoteMap = new Map(remote.map(o=>[o.id,o]));
+      const knownMap = state.__lastKnownOrderSnapshots || new Map();
+      const allIds = new Set([...remoteMap.keys(), ...localMap.keys()]);
+      const merged = [];
+
+      allIds.forEach(id=>{
+        const l = localMap.get(id);
+        const r = remoteMap.get(id);
+        const known = knownMap.get(id);
+
+        if(!r){ merged.push(l); return; }
+        if(!l){ merged.push(r); return; }
+
+        // If the remote order became paid/cancelled after this device last saw it,
+        // never let a stale local active copy resurrect/downgrade it.
+        const terminal = s => s==='paid' || s==='cancelled';
+        if(terminal(r.status) && l.status!==r.status){
+          // A terminal Firestore state is authoritative. Never resurrect a paid/cancelled
+          // order from a stale local copy after a payment has committed.
+          merged.push(r);
+          return;
+        }
+        if(r.status==='paid' && l.status==='paid'){
+          // Preserve the newest payment metadata AND never lose an archive flag.
+          // A paid order can be archived by one device while another still holds
+          // the older paid copy. The archive state must win in that merge.
+          const newest = (Number(r.lockedAt||r.paidAt||0) >= Number(l.lockedAt||l.paidAt||0)) ? r : l;
+          const older = newest===r ? l : r;
+          const mergedPaid = {...newest};
+          if(r.archived===true || l.archived===true){
+            mergedPaid.archived = true;
+            mergedPaid.archivedAt = Math.max(Number(r.archivedAt||0), Number(l.archivedAt||0), Date.now());
+            mergedPaid.archivedBy = (newest.archivedBy || older.archivedBy || actingUsername() || '?');
+          }
+          merged.push(mergedPaid);
+          return;
+        }
+
+        // For an order this device already knew, apply only fields changed locally
+        // since the last known snapshot onto the current remote record.
+        if(known){
+          const result = {...r};
+          const keys = new Set([...Object.keys(known), ...Object.keys(l)]);
+          keys.forEach(k=>{
+            if(k==='updatedAt') return;
+            if(JSON.stringify(l[k]) !== JSON.stringify(known[k])) result[k] = l[k];
+          });
+          result.updatedAt = Math.max(
+            Number(r.updatedAt||r.createdAt||0),
+            Number(l.updatedAt||l.createdAt||0),
+            Date.now()
+          );
+          merged.push(result);
+        }else{
+          // Unknown to this device: newest complete record wins.
+          const lt = Number(l.updatedAt||l.createdAt||0);
+          const rt = Number(r.updatedAt||r.createdAt||0);
+          merged.push(lt>=rt ? l : r);
+        }
+      });
+
+      merged.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+      tx.set(ref,{value:JSON.stringify(merged),updatedAt:Date.now()});
+
+      state.__lastKnownOrderIds = new Set(merged.map(o=>o.id));
+      state.__lastKnownOrderSnapshots = new Map(
+        merged.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
+      );
+    });
+    return true;
+  }catch(e){
+    console.error('saveOrders transaction failed:',e);
+    showToast('Хатогӣ: фармоиш нигоҳ дошта нашуд — маълумот ҳифз шуд');
+    return false;
   }
-  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
-  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-  return true;
 }
 async function saveSettings(settings){
   try{
@@ -880,21 +826,7 @@ function oshWeightForOrdersTab(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const all = await loadAll();
-  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = all;
-  // Complete the one-time, non-destructive migration before the first V2 read.
-  // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
-  try{
-    await migrateOrdersToV2();
-  }catch(e){
-    console.error('Initial orders migration failed',e);
-  }
-  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId};
-  // default/no-cafe fallback uses cafeData/orderItems/items/{orderId}.
-  const ordersResult = await loadOrdersV2();
-  // A temporary order-path permission/network problem must not blank the entire
-  // application or prevent login. Realtime sync will retry after login.
-  const orders = ordersResult.ok ? ordersResult.value : [];
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = await loadAll();
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
@@ -1016,39 +948,36 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  migrateOrdersToV2().catch(console.error);
-  try{
-    const unsub=ordersCollectionRef().onSnapshot({includeMetadataChanges:true},snap=>{
-      if(!state.role)return;
-      const parsed=[];
-      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
-      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-      state.orders=parsed;
-      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
-      state.__ordersFromCache=!!snap.metadata.fromCache;
-      if(!isActivelyEditingFormField())render();
-    },err=>{
-      console.error('Orders realtime error',err);
-      clearTimeout(__resubscribeTimer);
-      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
-    });
-    __realtimeUnsubs.push(unsub);
-  }catch(e){console.error('orders listener attach failed',e);}
-  const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
+  const fields=[
+    ['menu','menu'],['orders','orders'],['settings','settings'],['reservations','reservations'],
+    ['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],
+    ['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']
+  ];
   fields.forEach(([key,stateKey])=>{
     try{
       const unsub=docRef(key).onSnapshot({includeMetadataChanges:true},snap=>{
-        if(!state.role||!snap.exists)return;
-        try{state[stateKey]=JSON.parse(snap.data().value);if(!isActivelyEditingFormField())render();}catch(e){}
+        if(!state.role || !snap.exists) return;
+        try{
+          const parsed=JSON.parse(snap.data().value);
+          state[stateKey]=parsed;
+          if(stateKey==='orders'){
+            state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+            state.__lastKnownOrderSnapshots=new Map(parsed.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+            state.__lastOrdersServerAt=snap.metadata.fromCache ? state.__lastOrdersServerAt : Date.now();
+          }
+          // Cache events update memory only. Render after server-confirmed snapshots.
+          if(!snap.metadata.fromCache && !isActivelyEditingFormField()) render();
+        }catch(e){ console.error('Realtime parse failed for',key,e); }
       },err=>{
         console.error('Realtime listener error for',key,err);
         clearTimeout(__resubscribeTimer);
         __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){console.error('listener attach failed',key,e);}
+    }catch(e){console.error('Failed to attach realtime listener for',key,e);}
   });
   startSyncWatchdog();
+  startFullSyncWatchdog();
 }
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
@@ -1060,26 +989,20 @@ function startSyncWatchdog(){
 let __ordersPollInFlight = false;
 async function pollOrdersFast(){
   if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight = true;
+  __ordersPollInFlight=true;
   try{
-    const snap = await ordersCollectionRef().get({source:'server'});
-    const parsed = [];
-    snap.forEach(d=>{
-      const x = d.data() || {};
-      delete x._migratedAt;
-      parsed.push({...x, id:x.id || d.id});
-    });
-    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-    state.orders = parsed;
-    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp = Date.now();
-    state.__lastOrdersServerAt = Date.now();
+    const snap=await docRef('orders').get({source:'server'});
+    if(!snap.exists) return;
+    const parsed=JSON.parse(snap.data().value||'[]');
+    state.orders=Array.isArray(parsed)?parsed:[];
+    state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+    state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerAt=Date.now();
     if(!isActivelyEditingFormField()) render();
   }catch(e){
-    console.warn('Fast orders sync failed; realtime listener remains active', e);
+    console.warn('Fast orders sync skipped; realtime listener remains active',e);
   }finally{
-    __ordersPollInFlight = false;
+    __ordersPollInFlight=false;
   }
 }
 
@@ -1096,10 +1019,7 @@ function startFullSyncWatchdog(){
 async function pollRefresh(){
   if(!state.role || !state.loaded) return;
   if(isActivelyEditingFormField()) return;
-  const all = await loadAll();
-  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = all;
-  const ordersResult = await loadOrdersV2();
-  const orders = ordersResult.ok ? ordersResult.value : null;
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
   if(menu) state.menu = menu;
   if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
   if(settings) state.settings = settings;
@@ -1290,20 +1210,27 @@ async function saveTicket(sendFlag){
 */
 async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
   if(!db) return {ok:false,message:'Хатогӣ дар нигоҳдорӣ'};
-  const cash=Math.max(0,Number(cashAmount)||0);
-  const noncash=Math.max(0,Number(noncashAmount)||0);
+  const cash = Math.max(0, Number(cashAmount)||0);
+  const noncash = Math.max(0, Number(noncashAmount)||0);
   try{
-    return await db.runTransaction(async tx=>{
-      const ref=orderDocRef(orderId);
-      const snap=await tx.get(ref);
+    return await db.runTransaction(async(tx)=>{
+      const ref = docRef('orders');
+      const snap = await tx.get(ref);
       if(!snap.exists) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
-      const remote={...(snap.data()||{}),id:(snap.data()||{}).id||snap.id};
+      let orders=[];
+      try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){}
+      const idx=orders.findIndex(o=>o.id===orderId);
+      if(idx<0) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
+      const remote=orders[idx];
 
-      // Idempotency: terminal orders can never be paid twice or reopened.
-      if(remote.status==='paid'||remote.status==='cancelled'){
+      // Idempotency: an already-terminal order is never paid twice and never reopened.
+      if(remote.status==='paid' || remote.status==='cancelled'){
         return {ok:false,alreadyTerminal:true,status:remote.status,order:remote};
       }
 
+      // The order.total already is the accounting amount shown on the saved cheque.
+      // Do NOT recompute it here: a service-charge setting can change later, and that must
+      // never make an otherwise valid payment fail.
       const total=Number(remote.total||0);
       if(Math.abs(cash+noncash-total)>0.01){
         return {ok:false,message:'Маблағи пардохт ба маблағи чек баробар нест'};
@@ -1321,7 +1248,10 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
         lockedAt:now,
         updatedAt:now
       };
-      tx.set(ref,paid,{merge:true});
+      orders[idx]=paid;
+
+      // Marking paid and writing the complete order array happen in ONE transaction.
+      tx.set(ref,{value:JSON.stringify(orders),updatedAt:now});
       return {ok:true,order:paid};
     });
   }catch(e){
