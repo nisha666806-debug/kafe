@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-38';
+const APP_VERSION = '2026-08-28-39';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -353,7 +353,9 @@ const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
 async function migrateOrdersToV2(){
   if(!db) return false;
   try{
-    const markerRef=db.collection('cafeDataMeta').doc(ORDER_MIGRATION_KEY);
+    const markerRef=CAFE_ID
+      ? db.collection('cafes').doc(CAFE_ID).collection('meta').doc('orders_v2_migration')
+      : db.collection('cafeDataMeta').doc(ORDER_MIGRATION_KEY);
     const marker=await markerRef.get();
     if(marker.exists && marker.data().done===true) return true;
     const legacy=await fsGet('orders');
@@ -846,8 +848,14 @@ async function init(){
   render(); // loading state
   const all = await loadAll();
   const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = all;
+  // Complete the one-time, non-destructive migration before the first V2 read.
+  // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
+  try{
+    await migrateOrdersToV2();
+  }catch(e){
+    console.error('Initial orders migration failed',e);
+  }
   // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId}.
-  // Read them separately so the legacy data/orders document is never used as the active source.
   const ordersResult = await loadOrdersV2();
   if(!ordersResult.ok){
     failed.orders = true;
@@ -1248,27 +1256,20 @@ async function saveTicket(sendFlag){
 */
 async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
   if(!db) return {ok:false,message:'Хатогӣ дар нигоҳдорӣ'};
-  const cash = Math.max(0, Number(cashAmount)||0);
-  const noncash = Math.max(0, Number(noncashAmount)||0);
+  const cash=Math.max(0,Number(cashAmount)||0);
+  const noncash=Math.max(0,Number(noncashAmount)||0);
   try{
-    return await db.runTransaction(async(tx)=>{
-      const ref = docRef('orders');
-      const snap = await tx.get(ref);
+    return await db.runTransaction(async tx=>{
+      const ref=orderDocRef(orderId);
+      const snap=await tx.get(ref);
       if(!snap.exists) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
-      let orders=[];
-      try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){}
-      const idx=orders.findIndex(o=>o.id===orderId);
-      if(idx<0) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
-      const remote=orders[idx];
+      const remote={...(snap.data()||{}),id:(snap.data()||{}).id||snap.id};
 
-      // Idempotency: an already-terminal order is never paid twice and never reopened.
-      if(remote.status==='paid' || remote.status==='cancelled'){
+      // Idempotency: terminal orders can never be paid twice or reopened.
+      if(remote.status==='paid'||remote.status==='cancelled'){
         return {ok:false,alreadyTerminal:true,status:remote.status,order:remote};
       }
 
-      // The order.total already is the accounting amount shown on the saved cheque.
-      // Do NOT recompute it here: a service-charge setting can change later, and that must
-      // never make an otherwise valid payment fail.
       const total=Number(remote.total||0);
       if(Math.abs(cash+noncash-total)>0.01){
         return {ok:false,message:'Маблағи пардохт ба маблағи чек баробар нест'};
@@ -1286,10 +1287,7 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
         lockedAt:now,
         updatedAt:now
       };
-      orders[idx]=paid;
-
-      // Marking paid and writing the complete order array happen in ONE transaction.
-      tx.set(ref,{value:JSON.stringify(orders),updatedAt:now});
+      tx.set(ref,paid,{merge:true});
       return {ok:true,order:paid};
     });
   }catch(e){
