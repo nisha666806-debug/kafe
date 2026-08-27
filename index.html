@@ -71,7 +71,7 @@
     background:linear-gradient(135deg,#171310,#3A2E1F 60%,var(--gold));
     box-shadow:inset 0 0 0 1px rgba(201,162,39,.5);
   }
-  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
+  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:visible;text-overflow:clip;max-width:150px;}
   .brand .tag{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--text-dim);font-weight:700;display:none;}
   @media(min-width:480px){.brand .name{max-width:none;} .brand .tag{display:inline;}}
   .top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-25';
+const APP_VERSION = '2026-08-28-34';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -349,7 +349,9 @@ function docRef(key){
    tab in the background, etc.) so people aren't forced to retype their password constantly. */
 const SESSION_KEY = 'cafeSession_' + (CAFE_ID || 'default');
 function saveSession(user){
-  try{ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }catch(e){}
+  /* Дар localStorage ТАНҲО username ва role нигоҳ дошта мешавад —
+     парол (ҳатто хаш) ба localStorage нависта намешавад. */
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({username: user.username, role: user.role})); }catch(e){}
 }
 function loadSession(){
   try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
@@ -679,8 +681,7 @@ let state = {
   confirmDeleteBonusId:null,
   seenPendingIds:null,
   seenCashierOrderIds:null,
-  customerArrivalType:null,
-  customerPhoneLast4:'',
+  customerPhone:'',
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -731,6 +732,31 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
+/* ============ PASSWORD HASHING (Web Crypto SHA-256) ============
+   Паролҳо ҳеҷ гоҳ дар матни оддӣ нигоҳ дошта намешаванд.
+   hashPassword() — пароли ворид шударо ба SHA-256 табдил медиҳад.
+   Дар Firestore танҳо хаш нигоҳ дошта мешавад.                  */
+async function hashPassword(plain){
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(plain));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
+   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
+   мекунем ва фавран захира мекунем. */
+async function migrateAccountPasswordsIfNeeded(){
+  let changed = false;
+  for(const acc of state.accounts){
+    if(acc.password && acc.password.length < 64){
+      acc.password = await hashPassword(acc.password);
+      changed = true;
+    }
+  }
+  if(changed){
+    await saveAccounts(state.accounts);
+  }
+}
+
 function uid(prefix){
   const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID().replace(/-/g,'')
@@ -756,6 +782,8 @@ function isToday(ts){
   const d = new Date(ts), n = new Date();
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
+function reportPeriodStart(){ const t=Number(state.settings&&state.settings.reportClearedAt)||0; return t>0?t:0; }
+function inCurrentReportPeriod(ts){ const t=Number(ts)||0, start=reportPeriodStart(); return t>0 && (!start || t>start); }
 function todayKey(){
   const d = new Date();
   return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
@@ -845,18 +873,23 @@ async function init(){
     state.accounts = accounts;
   } else {
     // accounts read succeeded (anyFailed already excluded that) and is genuinely empty
-    state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
+    const defaultHash = await hashPassword('admin123');
+    state.accounts = [{id:'acc_admin', username:'admin', password:defaultHash, role:'admin'}];
     await saveAccounts(state.accounts);
   }
 
+  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
+  await migrateAccountPasswordsIfNeeded();
+
   const session = loadSession();
   if(session){
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase() && a.password===session.password);
+    // Session бо username санҷида мешавад — парол дар localStorage нест
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase());
     if(acc){
       state.currentUser = {username:acc.username, role:acc.role};
       state.role = acc.role;
     } else {
-      clearSession(); // account was deleted or password changed elsewhere — fall back to login
+      clearSession(); // account was deleted — fall back to login
     }
   }
 
@@ -877,7 +910,8 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveReservations(state.reservations);
   state.oshStock = {date:'', kg:0};
   await saveOshStock(state.oshStock);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
+  const hashedPass = await hashPassword(adminPass);
+  const adminAcc = {id:'acc_admin', username:adminUser, password:hashedPass, role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -886,7 +920,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   state.setupError = null;
   state.currentUser = {username:adminAcc.username, role:'admin'};
   state.role = 'admin';
-  saveSession({username:adminAcc.username, password:adminAcc.password});
+  saveSession({username:adminAcc.username, role:'admin'});
   state.loaded = true;
   render();
   setupRealtimeSync();
@@ -915,7 +949,7 @@ function setupRealtimeSync(){
   teardownRealtimeSync();
   const fields = [
     ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
-    ['tables','tables'], ['oshStock','oshStock'], ['inventory','inventory'],
+    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
     ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
   ];
   fields.forEach(([key, stateKey])=>{
@@ -992,26 +1026,24 @@ function occupiedTableCount(){
   return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && tableIds.has(o.table)).length;
 }
 
-function setCustomerArrivalType(type){
-  state.customerArrivalType = type;
-  if(type!=='with_order') state.customerPhoneLast4='';
-  render();
-}
-function setCustomerPhoneLast4(value){
-  // Do not re-render the whole screen on every keystroke: re-rendering replaces
-  // the input element and makes the keyboard lose focus after the first digit.
-  const clean = String(value||'').replace(/\D/g,'').slice(0,4);
-  state.customerPhoneLast4 = clean;
-  const input = document.getElementById('arrivalPhoneLast4');
-  if(input && input.value !== clean) input.value = clean;
+function setCustomerPhone(value){
+  const clean=String(value||'').replace(/\D/g,'').slice(0,9);
+  state.customerPhone=clean;
+  const input=document.getElementById('arrivalPhone');
+  if(input && input.value!==clean) input.value=clean;
 }
 function validateCustomerArrival(){
-  // Existing orders do not need the arrival choice again.
   if(activeOrderForTable(state.activeTable)) return true;
   if(state.role!=='waiter') return true;
-  if(state.customerArrivalType==='without_order') return true;
-  if(state.customerArrivalType==='with_order' && /^\d{4}$/.test(state.customerPhoneLast4||'')) return true;
-  showToast('Интихоб кунед: «Бо заказ» ё «Бе заказ». Барои «Бо заказ» 4 рақами телефонро нависед.');
+  const ph = String(state.customerPhone||'').replace(/\D/g,'');
+  if(/^\d{9}$/.test(ph)) return true;
+  if(ph.length===0){
+    showToast('Рақами телефон бояд 9 рақам бошад.');
+  } else if(ph.length<9){
+    showToast('Рақами телефон бояд 9 рақам бошад. Ҳоло '+ph.length+' рақам ворид шудааст.');
+  } else {
+    showToast('Рақами телефон бояд маҳз 9 рақам бошад.');
+  }
   return false;
 }
 
@@ -1034,8 +1066,7 @@ function openTable(t){
   state.activeTable = t;
   state.draftItems = {};
   if(!existing && state.role==='waiter'){
-    state.customerArrivalType = null;
-    state.customerPhoneLast4 = '';
+    state.customerPhone = '';
   }
   if(existing){
     existing.items.forEach(it=>{ state.draftItems[it.menuId] = it.qty; });
@@ -1051,8 +1082,7 @@ function openTable(t){
 function closeTicket(){
   state.activeTable = null;
   state.draftItems = {};
-  state.customerArrivalType = null;
-  state.customerPhoneLast4 = '';
+  state.customerPhone = '';
   state.confirmCancelOrderId = null;
   render();
 }
@@ -1119,13 +1149,13 @@ async function saveTicket(sendFlag){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
       createdBy: actingUsername(), sentToKitchen:false,
-      customerType: state.customerArrivalType || 'without_order',
-      customerPhoneLast4: state.customerArrivalType==='with_order' ? state.customerPhoneLast4 : null};
+      customerType: 'with_order',
+      customerPhone: state.customerPhone || null};
     state.orders.push(order);
   }
   if(isNew && state.role==='waiter'){
-    order.customerType = state.customerArrivalType || 'without_order';
-    order.customerPhoneLast4 = state.customerArrivalType==='with_order' ? state.customerPhoneLast4 : null;
+    order.customerType = 'with_order';
+    order.customerPhone = state.customerPhone || null;
   }
   order.items = items;
   order.total = total;
@@ -1627,11 +1657,13 @@ async function deductForOrderDelta(order, currentItems){
 }
 async function addAccount(username, password, role){
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   const id = uid('acc');
-  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
+  const hashedPass = await hashPassword(password);
+  state.accounts.push({id, username, password: hashedPass, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1641,13 +1673,15 @@ async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  acc.username=username; acc.password=password; acc.role=role;
+  const hashedPass = await hashPassword(password);
+  acc.username=username; acc.password=hashedPass; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -1676,17 +1710,10 @@ function isThisMonth(ts){
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth();
 }
 function orderCommission(order){
-  let oshGrams = 0, oshValue = 0;
-  order.items.forEach(it=>{
-    if(getItemCategory(it)==='Ош' && it.unit==='kg'){
-      oshGrams += it.qty;
-      oshValue += lineTotal({unit:'kg', price:it.price}, it.qty);
-    }
-  });
-  const oshCommission = oshGrams >= 500 ? 12 : oshValue*0.05;
-  const otherValue = Math.max(0, (order.total||0) - oshValue);
-  const otherCommission = otherValue*0.05;
-  return oshCommission + otherCommission;
+  let oshGrams=0, oshValue=0, otherValue=0;
+  (order.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
+  const oshCommission=oshGrams>=500?12:(oshGrams>0?oshValue*0.05:0);
+  return oshCommission+otherValue*0.05;
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
@@ -1698,17 +1725,12 @@ function staffCommissionBreakdown(username, role, scope){
   });
   let countHigh=0, countLow=0, countNoOsh=0, oshSum=0, otherSum=0;
   orders.forEach(o=>{
-    let oshGrams=0, oshValue=0;
-    o.items.forEach(it=>{
-      if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=it.qty; oshValue+=lineTotal({unit:'kg',price:it.price}, it.qty); }
-    });
-    if(oshGrams>=500){ countHigh++; oshSum+=12; }
-    else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; }
-    else { countNoOsh++; }
-    const otherValue = Math.max(0, (o.total||0)-oshValue);
+    let oshGrams=0, oshValue=0, otherValue=0;
+    (o.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
+    if(oshGrams>=500){ countHigh++; oshSum+=12; } else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; } else { countNoOsh++; }
     otherSum += otherValue*0.05;
   });
-  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total: oshSum+otherSum};
+  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total:oshSum+otherSum};
 }
 function staffCommission(username, role, scope){
   return staffCommissionBreakdown(username, role, scope).total;
@@ -1733,16 +1755,18 @@ function autoBonusToday(username, role){
   return {checkCountBonus, revenueBonus, total: checkCountBonus+revenueBonus, orderCount: breakdown.orderCount, commissionTotal: breakdown.total};
 }
 function computeWages(acc){
-  const reportClearedToday = !!(state.settings && state.settings.reportClosedAt && isToday(state.settings.reportClosedAt));
+  // reportClearedToday is ONLY true when admin manually pressed "Пок кардани ҳисобот"
+  // (which sets salaryResetAt). Daily closure (closeDailyReport) sets reportClosedAt
+  // but must NOT zero out wages — staff earned their commission on those closed orders.
   const salaryResetAt = Number(state.settings && state.settings.salaryResetAt) || 0;
   const salaryResetThisMonth = salaryResetAt && isThisMonth(salaryResetAt);
   const salaryResetForToday = salaryResetAt && isToday(salaryResetAt);
 
   if(acc.wageType==='commission'){
-    const auto = (salaryResetForToday || reportClearedToday) ? {total:0} : autoBonusToday(acc.username, acc.role);
-    const manualToday = (salaryResetForToday || reportClearedToday) ? 0 : manualBonusSum(acc.username, 'today');
+    const auto = salaryResetForToday ? {total:0} : autoBonusToday(acc.username, acc.role);
+    const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
     const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
-    const dailyCommission = (salaryResetForToday || reportClearedToday) ? 0 : staffCommission(acc.username, acc.role, 'today');
+    const dailyCommission = salaryResetForToday ? 0 : staffCommission(acc.username, acc.role, 'today');
     const monthlyCommission = salaryResetThisMonth ? 0 : staffCommission(acc.username, acc.role, 'month');
     return {
       daily: dailyCommission + auto.total + manualToday,
@@ -1753,19 +1777,19 @@ function computeWages(acc){
 
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   const amount = Number(acc.wageAmount) || 0;
-  const manualToday = (salaryResetForToday || reportClearedToday) ? 0 : manualBonusSum(acc.username, 'today');
+  const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
   const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
 
   if(acc.wageType==='monthly'){
     return {
-      daily: (salaryResetForToday || reportClearedToday) ? 0 : amount/days + manualToday,
+      daily: salaryResetForToday ? 0 : amount/days + manualToday,
       monthly: salaryResetThisMonth ? 0 : amount + manualMonth,
       bonusToday: manualToday
     };
   }
 
   return {
-    daily: (salaryResetForToday || reportClearedToday) ? 0 : amount + manualToday,
+    daily: salaryResetForToday ? 0 : amount + manualToday,
     monthly: salaryResetThisMonth ? 0 : amount*days + manualMonth,
     bonusToday: manualToday
   };
@@ -1970,15 +1994,17 @@ function renderLogin(){
   </div>`;
 }
 function attachLoginEvents(){
-  const submit = ()=>{
+  const submit = async ()=>{
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===p);
+    if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
+    const hashedInput = await hashPassword(p);
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===hashedInput);
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
-    saveSession({username:acc.username, password:acc.password});
+    saveSession({username:acc.username, role:acc.role});
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -2030,13 +2056,13 @@ function buildTableCards(){
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
 
-      // Show the customer's arrival type prominently above the table number.
-      // "With order" shows only the last 4 phone digits; "without order" is explicit.
-      if(order.customerType === 'with_order'){
-        const last4 = String(order.customerPhoneLast4 || '').replace(/\D/g,'').slice(-4);
-        arrivalBadge = `<span class="arrival-badge with-order">🧾 Бо заказ${last4 ? ` · 📞 ${escapeHtml(last4)}` : ''}</span>`;
-      }else if(order.customerType === 'without_order'){
-        arrivalBadge = `<span class="arrival-badge without-order">👤 Беззаказ</span>`;
+      // Show full 9-digit phone number prominently above the table card.
+      // Never show "Бо заказ", "Беззаказ", or masked/truncated phone.
+      const _cardPhone = String(order.customerPhone || '').replace(/\D/g,'').slice(0,9);
+      if(_cardPhone.length===9){
+        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
+      } else if(_cardPhone.length>0){
+        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
       }
 
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
@@ -2046,9 +2072,7 @@ function buildTableCards(){
       if(order.createdBy){
         extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
       }
-      if(order.customerPhone){
-        extra += `<span class="reserve-detail">📞 ${escapeHtml(order.customerPhone)}</span>`;
-      }
+      // Phone is already shown in arrivalBadge — don't duplicate it in extra
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
         extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
       }
@@ -2702,6 +2726,7 @@ function renderOrderViewOverlay(){
     ? `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">${escapeHtml(order.customerName||'')} ${order.customerPhone?('· '+escapeHtml(order.customerPhone)):''}</p>` : '';
   const waiterLine = order.createdBy
     ? `<p style="padding:0 20px;font-size:12px;color:#9c8f78;margin:0 0 4px;">👤 официант: ${escapeHtml(order.createdBy)}</p>` : '';
+  const tableLine = (order.type!=='takeaway' && order.type!=='scheduled') ? (()=>{ const tbl=state.tables.find(t=>t.id===order.table); const name=tbl ? (tbl.name||('№'+order.table)) : ('№'+order.table); return `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">🪑 Миз: ${escapeHtml(name)}</p>`; })() : '';
   const actionBtn = state.viewingMode==='pay'
     ? `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('payvo', order.total)}</div>` : '';
   const cancelBlock = state.confirmCancelOrderId===order.id ? `
@@ -2721,6 +2746,7 @@ function renderOrderViewOverlay(){
         <button class="close-x" id="closeViewOrder">✕</button>
       </div>
       ${contactLine}
+      ${tableLine}
       ${waiterLine}
       <div class="receipt">
         <div class="receipt-title">Чек</div>
@@ -3067,33 +3093,26 @@ function renderTicketOverlay(){
     actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
   }
 
+  const _activeTbl = state.tables.find(t=>t.id===state.activeTable);
+  const _activeTblName = _activeTbl ? escapeHtml(_activeTbl.name) : ('№'+state.activeTable);
   return `
   <div class="overlay" id="ticketOverlay">
     <div class="ticket-wrap">
       <div class="ticket-head">
-        <h2>Мизи №${state.activeTable}</h2>
+        <h2>Миз: ${_activeTblName}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
-      ${currentOrder && currentOrder.customerType ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">${currentOrder.customerType==='with_order' ? `🧾 Бо заказ · 📞 ****${escapeHtml(currentOrder.customerPhoneLast4||'')}` : '👤 Бе заказ'}</p>` : ''}
+      ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
-      <div class="form-box" style="margin:10px 20px 14px;display:block;">
-        <div style="font-weight:700;font-size:13px;margin-bottom:10px;">Клиент бо заказ омадааст?</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="${state.customerArrivalType==='with_order'?'btn-primary':'btn-ghost'}" style="flex:none;padding:9px 14px;" id="arrivalWithOrder">🧾 Бо заказ</button>
-          <button type="button" class="${state.customerArrivalType==='without_order'?'btn-primary':'btn-ghost'}" style="flex:none;padding:9px 14px;" id="arrivalWithoutOrder">👤 Бе заказ</button>
-        </div>
-        ${state.customerArrivalType==='with_order' ? `
-          <div style="margin-top:10px;">
-            <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);font-weight:700;">4 рақами охири телефон</label>
-            <input id="arrivalPhoneLast4" inputmode="numeric" maxlength="4" pattern="[0-9]{4}"
-              value="${escapeHtml(state.customerPhoneLast4||'')}" placeholder="4521"
-              style="display:block;width:140px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;">
-          </div>` : ''}
+       <div class="form-box" style="margin:10px 20px 14px;display:block;">
+         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">📞 Рақами телефони клиент (9 рақам)</div>
+         <input id="arrivalPhone" inputmode="numeric" maxlength="9" pattern="[0-9]{9}" value="${escapeHtml(state.customerPhone||'')}" placeholder="918765432" style="display:block;width:180px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;letter-spacing:1px;">
+       </div>` : ''}
       </div>` : ''}
       ${menuSection}
       <div class="receipt">
-        <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
+        <div class="receipt-title">Чек — Миз: ${_activeTblName}</div>
         ${receiptLines}
         ${serviceFee>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line"><span>Ҳаққи хизматрасонӣ (${state.settings.serviceChargePct}%)</span><span>+${fmtMoney(serviceFee)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
@@ -3125,20 +3144,15 @@ function attachTicketEvents(){
     state.confirmCancelOrderId = null; render();
   });
   if(mode==='edit'){
-    const arrivalWithOrder = document.getElementById('arrivalWithOrder');
-    if(arrivalWithOrder) arrivalWithOrder.addEventListener('click', ()=>setCustomerArrivalType('with_order'));
-    const arrivalWithoutOrder = document.getElementById('arrivalWithoutOrder');
-    if(arrivalWithoutOrder) arrivalWithoutOrder.addEventListener('click', ()=>setCustomerArrivalType('without_order'));
-    const arrivalPhoneLast4 = document.getElementById('arrivalPhoneLast4');
-    if(arrivalPhoneLast4){
-      arrivalPhoneLast4.addEventListener('input', e=>setCustomerPhoneLast4(e.target.value));
-      arrivalPhoneLast4.addEventListener('keydown', e=>{
+    const arrivalPhone = document.getElementById('arrivalPhone');
+    if(arrivalPhone){
+      arrivalPhone.addEventListener('input', e=>setCustomerPhone(e.target.value));
+      arrivalPhone.addEventListener('keydown', e=>{
         if(e.ctrlKey || e.metaKey || e.altKey) return;
         if(['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) return;
         if(!/^[0-9]$/.test(e.key)) e.preventDefault();
       });
     }
-
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
     });
@@ -3602,7 +3616,7 @@ function renderAdminSalary(){
   return `
     <div class="section-title">Ҳисоби маоши кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
-    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ош дар чек ≥500г бошад — 12 смн аз ҳар чек; агар <500г — 5% аз арзиши он қисм; аз ҳама маҳсули дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
+    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ҳар гуна ош дар чек ≥500г бошад — 12 смн; агар ош <500г бошад — 5% аз арзиши ош; ҳар маҳсулоти дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
     <div class="stat-row" style="margin-bottom:14px;">
       <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
       <div class="stat-card"><div class="label">Ҷамъи бонуси имрӯза (ҳама)</div><div class="value" style="color:${totalBonusToday>0?'var(--olive)':'inherit'};">${totalBonusToday.toFixed(1)} смн</div></div>
@@ -3912,7 +3926,7 @@ async function clearAllReportHistory(){
   // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
   // It is rendered from state.dailyClosures, so the next render must show no rows.
   state.dailyReportRows=[];
-  state.settings={...state.settings, reportClosedAt:now, salaryResetAt:now};
+  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
   await saveSettings(state.settings);
 
   state.confirmClearReport=false;
@@ -3921,7 +3935,7 @@ async function clearAllReportHistory(){
   showToast('Ҳисобот ва архиви ҳаррӯза нест карда шуд');
 }
 async function closeDailyReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && o.archived!==true);
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const active = state.orders.filter(o=>o.status==='active');
 
   if(active.length){
@@ -3994,10 +4008,12 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  // Current report contains only today's paid orders that have NOT been archived.
+  // Current report contains all paid orders since the last manual clear (inCurrentReportPeriod),
+  // that have NOT been archived. This means the report persists across midnight — day change
+  // does NOT auto-clear the report. Only Admin pressing "Пок кардани ҳисобот" resets it.
   // Archived orders remain in the accounting database and in the archive, but never
   // reappear on the current report after realtime sync or refresh.
-  const paidToday = state.orders.filter(o=>o.status==='paid' && isToday(o.paidAt) && o.archived!==true);
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4084,14 +4100,16 @@ function renderAdminReport(){
     ${renderDailyPaymentTable()}
 
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
-    <div class="section-title" style="margin-top:24px;">Чекҳои имрӯза</div>
+    <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
     ${receiptsHtml}
 
     ${(state.dailyClosures&&state.dailyClosures.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}
   `;
 }
 function renderDailyPaymentTable(){
-  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt);
+  // The daily payment history is a report view. Archived orders belong to the
+  // closed/cleared accounting archive and must never reappear in this table.
+  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   if(!paid.length) return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ чек пардохт нашудааст</p>`;
   const map = {};
   paid.forEach(o=>{
@@ -4163,7 +4181,7 @@ function renderProductBreakdownTable(orders){
 // as its own sheet — and triggers a browser download.
 function exportReportToExcel(){
   if(typeof XLSX === 'undefined'){ showToast('Китобхонаи Excel бор нашуд — интернетро санҷед'); return; }
-  const paidToday = state.orders.filter(o=>o.status==='paid' && o.archived!==true && isToday(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.archived!==true && o.paidAt && inCurrentReportPeriod(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4207,7 +4225,9 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(receiptRows), 'Чекҳои имрӯза');
 
   const dayMap = {};
-  state.orders.filter(o=>o.status==='paid' && o.paidAt).forEach(o=>{
+  // Exported daily history must match the on-screen report and exclude archived
+  // orders, including orders archived when the report history was cleared.
+  state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true).forEach(o=>{
     const d = new Date(o.paidAt);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     if(!dayMap[key]) dayMap[key] = {cash:0, noncash:0, count:0, label: d.toLocaleDateString('tg-TJ')};
