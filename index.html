@@ -338,7 +338,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-STABLE';
+const APP_VERSION = '2026-08-28-36-PASSWORD-FIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -746,16 +746,9 @@ async function hashPassword(plain){
    дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
    мекунем ва фавран захира мекунем. */
 async function migrateAccountPasswordsIfNeeded(){
-  let changed = false;
-  for(const acc of state.accounts){
-    if(acc.password && acc.password.length < 64){
-      acc.password = await hashPassword(acc.password);
-      changed = true;
-    }
-  }
-  if(changed){
-    await saveAccounts(state.accounts);
-  }
+  // Passwords are never changed automatically when a new version is deployed.
+  // Existing Firebase account credentials remain exactly as stored.
+  return false;
 }
 
 function uid(prefix){
@@ -873,10 +866,9 @@ async function init(){
   if(accounts && accounts.length){
     state.accounts = accounts;
   } else {
-    // accounts read succeeded (anyFailed already excluded that) and is genuinely empty
-    const defaultHash = await hashPassword('admin123');
-    state.accounts = [{id:'acc_admin', username:'admin', password:defaultHash, role:'admin'}];
-    await saveAccounts(state.accounts);
+    // Never create or overwrite credentials automatically.
+    state.accounts = [];
+    state.setupError = 'Аккаунтҳо дар Firebase ёфт нашуданд.';
   }
 
   // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
@@ -948,37 +940,42 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  const fields=[
-    ['menu','menu'],['orders','orders'],['settings','settings'],['reservations','reservations'],
-    ['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],
-    ['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']
+  const fields = [
+    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
+    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
+    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
   ];
-  fields.forEach(([key,stateKey])=>{
+  fields.forEach(([key, stateKey])=>{
     try{
-      const unsub=docRef(key).onSnapshot({includeMetadataChanges:true},snap=>{
+      const unsub = docRef(key).onSnapshot({includeMetadataChanges:true}, (snap)=>{
         if(!state.role || !snap.exists) return;
         try{
-          const parsed=JSON.parse(snap.data().value);
-          state[stateKey]=parsed;
+          const parsed = JSON.parse(snap.data().value);
+          state[stateKey] = parsed;
           if(stateKey==='orders'){
-            state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
-            state.__lastKnownOrderSnapshots=new Map(parsed.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-            state.__lastOrdersServerAt=snap.metadata.fromCache ? state.__lastOrdersServerAt : Date.now();
+            state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+            state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+            state.__lastOrdersServerAt = Date.now();
           }
-          // Cache events update memory only. Render after server-confirmed snapshots.
+          // Never redraw from a local cache snapshot when a server snapshot is still pending.
+          // The in-memory state is updated, but the screen waits for the server-confirmed event.
           if(!snap.metadata.fromCache && !isActivelyEditingFormField()) render();
-        }catch(e){ console.error('Realtime parse failed for',key,e); }
-      },err=>{
-        console.error('Realtime listener error for',key,err);
-        clearTimeout(__resubscribeTimer);
-        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+        }catch(e){ console.error('Realtime parse failed for', key, e); }
+      }, (err)=>{
+        console.error('Realtime listener error for', key, err);
+        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
+        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 2000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){console.error('Failed to attach realtime listener for',key,e);}
+    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
   });
   startSyncWatchdog();
   startFullSyncWatchdog();
 }
+
+// Fast order watchdog: orders are the most time-sensitive data in the café. If a laptop's
+// realtime socket becomes stale without emitting an error, fetch ONLY the orders document every
+// 3 seconds. This is much cheaper and faster than reloading every collection every 25 seconds.
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
   __watchdogInterval = setInterval(()=>{
@@ -989,20 +986,24 @@ function startSyncWatchdog(){
 let __ordersPollInFlight = false;
 async function pollOrdersFast(){
   if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight=true;
+  __ordersPollInFlight = true;
   try{
-    const snap=await docRef('orders').get({source:'server'});
+    const snap = await docRef('orders').get({source:'server'});
     if(!snap.exists) return;
-    const parsed=JSON.parse(snap.data().value||'[]');
-    state.orders=Array.isArray(parsed)?parsed:[];
-    state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
-    state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerAt=Date.now();
+    const parsed = JSON.parse(snap.data().value || '[]');
+    const remoteStamp = Number(snap.data().updatedAt||0);
+    const localStamp = Number(state.__lastOrdersServerStamp||0);
+    if(remoteStamp && remoteStamp === localStamp) return;
+    state.orders = Array.isArray(parsed) ? parsed : [];
+    state.__lastKnownOrderIds = new Set(state.orders.map(o=>o.id));
+    state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp = remoteStamp || Date.now();
+    state.__lastOrdersServerAt = Date.now();
     if(!isActivelyEditingFormField()) render();
   }catch(e){
-    console.warn('Fast orders sync skipped; realtime listener remains active',e);
+    console.warn('Fast orders sync failed; realtime listener remains active', e);
   }finally{
-    __ordersPollInFlight=false;
+    __ordersPollInFlight = false;
   }
 }
 
