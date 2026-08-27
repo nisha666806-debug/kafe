@@ -338,7 +338,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-36-PASSWORD-FIX';
+const APP_VERSION = '2026-08-28-36-LOW-USAGE';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -939,100 +939,111 @@ function isActivelyEditingFormField(){
   return tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT';
 }
 function setupRealtimeSync(){
-  teardownRealtimeSync();
-  const fields = [
-    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
-    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
-    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
+  // Guard against duplicate listeners when login/setup/reconnect code runs more than once.
+  if(__realtimeUnsubs.length) return;
+
+  // Only data that must be live across devices gets a listener.
+  // Menu/settings/accounts/reports are refreshed periodically or when opened.
+  const fields=[
+    ['orders','orders'],
+    ['tables','tables'],
+    ['reservations','reservations'],
+    ['inventory','inventory']
   ];
-  fields.forEach(([key, stateKey])=>{
+
+  fields.forEach(([key,stateKey])=>{
     try{
-      const unsub = docRef(key).onSnapshot({includeMetadataChanges:true}, (snap)=>{
+      const unsub=docRef(key).onSnapshot({includeMetadataChanges:false},snap=>{
         if(!state.role || !snap.exists) return;
         try{
-          const parsed = JSON.parse(snap.data().value);
-          state[stateKey] = parsed;
+          const parsed=JSON.parse(snap.data().value||'null');
+          if(parsed==null) return;
+          state[stateKey]=parsed;
           if(stateKey==='orders'){
-            state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-            state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-            state.__lastOrdersServerAt = Date.now();
+            state.__lastKnownOrderIds=new Set(Array.isArray(parsed)?parsed.map(o=>o.id):[]);
+            state.__lastKnownOrderSnapshots=new Map(
+              (Array.isArray(parsed)?parsed:[]).map(o=>[o.id,JSON.parse(JSON.stringify(o))])
+            );
+            state.__lastOrdersServerAt=Date.now();
+            state.__lastOrdersServerStamp=Number(snap.data().updatedAt||Date.now());
           }
-          // Never redraw from a local cache snapshot when a server snapshot is still pending.
-          // The in-memory state is updated, but the screen waits for the server-confirmed event.
-          if(!snap.metadata.fromCache && !isActivelyEditingFormField()) render();
-        }catch(e){ console.error('Realtime parse failed for', key, e); }
-      }, (err)=>{
-        console.error('Realtime listener error for', key, err);
-        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
-        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 2000);
+          if(!isActivelyEditingFormField()) render();
+        }catch(e){ console.error('Realtime parse failed for',key,e); }
+      },err=>{
+        console.error('Realtime listener error for',key,err);
+        // Do not rebuild ALL listeners when one stream fails. Reconnect only this listener.
+        setTimeout(()=>{
+          if(!state.role || !state.loaded) return;
+          try{
+            const retry=docRef(key).onSnapshot({includeMetadataChanges:false},snap=>{
+              if(!state.role || !snap.exists) return;
+              try{
+                const parsed=JSON.parse(snap.data().value||'null');
+                if(parsed==null) return;
+                state[stateKey]=parsed;
+                if(stateKey==='orders'){
+                  state.__lastOrdersServerAt=Date.now();
+                  state.__lastOrdersServerStamp=Number(snap.data().updatedAt||Date.now());
+                }
+                if(!isActivelyEditingFormField()) render();
+              }catch(e){ console.error('Realtime retry parse failed for',key,e); }
+            },e=>console.error('Realtime retry failed for',key,e));
+            __realtimeUnsubs.push(retry);
+          }catch(e){ console.error('Failed to reconnect',key,e); }
+        },5000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
+    }catch(e){ console.error('Failed to attach realtime listener for',key,e); }
   });
+
   startSyncWatchdog();
   startFullSyncWatchdog();
 }
 
-// Fast order watchdog: orders are the most time-sensitive data in the café. If a laptop's
-// realtime socket becomes stale without emitting an error, fetch ONLY the orders document every
-// 3 seconds. This is much cheaper and faster than reloading every collection every 25 seconds.
+// Low-usage fallback: the orders listener is normally enough.
+// Only query the server when no server-confirmed order snapshot has arrived recently.
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
-  __watchdogInterval = setInterval(()=>{
-    if(state.role && state.loaded && document.visibilityState==='visible') pollOrdersFast();
-  }, 3000);
+  __watchdogInterval=setInterval(()=>{
+    if(!state.role || !state.loaded || document.visibilityState!=='visible') return;
+    const age=Date.now()-Number(state.__lastOrdersServerAt||0);
+    if(age>60000) pollOrdersFast();
+  },15000);
 }
 
-let __ordersPollInFlight = false;
+let __ordersPollInFlight=false;
 async function pollOrdersFast(){
   if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight = true;
+  __ordersPollInFlight=true;
   try{
-    const snap = await docRef('orders').get({source:'server'});
+    const snap=await docRef('orders').get({source:'server'});
     if(!snap.exists) return;
-    const parsed = JSON.parse(snap.data().value || '[]');
-    const remoteStamp = Number(snap.data().updatedAt||0);
-    const localStamp = Number(state.__lastOrdersServerStamp||0);
-    if(remoteStamp && remoteStamp === localStamp) return;
-    state.orders = Array.isArray(parsed) ? parsed : [];
-    state.__lastKnownOrderIds = new Set(state.orders.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp = remoteStamp || Date.now();
-    state.__lastOrdersServerAt = Date.now();
+    const parsed=JSON.parse(snap.data().value||'[]');
+    const remoteStamp=Number(snap.data().updatedAt||0);
+    if(remoteStamp && remoteStamp===Number(state.__lastOrdersServerStamp||0)){
+      state.__lastOrdersServerAt=Date.now();
+      return;
+    }
+    state.orders=Array.isArray(parsed)?parsed:[];
+    state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+    state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp=remoteStamp||Date.now();
+    state.__lastOrdersServerAt=Date.now();
     if(!isActivelyEditingFormField()) render();
   }catch(e){
-    console.warn('Fast orders sync failed; realtime listener remains active', e);
+    console.warn('Orders fallback sync skipped; realtime listener remains active',e);
   }finally{
-    __ordersPollInFlight = false;
+    __ordersPollInFlight=false;
   }
 }
 
-// Full fallback is intentionally less frequent because it reads many documents. It is still
-// useful for settings/tables/inventory if a listener silently goes stale.
-let __fullWatchdogInterval = null;
+// Full fallback is deliberately infrequent because it reads several documents.
+let __fullWatchdogInterval=null;
 function startFullSyncWatchdog(){
   if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
-  __fullWatchdogInterval = setInterval(()=>{
+  __fullWatchdogInterval=setInterval(()=>{
     if(state.role && state.loaded && document.visibilityState==='visible') pollRefresh();
-  }, 30000);
-}
-
-async function pollRefresh(){
-  if(!state.role || !state.loaded) return;
-  if(isActivelyEditingFormField()) return;
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
-  if(menu) state.menu = menu;
-  if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
-  if(settings) state.settings = settings;
-  if(reservations) state.reservations = reservations;
-  if(tables) state.tables = tables;
-  if(oshStock) state.oshStock = oshStock;
-  if(accounts) state.accounts = accounts;
-  if(inventory) state.inventory = inventory;
-  if(activityLog) state.activityLog = activityLog;
-  if(bonuses) state.bonuses = bonuses;
-  if(dailyClosures) state.dailyClosures = dailyClosures;
-  render();
+  },120000);
 }
 
 /* ============ ORDER HELPERS ============ */
