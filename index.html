@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-43';
+const APP_VERSION = '2026-08-28-44';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -394,19 +394,38 @@ async function loadOrdersV2(){
   }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
 }
 async function saveOrderV2(order){
-  if(!db||!order||!order.id)return false;
-  try{
-    await db.runTransaction(async tx=>{
-      const ref=orderDocRef(order.id), snap=await tx.get(ref), remote=snap.exists?(snap.data()||{}):{};
-      const terminal=remote.status==='paid'||remote.status==='cancelled';
-      const incomingTerminal=order.status==='paid'||order.status==='cancelled';
-      const merged={...remote,...order};
-      if(terminal&&!incomingTerminal) merged.status=remote.status;
-      merged.updatedAt=Date.now();
-      tx.set(ref,merged,{merge:true});
-    });
-    return true;
-  }catch(e){console.error('saveOrderV2 failed',e);return false;}
+  if(!db || !order || !order.id) return false;
+  const ref=orderDocRef(order.id);
+  const clean={...order};
+  // Migration metadata is internal and must never be written by normal order saves.
+  delete clean._migratedAt;
+  clean.updatedAt=Date.now();
+
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const snap=await ref.get({source:'server'});
+      const remote=snap.exists?(snap.data()||{}):{};
+      const remoteTerminal=remote.status==='paid'||remote.status==='cancelled';
+      const incomingTerminal=clean.status==='paid'||clean.status==='cancelled';
+
+      // Never downgrade a terminal order from a stale device.
+      const merged={...remote,...clean};
+      if(remoteTerminal && !incomingTerminal) merged.status=remote.status;
+
+      await ref.set(merged,{merge:true});
+      return true;
+    }catch(e){
+      const code=e && e.code ? String(e.code) : '';
+      if(code==='failed-precondition' || code==='aborted' || code==='unavailable'){
+        await new Promise(r=>setTimeout(r,250*(attempt+1)));
+        continue;
+      }
+      console.error('saveOrderV2 failed',e);
+      return false;
+    }
+  }
+  console.error('saveOrderV2 failed after retries');
+  return false;
 }
 async function deleteOrderV2(orderId){
   if(!db || !orderId) return false;
