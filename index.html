@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-34';
+const APP_VERSION = '2026-08-28-35';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1334,7 +1334,7 @@ function attachSplitPaymentEvents(idPrefix, total, onConfirm){
     const n = clamp(noncashInput.value);
     cashInput.value = fmt(total - n);
   });
-  document.querySelectorAll(`[data-splitquick^="${idPrefix}|"]`).forEach(el=>{
+  document.querySelectorAll('[data-splitquick^="' + idPrefix + '|"]').forEach(el=>{
     el.addEventListener('click', ()=>{
       const mode = el.dataset.splitquick.split('|')[1];
       if(mode==='allcash'){ cashInput.value = fmt(total); noncashInput.value = '0'; }
@@ -3109,7 +3109,6 @@ function renderTicketOverlay(){
          <div style="font-weight:700;font-size:13px;margin-bottom:10px;">📞 Рақами телефони клиент (9 рақам)</div>
          <input id="arrivalPhone" inputmode="numeric" maxlength="9" pattern="[0-9]{9}" value="${escapeHtml(state.customerPhone||'')}" placeholder="918765432" style="display:block;width:180px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;letter-spacing:1px;">
        </div>` : ''}
-      </div>` : ''}
       ${menuSection}
       <div class="receipt">
         <div class="receipt-title">Чек — Миз: ${_activeTblName}</div>
