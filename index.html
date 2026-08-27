@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-41';
+const APP_VERSION = '2026-08-28-42';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -346,7 +346,7 @@ function docRef(key){
 function ordersCollectionRef(){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('orders')
-    : db.collection('cafeData').doc('orders').collection('items');
+    : db.collection('cafeData').doc('orderItems').collection('items');
 }
 function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
 const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
@@ -868,12 +868,12 @@ async function init(){
   }catch(e){
     console.error('Initial orders migration failed',e);
   }
-  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId}.
+  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId};
+  // default/no-cafe fallback uses cafeData/orderItems/items/{orderId}.
   const ordersResult = await loadOrdersV2();
-  if(!ordersResult.ok){
-    failed.orders = true;
-  }
-  const orders = ordersResult.ok ? ordersResult.value : null;
+  // A temporary order-path permission/network problem must not blank the entire
+  // application or prevent login. Realtime sync will retry after login.
+  const orders = ordersResult.ok ? ordersResult.value : [];
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
