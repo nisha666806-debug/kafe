@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Идораи Кафе</title>
-<!-- V45: stable sync + client phone + admin password visibility -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0A0806">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -398,25 +397,41 @@ async function saveOrderV2(order){
   if(!db || !order || !order.id) return false;
   const ref=orderDocRef(order.id);
   const clean={...order};
-  // Migration metadata is internal and must never be written by normal order saves.
   delete clean._migratedAt;
-  clean.updatedAt=Date.now();
+  const known = state.__lastKnownOrderSnapshots instanceof Map
+    ? state.__lastKnownOrderSnapshots.get(order.id) : null;
 
-  for(let attempt=0;attempt<3;attempt++){
+  for(let attempt=0;attempt<4;attempt++){
     try{
-      const snap=await ref.get({source:'server'});
-      const remote=snap.exists?(snap.data()||{}):{};
-      const remoteTerminal=remote.status==='paid'||remote.status==='cancelled';
-      const incomingTerminal=clean.status==='paid'||clean.status==='cancelled';
+      let result=null;
+      await db.runTransaction(async tx=>{
+        const snap=await tx.get(ref);
+        const remote=snap.exists ? {...(snap.data()||{}), id:(snap.data()||{}).id||snap.id} : null;
+        const remoteTerminal=!!remote && (remote.status==='paid'||remote.status==='cancelled');
+        const incomingTerminal=clean.status==='paid'||clean.status==='cancelled';
 
-      // Never downgrade a terminal order from a stale device.
-      const merged={...remote,...clean};
-      if(remoteTerminal && !incomingTerminal) merged.status=remote.status;
+        // If another device changed this order after this device last saw it,
+        // refuse the stale edit. This prevents a waiter from overwriting a cashier's
+        // just-completed payment (or another waiter's newer edit).
+        if(remote && known && Number(remote.updatedAt||0)!==Number(known.updatedAt||0)){
+          if(remoteTerminal && !incomingTerminal){ throw new Error('ORDER_STALE_TERMINAL'); }
+          throw new Error('ORDER_CONFLICT');
+        }
+        if(remoteTerminal && !incomingTerminal){ throw new Error('ORDER_STALE_TERMINAL'); }
 
-      await ref.set(merged,{merge:true});
-      return true;
+        const now=Date.now();
+        const merged={...(remote||{}),...clean,updatedAt:now};
+        tx.set(ref,merged,{merge:true});
+        result={...merged};
+      });
+      return result || true;
     }catch(e){
       const code=e && e.code ? String(e.code) : '';
+      const msg=e && e.message ? String(e.message) : '';
+      if(msg==='ORDER_CONFLICT' || msg==='ORDER_STALE_TERMINAL'){
+        console.warn('Order save blocked by concurrent remote change',order.id,msg);
+        return false;
+      }
       if(code==='failed-precondition' || code==='aborted' || code==='unavailable'){
         await new Promise(r=>setTimeout(r,250*(attempt+1)));
         continue;
@@ -430,38 +445,29 @@ async function saveOrderV2(order){
 }
 async function deleteOrderV2(orderId){
   if(!db || !orderId) return false;
-  try{
-    await orderDocRef(orderId).delete();
-    return true;
-  }catch(e){
-    console.error('deleteOrderV2 failed',e);
-    return false;
-  }
+  try{ await orderDocRef(orderId).delete(); return true; }
+  catch(e){ console.error('deleteOrderV2 failed',e); return false; }
 }
 async function reconcileOrdersV2(orders){
   if(!db || !Array.isArray(orders)) return false;
   try{
-    const keep = new Set(orders.filter(o=>o&&o.id).map(o=>String(o.id)));
-    const snap = await ordersCollectionRef().get();
-    const batch = db.batch();
-    let deletes = 0;
-    snap.forEach(d=>{
-      if(!keep.has(String(d.id))){
-        batch.delete(d.ref);
-        deletes++;
-      }
-    });
-    if(deletes) await batch.commit();
+    const keep=new Set(orders.filter(o=>o&&o.id).map(o=>String(o.id)));
+    const snap=await ordersCollectionRef().get();
+    const deletes=[];
+    snap.forEach(d=>{ if(!keep.has(String(d.id))) deletes.push(d.ref); });
+    for(let i=0;i<deletes.length;i+=450){
+      const batch=db.batch(); deletes.slice(i,i+450).forEach(ref=>batch.delete(ref)); await batch.commit();
+    }
     return true;
-  }catch(e){
-    console.error('reconcileOrdersV2 failed',e);
-    return false;
-  }
+  }catch(e){ console.error('reconcileOrdersV2 failed',e); return false; }
 }
 async function saveOrdersV2(orders){
-  if(!Array.isArray(orders))return false;
+  if(!Array.isArray(orders)) return false;
   for(const o of orders){
-    if(o&&o.id&&!await saveOrderV2(o))return false;
+    if(o&&o.id){
+      const ok=await saveOrderV2(o);
+      if(!ok) return false;
+    }
   }
   return true;
 }
@@ -501,17 +507,13 @@ async function fsSet(key, value){
   }catch(e){ console.error('fsSet failed', key, e); return false; }
 }
 
-/* ============ V45 PASSWORD ADMIN HELPERS ============ */
+/* ============ V45 PASSWORD HELPERS ============ */
 function canViewStaffPasswords(){
   return state.role === 'admin';
 }
-function getStaffPasswordForAdmin(acc){
+function getStaffPasswordDisplay(acc){
   if(!canViewStaffPasswords() || !acc) return '';
-  return String(acc.password ?? '');
-}
-function togglePasswordInputVisibility(id){
-  const el = document.getElementById(id);
-  if(el) el.type = el.type === 'password' ? 'text' : 'password';
+  return isLegacyPasswordHash(acc.password) ? '' : String(acc.password ?? '');
 }
 
 /* ============ STORAGE HELPERS ============ */
@@ -556,29 +558,38 @@ async function saveMenu(menu){
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
   if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-  const list = Array.isArray(orders) ? orders : [];
-  const previous = state.__lastKnownOrderIds || new Set();
-  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
+  const list=Array.isArray(orders)?orders.filter(o=>o&&o.id):[];
+  const known=state.__lastKnownOrderSnapshots instanceof Map ? state.__lastKnownOrderSnapshots : new Map();
+  const knownIds=state.__lastKnownOrderIds instanceof Set ? state.__lastKnownOrderIds : new Set(known.keys());
 
-  // Save/update every current order first.
-  const ok = await saveOrdersV2(list);
-  if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-
-  // Only delete documents that THIS device previously knew about and that the
-  // user intentionally removed from its local state. Never sweep unknown remote
-  // orders here, because another device may have just created them.
-  for(const id of previous){
-    if(!current.has(String(id))){
-      const deleted = await deleteOrderV2(id);
-      if(!deleted){
-        console.warn('Could not delete order document',id);
-      }
+  // IMPORTANT: write only orders that actually changed. Re-saving the whole order
+  // collection after every waiter/cashier action creates unnecessary Firestore writes
+  // and makes concurrent edits much more likely to collide.
+  for(const order of list){
+    const prev=known.get(order.id);
+    const changed=!prev || JSON.stringify(order)!==JSON.stringify(prev);
+    if(!changed) continue;
+    const ok=await saveOrderV2(order);
+    if(!ok){
+      showToast('Заказ аз дастгоҳи дигар нав шудааст — аввал навсозӣ кунед');
+      await pollOrdersFast();
+      return false;
     }
   }
-  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
-  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+
+  // A removed order is deleted only when this device previously knew that exact id.
+  // Accounting records are normally marked cancelled/paid and are not physically deleted.
+  for(const id of knownIds){
+    if(!list.some(o=>String(o.id)===String(id))){
+      const deleted=await deleteOrderV2(id);
+      if(!deleted) return false;
+    }
+  }
+  state.__lastKnownOrderIds=new Set(list.map(o=>o.id));
+  state.__lastKnownOrderSnapshots=new Map(list.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
   return true;
 }
+
 async function saveSettings(settings){
   try{
     const ok = await fsSet('settings', JSON.stringify(settings));
@@ -801,18 +812,22 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
-/* ============ PASSWORD STORAGE ============
-   User-requested mode: passwords are NOT hashed.
-   Admin can view/change staff passwords.
-   NOTE: plaintext password storage is less secure. */
+/* ============ PASSWORD MODE V45 ============
+   New/changed staff passwords are stored exactly as entered so Admin can view them.
+   Legacy 64-character SHA-256 values are still accepted for old accounts until
+   the Admin changes that password. */
 async function hashPassword(plain){
   return String(plain ?? '');
 }
+function isLegacyPasswordHash(value){
+  return /^[a-f0-9]{64}$/i.test(String(value ?? ''));
+}
+
 /* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
    дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
    мекунем ва фавран захира мекунем. */
 async function migrateAccountPasswordsIfNeeded(){
-  // Passwords are intentionally stored as entered in V45.
+  // V45 intentionally does not convert plaintext passwords to hashes.
   return true;
 }
 
@@ -1058,7 +1073,7 @@ function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
   __watchdogInterval = setInterval(()=>{
     if(state.role && state.loaded && document.visibilityState==='visible') pollOrdersFast();
-  }, 3000);
+  }, 15000);
 }
 
 let __ordersPollInFlight = false;
@@ -2096,8 +2111,13 @@ function attachLoginEvents(){
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
     if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
-    const hashedInput = await hashPassword(p);
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===hashedInput);
+    const plainInput = String(p);
+    const legacyHashInput = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(plainInput))
+      .then(buf=>Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''));
+    const acc = state.accounts.find(a=>{
+      if(a.username.toLowerCase()!==u.toLowerCase()) return false;
+      return String(a.password ?? '')===plainInput || String(a.password ?? '')===legacyHashInput;
+    });
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
@@ -3857,7 +3877,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(editTarget.password)}"></div>
+      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(isLegacyPasswordHash(editTarget.password)?'':editTarget.password)}" placeholder="${isLegacyPasswordHash(editTarget.password)?'Пароли кӯҳна — пароли нав гузоред':''}"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
