@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Идораи Кафе</title>
+<!-- V45: stable sync + client phone + admin password visibility -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0A0806">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -71,7 +72,7 @@
     background:linear-gradient(135deg,#171310,#3A2E1F 60%,var(--gold));
     box-shadow:inset 0 0 0 1px rgba(201,162,39,.5);
   }
-  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
+  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:visible;text-overflow:clip;max-width:150px;}
   .brand .tag{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--text-dim);font-weight:700;display:none;}
   @media(min-width:480px){.brand .name{max-width:none;} .brand .tag{display:inline;}}
   .top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
@@ -299,6 +300,10 @@
   .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-weight:600;}
   .xls-table tr:nth-child(even) td{background:var(--paper-dim);}
   .xls-table td.total-cell{font-weight:700;color:var(--blue);}
+
+  .arrival-badge{display:block;width:max-content;max-width:100%;margin:0 0 7px;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .arrival-badge.with-order{background:#eef5ff;color:#1f5fbf;border:1px solid #cfe0ff;}
+  .arrival-badge.without-order{background:#f4f1eb;color:#6b5f4d;border:1px solid #ded7ca;}
 </style>
 </head>
 <body>
@@ -333,19 +338,143 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-22-7';
+const APP_VERSION = '2026-08-29-V45';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
     : db.collection('cafeData').doc(key);
 }
+function ordersCollectionRef(){
+  return CAFE_ID
+    ? db.collection('cafes').doc(CAFE_ID).collection('orders')
+    : db.collection('cafeData').doc('orderItems').collection('items');
+}
+function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
+const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
+async function migrateOrdersToV2(){
+  if(!db) return false;
+  try{
+    // Migration state is local to this browser. We intentionally do not use
+    // a separate Firestore marker collection, so opening the app does not
+    // require any extra Firestore permission just for migration bookkeeping.
+    const localMarker = 'orders_v2_migrated_' + (CAFE_ID || 'default');
+    try{
+      if(localStorage.getItem(localMarker)==='1') return true;
+    }catch(e){}
+    const legacy=await fsGet('orders');
+    if(!legacy.ok){
+      // If V2 already contains orders, do not block the application because
+      // the legacy backup is unavailable (for example after security rules
+      // were tightened). Mark migration complete without deleting V2.
+      try{
+        const existing = await ordersCollectionRef().limit(1).get();
+        if(!existing.empty){
+          try{localStorage.setItem(localMarker,'1');}catch(e){}
+          return true;
+        }
+      }catch(e){}
+      return false;
+    }
+    let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
+    if(!Array.isArray(orders)) orders=[];
+    for(let i=0;i<orders.length;i+=400){
+      const batch=db.batch(), chunk=orders.slice(i,i+400);
+      chunk.forEach(o=>{if(o&&o.id) batch.set(orderDocRef(o.id),{...o,_migratedAt:Date.now()},{merge:true});});
+      if(chunk.length) await batch.commit();
+    }
+    try{localStorage.setItem(localMarker,'1');}catch(e){}
+    return true;
+  }catch(e){console.error('Orders V2 migration failed',e);return false;}
+}
+async function loadOrdersV2(){
+  try{
+    const snap=await ordersCollectionRef().get(), orders=[];
+    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
+    orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    return {ok:true,value:orders};
+  }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
+}
+async function saveOrderV2(order){
+  if(!db || !order || !order.id) return false;
+  const ref=orderDocRef(order.id);
+  const clean={...order};
+  // Migration metadata is internal and must never be written by normal order saves.
+  delete clean._migratedAt;
+  clean.updatedAt=Date.now();
+
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const snap=await ref.get({source:'server'});
+      const remote=snap.exists?(snap.data()||{}):{};
+      const remoteTerminal=remote.status==='paid'||remote.status==='cancelled';
+      const incomingTerminal=clean.status==='paid'||clean.status==='cancelled';
+
+      // Never downgrade a terminal order from a stale device.
+      const merged={...remote,...clean};
+      if(remoteTerminal && !incomingTerminal) merged.status=remote.status;
+
+      await ref.set(merged,{merge:true});
+      return true;
+    }catch(e){
+      const code=e && e.code ? String(e.code) : '';
+      if(code==='failed-precondition' || code==='aborted' || code==='unavailable'){
+        await new Promise(r=>setTimeout(r,250*(attempt+1)));
+        continue;
+      }
+      console.error('saveOrderV2 failed',e);
+      return false;
+    }
+  }
+  console.error('saveOrderV2 failed after retries');
+  return false;
+}
+async function deleteOrderV2(orderId){
+  if(!db || !orderId) return false;
+  try{
+    await orderDocRef(orderId).delete();
+    return true;
+  }catch(e){
+    console.error('deleteOrderV2 failed',e);
+    return false;
+  }
+}
+async function reconcileOrdersV2(orders){
+  if(!db || !Array.isArray(orders)) return false;
+  try{
+    const keep = new Set(orders.filter(o=>o&&o.id).map(o=>String(o.id)));
+    const snap = await ordersCollectionRef().get();
+    const batch = db.batch();
+    let deletes = 0;
+    snap.forEach(d=>{
+      if(!keep.has(String(d.id))){
+        batch.delete(d.ref);
+        deletes++;
+      }
+    });
+    if(deletes) await batch.commit();
+    return true;
+  }catch(e){
+    console.error('reconcileOrdersV2 failed',e);
+    return false;
+  }
+}
+async function saveOrdersV2(orders){
+  if(!Array.isArray(orders))return false;
+  for(const o of orders){
+    if(o&&o.id&&!await saveOrderV2(o))return false;
+  }
+  return true;
+}
+
 
 /* ============ SESSION PERSISTENCE ============
    Keeps the logged-in user through accidental reloads (pull-to-refresh, phone killing the
    tab in the background, etc.) so people aren't forced to retype their password constantly. */
 const SESSION_KEY = 'cafeSession_' + (CAFE_ID || 'default');
 function saveSession(user){
-  try{ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }catch(e){}
+  /* Дар localStorage ТАНҲО username ва role нигоҳ дошта мешавад —
+     парол (ҳатто хаш) ба localStorage нависта намешавад. */
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({username: user.username, role: user.role})); }catch(e){}
 }
 function loadSession(){
   try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
@@ -372,9 +501,24 @@ async function fsSet(key, value){
   }catch(e){ console.error('fsSet failed', key, e); return false; }
 }
 
+/* ============ V45 PASSWORD ADMIN HELPERS ============ */
+function canViewStaffPasswords(){
+  return state.role === 'admin';
+}
+function getStaffPasswordForAdmin(acc){
+  if(!canViewStaffPasswords() || !acc) return '';
+  return String(acc.password ?? '');
+}
+function togglePasswordInputVisibility(id){
+  const el = document.getElementById(id);
+  if(el) el.type = el.type === 'password' ? 'text' : 'password';
+}
+
 /* ============ STORAGE HELPERS ============ */
 async function loadAll(){
-  const out = {menu:null, orders:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
+  // Orders are intentionally excluded here. They live in the V2 subcollection
+  // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
+  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -382,7 +526,6 @@ async function loadAll(){
     catch(e){ out.failed[outKey] = true; }
   };
   await parseField('menu', 'menu');
-  await parseField('orders', 'orders');
   await parseField('settings', 'settings');
   await parseField('reservations', 'reservations');
   await parseField('tables', 'tables');
@@ -412,68 +555,43 @@ async function saveMenu(menu){
 // very same order at once (that still keeps whichever write lands last for that one record),
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
-  if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
-  try{
-    const localOrders = Array.isArray(orders) ? orders : [];
-    let hadConflict = false;
-    await db.runTransaction(async(tx)=>{
-      const ref = docRef('orders');
-      const snap = await tx.get(ref);
-      let remote = [];
-      if(snap.exists){ try{ remote = JSON.parse(snap.data().value)||[]; }catch(e){ remote=[]; } }
-      const localMap = new Map(localOrders.map(o=>[o.id,o]));
-      const remoteMap = new Map(remote.map(o=>[o.id,o]));
-      const knownMap = state.__lastKnownOrderSnapshots || new Map();
-      const allIds = new Set([...remoteMap.keys(), ...localMap.keys()]);
-      const merged=[];
-      const criticalFields = new Set(['status','items','total','subtotal','serviceCharge','cashAmount','noncashAmount','paymentMethod','paidAt','paidBy','table','type']);
+  if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
+  const list = Array.isArray(orders) ? orders : [];
+  const previous = state.__lastKnownOrderIds || new Set();
+  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
 
-      allIds.forEach(id=>{
-        const l=localMap.get(id), r=remoteMap.get(id), known=knownMap.get(id);
-        if(!r){ merged.push(l); return; }
-        if(!l){ merged.push(r); return; }
+  // Save/update every current order first.
+  const ok = await saveOrdersV2(list);
+  if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
 
-        const terminal = st => st==='paid' || st==='cancelled';
-        if(terminal(r.status) && l.status!==r.status){ merged.push(r); return; }
-
-        if(!known){
-          merged.push((Number(l.updatedAt||l.createdAt||0)>=Number(r.updatedAt||r.createdAt||0))?l:r);
-          return;
-        }
-
-        const result={...r};
-        const keys=new Set([...Object.keys(known),...Object.keys(l),...Object.keys(r)]);
-        keys.forEach(k=>{
-          if(k==='updatedAt') return;
-          const localChanged=JSON.stringify(l[k])!==JSON.stringify(known[k]);
-          const remoteChanged=JSON.stringify(r[k])!==JSON.stringify(known[k]);
-          if(localChanged && remoteChanged && JSON.stringify(l[k])!==JSON.stringify(r[k])){
-            if(criticalFields.has(k)) hadConflict=true;
-            // For accounting-critical conflicts, remote is authoritative so a stale device
-            // cannot silently overwrite a newer payment/order edit.
-            return;
-          }
-          if(localChanged) result[k]=l[k];
-        });
-        result.updatedAt=Math.max(Number(r.updatedAt||r.createdAt||0),Number(l.updatedAt||l.createdAt||0),Date.now());
-        merged.push(result);
-      });
-      merged.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-      tx.set(ref,{value:JSON.stringify(merged),updatedAt:Date.now()});
-      state.__lastKnownOrderIds=new Set(merged.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(merged.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-    });
-    if(hadConflict) showToast('Фармоиш дар дастгоҳи дигар ҳамзамон тағйир ёфт — тағйири кӯҳна ҳифз нашуд');
-    return true;
-  }catch(e){
-    console.error('saveOrders transaction failed:',e);
-    showToast('Хатогӣ: фармоиш нигоҳ дошта нашуд — маълумот ҳифз шуд');
-    return false;
+  // Only delete documents that THIS device previously knew about and that the
+  // user intentionally removed from its local state. Never sweep unknown remote
+  // orders here, because another device may have just created them.
+  for(const id of previous){
+    if(!current.has(String(id))){
+      const deleted = await deleteOrderV2(id);
+      if(!deleted){
+        console.warn('Could not delete order document',id);
+      }
+    }
   }
+  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
+  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+  return true;
 }
 async function saveSettings(settings){
-  const ok = await fsSet('settings', JSON.stringify(settings));
-  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+  try{
+    const ok = await fsSet('settings', JSON.stringify(settings));
+    if(!ok){
+      showToast('Хатогӣ дар нигоҳдорӣ');
+      return false;
+    }
+    return true;
+  }catch(e){
+    console.error('saveSettings failed',e);
+    showToast('Хатогӣ дар нигоҳдорӣ');
+    return false;
+  }
 }
 async function saveReservations(reservations){
   const ok = await fsSet('reservations', JSON.stringify(reservations));
@@ -533,7 +651,8 @@ async function saveInventory(inventory){
   if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
 }
 async function saveActivityLog(log){
-  await fsSet('activityLog', JSON.stringify(log));
+  const ok = await fsSet('activityLog', JSON.stringify(log));
+  if(!ok) console.warn('saveActivityLog failed');
 }
 async function logActivity(actionText){
   state.activityLog = state.activityLog || [];
@@ -542,10 +661,12 @@ async function logActivity(actionText){
   await saveActivityLog(state.activityLog);
 }
 async function saveBonuses(bonuses){
-  await fsSet('bonuses', JSON.stringify(bonuses));
+  const ok = await fsSet('bonuses', JSON.stringify(bonuses));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ (бонус)');
 }
 async function saveDailyClosures(closures){
-  await fsSet('dailyClosures', JSON.stringify(closures));
+  const ok = await fsSet('dailyClosures', JSON.stringify(closures));
+  if(!ok) showToast('Хатогӣ: ҳисоботи рӯзона сабт нашуд');
 }
 async function giveBonus(username, amount, reason){
   const amt = Math.max(0, Number(amount)||0);
@@ -562,12 +683,14 @@ async function deleteBonus(id){
   showToast('Бонус нест шуд');
 }
 function downloadBackup(){
+  // Паролҳо (ҳатто хаш) ба файли backup дохил намешаванд
+  const safeAccounts = (state.accounts||[]).map(a=>({id:a.id, username:a.username, role:a.role, wageType:a.wageType, wageAmount:a.wageAmount}));
   const data = {
     exportedAt: new Date().toISOString(),
     cafeName: state.settings.cafeName,
     menu: state.menu, orders: state.orders, settings: state.settings,
     reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
-    accounts: state.accounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
+    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -598,7 +721,7 @@ const DEFAULT_MENU = [
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
   checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
-  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0};
+  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}'};
 
 /* ============ STATE ============ */
 let state = {
@@ -627,6 +750,7 @@ let state = {
   confirmDeleteBonusId:null,
   seenPendingIds:null,
   seenCashierOrderIds:null,
+  customerPhone:'',
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -673,7 +797,31 @@ let state = {
   formOpenAt:null,          // safety timeout for stuck forms
 };
 
-function uid(prefix){ return prefix + '_' + Date.now() + '_' + Math.floor(Math.random()*1000); }
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+/* ============ PASSWORD STORAGE ============
+   User-requested mode: passwords are NOT hashed.
+   Admin can view/change staff passwords.
+   NOTE: plaintext password storage is less secure. */
+async function hashPassword(plain){
+  return String(plain ?? '');
+}
+/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
+   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
+   мекунем ва фавран захира мекунем. */
+async function migrateAccountPasswordsIfNeeded(){
+  // Passwords are intentionally stored as entered in V45.
+  return true;
+}
+
+function uid(prefix){
+  const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID().replace(/-/g,'')
+    : (Date.now().toString(36) + Math.random().toString(36).slice(2,10));
+  return prefix + '_' + rand;
+}
 
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -693,6 +841,8 @@ function isToday(ts){
   const d = new Date(ts), n = new Date();
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
+function reportPeriodStart(){ const t=Number(state.settings&&state.settings.reportClearedAt)||0; return t>0?t:0; }
+function inCurrentReportPeriod(ts){ const t=Number(ts)||0, start=reportPeriodStart(); return t>0 && (!start || t>start); }
 function todayKey(){
   const d = new Date();
   return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
@@ -734,7 +884,21 @@ function oshWeightForOrdersTab(){
 /* ============ INIT ============ */
 async function init(){
   render(); // loading state
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = await loadAll();
+  const all = await loadAll();
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = all;
+  // Complete the one-time, non-destructive migration before the first V2 read.
+  // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
+  try{
+    await migrateOrdersToV2();
+  }catch(e){
+    console.error('Initial orders migration failed',e);
+  }
+  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId};
+  // default/no-cafe fallback uses cafeData/orderItems/items/{orderId}.
+  const ordersResult = await loadOrdersV2();
+  // A temporary order-path permission/network problem must not blank the entire
+  // application or prevent login. Realtime sync will retry after login.
+  const orders = ordersResult.ok ? ordersResult.value : [];
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
@@ -782,18 +946,23 @@ async function init(){
     state.accounts = accounts;
   } else {
     // accounts read succeeded (anyFailed already excluded that) and is genuinely empty
-    state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
+    const defaultHash = await hashPassword('admin123');
+    state.accounts = [{id:'acc_admin', username:'admin', password:defaultHash, role:'admin'}];
     await saveAccounts(state.accounts);
   }
 
+  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
+  await migrateAccountPasswordsIfNeeded();
+
   const session = loadSession();
   if(session){
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase() && a.password===session.password);
+    // Session бо username санҷида мешавад — парол дар localStorage нест
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase());
     if(acc){
       state.currentUser = {username:acc.username, role:acc.role};
       state.role = acc.role;
     } else {
-      clearSession(); // account was deleted or password changed elsewhere — fall back to login
+      clearSession(); // account was deleted — fall back to login
     }
   }
 
@@ -814,7 +983,8 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveReservations(state.reservations);
   state.oshStock = {date:'', kg:0};
   await saveOshStock(state.oshStock);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
+  const hashedPass = await hashPassword(adminPass);
+  const adminAcc = {id:'acc_admin', username:adminUser, password:hashedPass, role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -823,7 +993,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   state.setupError = null;
   state.currentUser = {username:adminAcc.username, role:'admin'};
   state.role = 'admin';
-  saveSession({username:adminAcc.username, password:adminAcc.password});
+  saveSession({username:adminAcc.username, role:'admin'});
   state.loaded = true;
   render();
   setupRealtimeSync();
@@ -850,55 +1020,90 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  const fields = [
-    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
-    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
-    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
-  ];
-  fields.forEach(([key, stateKey])=>{
+  migrateOrdersToV2().catch(console.error);
+  try{
+    const unsub=ordersCollectionRef().onSnapshot({includeMetadataChanges:true},snap=>{
+      if(!state.role)return;
+      const parsed=[];
+      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
+      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+      state.orders=parsed;
+      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+      state.__ordersFromCache=!!snap.metadata.fromCache;
+      if(!isActivelyEditingFormField())render();
+    },err=>{
+      console.error('Orders realtime error',err);
+      clearTimeout(__resubscribeTimer);
+      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+    });
+    __realtimeUnsubs.push(unsub);
+  }catch(e){console.error('orders listener attach failed',e);}
+  const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
+  fields.forEach(([key,stateKey])=>{
     try{
-      const unsub = docRef(key).onSnapshot((snap)=>{
-        if(!state.role) return; // don't disturb the login screen while typing
-        if(!snap.exists) return;
-        try{
-          const parsed = JSON.parse(snap.data().value);
-          // Always keep the in-memory data fresh so it's instantly correct the moment any
-          // open form closes. Only the actual screen REDRAW is held back while someone's
-          // cursor is inside a field right now — never delays what other devices see.
-          state[stateKey] = parsed;
-          if(stateKey==='orders'){
-            state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-            state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-          }
-          if(!isActivelyEditingFormField()) render();
-        }catch(e){}
-      }, (err)=>{
-        console.error('Realtime listener error for', key, err);
-        // A flaky connection can make a listener die without the SDK cleanly reconnecting on
-        // its own. Rather than leave that one field silently stale until the person manually
-        // logs out and back in, re-subscribe everything shortly after any listener errors.
-        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
-        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 4000);
+      const unsub=docRef(key).onSnapshot({includeMetadataChanges:true},snap=>{
+        if(!state.role||!snap.exists)return;
+        try{state[stateKey]=JSON.parse(snap.data().value);if(!isActivelyEditingFormField())render();}catch(e){}
+      },err=>{
+        console.error('Realtime listener error for',key,err);
+        clearTimeout(__resubscribeTimer);
+        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
+    }catch(e){console.error('listener attach failed',key,e);}
   });
   startSyncWatchdog();
 }
-// Belt-and-suspenders safety net: on a weak/flaky (not fully offline) connection, a real-time
-// listener can quietly stop delivering updates without ever firing an error at all — nothing
-// to react to, it just goes stale. Every 25s, do one plain fetch-and-compare regardless of
-// listener health, so the screen is never wrong for longer than that even in the worst case.
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
   __watchdogInterval = setInterval(()=>{
-    if(state.role && document.visibilityState==='visible') pollRefresh();
-  }, 25000);
+    if(state.role && state.loaded && document.visibilityState==='visible') pollOrdersFast();
+  }, 3000);
 }
+
+let __ordersPollInFlight = false;
+async function pollOrdersFast(){
+  if(__ordersPollInFlight || !state.role || !state.loaded) return;
+  __ordersPollInFlight = true;
+  try{
+    const snap = await ordersCollectionRef().get({source:'server'});
+    const parsed = [];
+    snap.forEach(d=>{
+      const x = d.data() || {};
+      delete x._migratedAt;
+      parsed.push({...x, id:x.id || d.id});
+    });
+    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    state.orders = parsed;
+    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp = Date.now();
+    state.__lastOrdersServerAt = Date.now();
+    if(!isActivelyEditingFormField()) render();
+  }catch(e){
+    console.warn('Fast orders sync failed; realtime listener remains active', e);
+  }finally{
+    __ordersPollInFlight = false;
+  }
+}
+
+// Full fallback is intentionally less frequent because it reads many documents. It is still
+// useful for settings/tables/inventory if a listener silently goes stale.
+let __fullWatchdogInterval = null;
+function startFullSyncWatchdog(){
+  if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
+  __fullWatchdogInterval = setInterval(()=>{
+    if(state.role && state.loaded && document.visibilityState==='visible') pollRefresh();
+  }, 30000);
+}
+
 async function pollRefresh(){
-  if(!state.role) return; // don't wipe the login form while the person is typing
-  if(isActivelyEditingFormField()) return; // same precise check the real-time path uses
-  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
+  if(!state.role || !state.loaded) return;
+  if(isActivelyEditingFormField()) return;
+  const all = await loadAll();
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = all;
+  const ordersResult = await loadOrdersV2();
+  const orders = ordersResult.ok ? ordersResult.value : null;
   if(menu) state.menu = menu;
   if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
   if(settings) state.settings = settings;
@@ -928,6 +1133,28 @@ function occupiedTableCount(){
   const tableIds = new Set(state.tables.map(t=>t.id));
   return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && tableIds.has(o.table)).length;
 }
+
+function setCustomerPhone(value){
+  const clean=String(value||'').replace(/\D/g,'').slice(0,9);
+  state.customerPhone=clean;
+  const input=document.getElementById('arrivalPhone');
+  if(input && input.value!==clean) input.value=clean;
+}
+function validateCustomerArrival(){
+  if(activeOrderForTable(state.activeTable)) return true;
+  if(state.role!=='waiter') return true;
+  const ph = String(state.customerPhone||'').replace(/\D/g,'');
+  if(/^\d{9}$/.test(ph)) return true;
+  if(ph.length===0){
+    showToast('Рақами телефон бояд 9 рақам бошад.');
+  } else if(ph.length<9){
+    showToast('Рақами телефон бояд 9 рақам бошад. Ҳоло '+ph.length+' рақам ворид шудааст.');
+  } else {
+    showToast('Рақами телефон бояд маҳз 9 рақам бошад.');
+  }
+  return false;
+}
+
 function openTable(t){
   const existing = activeOrderForTable(t);
   const tbl = state.tables.find(x=>x.id===t);
@@ -946,6 +1173,9 @@ function openTable(t){
   state.ticketMode = state.role==='waiter' ? 'edit' : (state.role==='cashier' ? 'pay' : 'view');
   state.activeTable = t;
   state.draftItems = {};
+  if(!existing && state.role==='waiter'){
+    state.customerPhone = '';
+  }
   if(existing){
     existing.items.forEach(it=>{ state.draftItems[it.menuId] = it.qty; });
   } else if(state.role==='waiter' && state.reservations && state.reservations[t] && state.reservations[t].preOrder && state.reservations[t].preOrder.length){
@@ -960,6 +1190,7 @@ function openTable(t){
 function closeTicket(){
   state.activeTable = null;
   state.draftItems = {};
+  state.customerPhone = '';
   state.confirmCancelOrderId = null;
   render();
 }
@@ -1008,6 +1239,7 @@ function removeDraftItem(mid){
   render();
 }
 async function saveTicket(sendFlag){
+  if(!validateCustomerArrival()) return;
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? order.items : [];
   let droppedAny = false;
@@ -1024,20 +1256,29 @@ async function saveTicket(sendFlag){
   if(!order){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
-      createdBy: actingUsername(), sentToKitchen:false};
+      createdBy: actingUsername(), sentToKitchen:false,
+      customerType: 'with_order',
+      customerPhone: state.customerPhone || null};
     state.orders.push(order);
+  }
+  if(isNew && state.role==='waiter'){
+    order.customerType = 'with_order';
+    order.customerPhone = state.customerPhone || null;
   }
   order.items = items;
   order.total = total;
   order.subtotal = subtotal;
   order.serviceCharge = total - subtotal;
   order.updatedAt = Date.now();
-  let saved=false;
   if(sendFlag){
-    saved = await commitOrderWithInventory(order, items, {requireKitchen:true});
-  }else{
-    saved = await saveOrders(state.orders);
+    order.sentToKitchen = true;
+    const inventoryOk = await deductForOrderDelta(order, items);
+    if(inventoryOk===false){
+      showToast('Анбор нав нашуд — фармоиш фиристода нашуд');
+      return;
+    }
   }
+  const saved = await saveOrders(state.orders);
   if(!saved) return;
   if(isNew && state.reservations && state.reservations[state.activeTable]){
     delete state.reservations[state.activeTable];
@@ -1046,39 +1287,105 @@ async function saveTicket(sendFlag){
   showToast(sendFlag ? '🍚 Ба ошпаз фиристода шуд' : 'Фармоиш захира шуд');
   closeTicket();
 }
-async function payTicket(cashAmount, noncashAmount){
-  const tableId=state.activeTable;
-  if(!db || tableId==null) return;
-  const cash=Math.max(0,Number(cashAmount)||0), noncash=Math.max(0,Number(noncashAmount)||0);
-  let paid=false, conflict=false;
+
+/* ---------- PAYMENT SAFETY v11 ----------
+   Payment is committed atomically in Firestore. A paid/cancelled order can never
+   be downgraded by a stale client copy. The same helper is used by cash/non-cash/mixed.
+*/
+async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
+  if(!db) return {ok:false,message:'Хатогӣ дар нигоҳдорӣ'};
+  const cash=Math.max(0,Number(cashAmount)||0);
+  const noncash=Math.max(0,Number(noncashAmount)||0);
   try{
-    await db.runTransaction(async(tx)=>{
-      const ref=docRef('orders');
+    return await db.runTransaction(async tx=>{
+      const ref=orderDocRef(orderId);
       const snap=await tx.get(ref);
-      let orders=[];
-      if(snap.exists){ try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){ orders=[]; } }
-      const order=orders.find(o=>o.table===tableId && o.status==='active');
-      if(!order) throw new Error('ORDER_NOT_ACTIVE');
-      const expectedTotal=Number(order.total)||0;
-      if(Math.abs(cash+noncash-expectedTotal)>0.01) throw new Error('PAYMENT_MISMATCH');
-      order.status='paid'; order.paidAt=Date.now(); order.paidBy=actingUsername();
-      order.cashAmount=cash; order.noncashAmount=noncash;
-      order.paymentMethod=cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash');
-      order.updatedAt=Date.now();
-      tx.set(ref,{value:JSON.stringify(orders),updatedAt:Date.now()});
-      state.orders=orders;
-      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-      paid=true;
+      if(!snap.exists) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
+      const remote={...(snap.data()||{}),id:(snap.data()||{}).id||snap.id};
+
+      // Idempotency: terminal orders can never be paid twice or reopened.
+      if(remote.status==='paid'||remote.status==='cancelled'){
+        return {ok:false,alreadyTerminal:true,status:remote.status,order:remote};
+      }
+
+      const total=Number(remote.total||0);
+      if(Math.abs(cash+noncash-total)>0.01){
+        return {ok:false,message:'Маблағи пардохт ба маблағи чек баробар нест'};
+      }
+
+      const now=Date.now();
+      const paid={
+        ...remote,
+        status:'paid',
+        paidAt:now,
+        paidBy:actingUsername(),
+        cashAmount:cash,
+        noncashAmount:noncash,
+        paymentMethod:cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash'),
+        lockedAt:now,
+        updatedAt:now
+      };
+      tx.set(ref,paid,{merge:true});
+      return {ok:true,order:paid};
     });
-    if(paid){ showToast('Чек пардохт шуд'); closeTicket(); }
   }catch(e){
-    const msg=String(e&&e.message);
-    if(msg==='ORDER_NOT_ACTIVE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
-    else if(msg==='PAYMENT_MISMATCH') showToast('Маблағи пардохт ба маблағи чек баробар нест');
-    else { console.error('payTicket failed',e); showToast('Пардохт нигоҳ дошта нашуд'); }
+    console.error('commitPaidOrderAtomic failed:',e);
+    return {ok:false,message:'Пардохт дар база сабт нашуд'};
   }
 }
+
+async function payTicket(cashAmount, noncashAmount){
+  const order=activeOrderForTable(state.activeTable);
+  if(!order) return;
+  const cash=Math.max(0,Number(cashAmount)||0);
+  const noncash=Math.max(0,Number(noncashAmount)||0);
+  const expected=Number(order.total||0);
+  if(Math.abs(cash+noncash-expected)>0.01){
+    showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return;
+  }
+
+  const result=await commitPaidOrderAtomic(order.id,cash,noncash);
+  if(!result.ok){
+    if(result.alreadyTerminal && result.order){
+      state.orders=state.orders.map(o=>o.id===result.order.id?result.order:o);
+      if(result.status==='paid') showToast('Ин чек аллакай баста шудааст');
+      else showToast('Ин фармоиш аллакай бекор шудааст');
+    }else{
+      showToast(result.message||'Пардохт сабт нашуд');
+    }
+    render();
+    return;
+  }
+
+  // Update local state only AFTER the Firebase transaction has committed.
+  state.orders=state.orders.map(o=>o.id===order.id?result.order:o);
+  speakPaymentSuccess(result.order);
+  // Reset the chef/cashier "new order" detector before redraw so a terminal order
+  // can never generate a false "Фармоиши нав" announcement.
+  if(state.seenPendingIds instanceof Set) state.seenPendingIds.delete(order.id);
+  if(state.seenCashierOrderIds instanceof Set) state.seenCashierOrderIds.delete(order.id);
+  showToast('Чек пардохт шуд');
+  closeTicket();
+}
+
+function speakPaymentSuccess(order){
+  try{
+    if(!('speechSynthesis' in window)) return;
+    if(state.settings && state.settings.paymentVoiceEnabled===false) return;
+    const tbl=state.tables.find(t=>t.id===order.table);
+    const tableName=tbl ? String(tbl.name||tbl.number||order.table||'').trim() : String(order.table||'').trim();
+    const customer=String(order.customerName||order.clientName||order.customer||'').trim();
+    const template=String((state.settings && state.settings.paymentVoiceText)||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}');
+    const namePart=customer ? ` Номи клиент: ${customer}.` : '';
+    const spoken=template.replace(/\{TABLE\}/gi,tableName||'—').replace(/\{NAME\}/gi,namePart);
+    if(!spoken.trim()) return;
+    window.speechSynthesis.cancel();
+    const utter=new SpeechSynthesisUtterance(spoken);
+    utter.lang='ru-RU'; utter.rate=0.9; utter.pitch=1;
+    window.speechSynthesis.speak(utter);
+  }catch(e){}
+}
+
 function actingUsername(){
   return state.previewUsername || (state.currentUser ? state.currentUser.username : null);
 }
@@ -1125,7 +1432,7 @@ function attachSplitPaymentEvents(idPrefix, total, onConfirm){
     const n = clamp(noncashInput.value);
     cashInput.value = fmt(total - n);
   });
-  document.querySelectorAll(`[data-splitquick^="${idPrefix}|"]`).forEach(el=>{
+  document.querySelectorAll('[data-splitquick^="' + idPrefix + '|"]').forEach(el=>{
     el.addEventListener('click', ()=>{
       const mode = el.dataset.splitquick.split('|')[1];
       if(mode==='allcash'){ cashInput.value = fmt(total); noncashInput.value = '0'; }
@@ -1325,51 +1632,28 @@ async function cancelOrphanOrder(id){
 // already deducted for it (recipe-based, from sending to kitchen) is restored, since the food
 // was never actually used.
 async function cancelOrder(id){
-  if(!db) return;
-  try{
-    let label='';
-    await db.runTransaction(async(tx)=>{
-      const ordersRef=docRef('orders'), invRef=docRef('inventory');
-      const ordersSnap=await tx.get(ordersRef), invSnap=await tx.get(invRef);
-      let orders=[]; let inventory=[];
-      if(ordersSnap.exists){ try{ orders=JSON.parse(ordersSnap.data().value)||[]; }catch(e){ orders=[]; } }
-      if(invSnap.exists){ try{ inventory=JSON.parse(invSnap.data().value)||[]; }catch(e){ inventory=[]; } }
-      const order=orders.find(o=>o.id===id);
-      if(!order) throw new Error('ORDER_NOT_FOUND');
-      if(order.status==='paid') throw new Error('ORDER_PAID');
-      if(order.status==='cancelled') throw new Error('ORDER_CANCELLED');
-      label=orderLabel(order);
-      const deducted=order.inventoryDeductedFor||{};
-      for(const menuId of Object.keys(deducted)){
-        const qty=Math.max(0,Number(deducted[menuId])||0);
-        if(!qty) continue;
-        const itemData=(order.items||[]).find(it=>it.menuId===menuId);
-        const calc=computeInventoryDeduction([{menuId,qty,unit:itemData&&itemData.unit}]);
-        for(const invId of Object.keys(calc)){
-          const item=inventory.find(i=>i.id===invId);
-          if(!item) throw new Error('INVENTORY_ITEM_MISSING');
-          item.qty=Math.max(0,(Number(item.qty)||0)+calc[invId]);
-          item.updatedAt=Date.now();
-        }
-      }
-      order.status='cancelled'; order.cancelledAt=Date.now(); order.cancelledBy=actingUsername()||'?';
-      order.updatedAt=Date.now(); order.cancelReason=order.cancelReason||'Бекор карда шуд'; order.inventoryDeductedFor={};
-      tx.set(ordersRef,{value:JSON.stringify(orders),updatedAt:Date.now()});
-      tx.set(invRef,{value:JSON.stringify(inventory),updatedAt:Date.now()});
-      state.orders=orders; state.inventory=inventory;
-      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-    });
-    await logActivity('Фармоишро бекор кард: '+label);
-    showToast('Фармоиш бекор карда шуд');
-  }catch(e){
-    const msg=String(e&&e.message);
-    if(msg==='ORDER_PAID') showToast('Фармоиши пардохтшударо бекор кардан мумкин нест');
-    else if(msg==='ORDER_CANCELLED') showToast('Ин фармоиш аллакай бекор шудааст');
-    else if(msg==='ORDER_NOT_FOUND') showToast('Фармоиш ёфт нашуд');
-    else if(msg==='INVENTORY_ITEM_MISSING') showToast('Заказ бекор нашуд: маҳсулоти анбор ёфт нашуд');
-    else { console.error('cancelOrder failed',e); showToast('Фармоиш бекор карда нашуд'); }
+  const order=state.orders.find(o=>o.id===id);
+  if(!order) return;
+  if(order.status==='paid'){showToast('Фармоиши пардохтшударо бекор кардан лозим нест');return;}
+  if(order.status==='cancelled'){showToast('Ин фармоиш аллакай бекор шудааст');return;}
+  if(order.inventoryDeductedFor && Object.keys(order.inventoryDeductedFor).length){
+    const restoreItems=Object.keys(order.inventoryDeductedFor).map(menuId=>({
+      menuId,qty:order.inventoryDeductedFor[menuId],
+      unit:(order.items.find(it=>it.menuId===menuId)||{}).unit
+    }));
+    const deduction=computeInventoryDeduction(restoreItems), restoreDeltas={};
+    Object.keys(deduction).forEach(invId=>restoreDeltas[invId]=deduction[invId]);
+    await applyInventoryDeltas(restoreDeltas);
   }
+  const label=orderLabel(order);
+  // Never physically delete an accounting record.
+  order.status='cancelled'; order.cancelledAt=Date.now();
+  order.cancelledBy=actingUsername()||'?'; order.updatedAt=Date.now();
+  order.cancelReason=order.cancelReason||'Бекор карда шуд';
+  order.inventoryDeductedFor={};
+  const ok=await saveOrders(state.orders); if(!ok) return;
+  await logActivity('Фармоишро бекор кард: '+label);
+  showToast('Фармоиш бекор карда шуд');
 }
 /* ---------- Inventory (анбор) ---------- */
 async function addInventoryItem(name, unit, qty, unitCost, minThreshold){
@@ -1469,86 +1753,15 @@ async function deductForOrderDelta(order, currentItems){
   order.inventoryDeductedFor = currentMap;
   return true;
 }
-async function commitOrderWithInventory(order, desiredItems, options={}){
-  if(!db) return false;
-  const requireKitchen=!!options.requireKitchen;
-  const currentItems=Array.isArray(desiredItems)?desiredItems:[];
-  const currentMap={};
-  currentItems.forEach(it=>{ currentMap[it.menuId]=Math.max(0,Number(it.qty)||0); });
-  try{
-    let committed=null;
-    await db.runTransaction(async(tx)=>{
-      const ordersRef=docRef('orders');
-      const invRef=docRef('inventory');
-      const ordersSnap=await tx.get(ordersRef);
-      const invSnap=await tx.get(invRef);
-      let orders=[]; let inventory=[];
-      if(ordersSnap.exists){ try{ orders=JSON.parse(ordersSnap.data().value)||[]; }catch(e){ orders=[]; } }
-      if(invSnap.exists){ try{ inventory=JSON.parse(invSnap.data().value)||[]; }catch(e){ inventory=[]; } }
-      const remote=orders.find(o=>o.id===order.id);
-      const known=state.__lastKnownOrderSnapshots && state.__lastKnownOrderSnapshots.get(order.id);
-      if(remote){
-        if(remote.status==='paid' || remote.status==='cancelled') throw new Error('ORDER_NOT_EDITABLE');
-        // Conservative conflict rule: if this order changed remotely since this device last saw it,
-        // refuse the inventory/order write rather than risk double deduction or lost items.
-        if(known && Number(remote.updatedAt||0)!==Number(known.updatedAt||0)) throw new Error('ORDER_CONFLICT');
-      }
-      const prevMap=(remote && remote.inventoryDeductedFor) || {};
-      const allMenuIds=new Set([...Object.keys(prevMap),...Object.keys(currentMap)]);
-      const delta={};
-      allMenuIds.forEach(menuId=>{
-        const prevQty=Math.max(0,Number(prevMap[menuId])||0);
-        const nextQty=Math.max(0,Number(currentMap[menuId])||0);
-        const d=nextQty-prevQty;
-        if(d!==0){
-          const itemsForDelta=[{menuId,qty:Math.abs(d),unit:(currentItems.find(i=>i.menuId===menuId)||{}).unit}];
-          const calc=computeInventoryDeduction(itemsForDelta);
-          Object.keys(calc).forEach(invId=>{ delta[invId]=(delta[invId]||0)+(d>0?-calc[invId]:calc[invId]); });
-        }
-      });
-      for(const invId of Object.keys(delta)){
-        const item=inventory.find(i=>i.id===invId);
-        if(!item) throw new Error('INVENTORY_ITEM_MISSING');
-        const nextQty=(Number(item.qty)||0)+delta[invId];
-        if(nextQty < -0.000001) throw new Error('INSUFFICIENT_STOCK');
-        item.qty=Math.max(0,nextQty); item.updatedAt=Date.now();
-      }
-      const nextOrder={...(remote||{}),...JSON.parse(JSON.stringify(order)),items:currentItems,inventoryDeductedFor:currentMap};
-      if(requireKitchen) nextOrder.sentToKitchen=true;
-      nextOrder.updatedAt=Date.now();
-      if(remote){
-        const idx=orders.findIndex(o=>o.id===order.id); orders[idx]=nextOrder;
-      }else orders.push(nextOrder);
-      tx.set(ordersRef,{value:JSON.stringify(orders),updatedAt:Date.now()});
-      if(Object.keys(delta).length) tx.set(invRef,{value:JSON.stringify(inventory),updatedAt:Date.now()});
-      committed=nextOrder;
-    });
-    if(committed){
-      const idx=state.orders.findIndex(o=>o.id===committed.id);
-      if(idx>=0) state.orders[idx]=committed; else state.orders.push(committed);
-      state.inventory=state.inventory || [];
-      state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-      return true;
-    }
-  }catch(e){
-    const msg=String(e&&e.message);
-    if(msg==='ORDER_CONFLICT') showToast('Ин заказро дастгоҳи дигар тағйир додааст — аввал навсозӣ кунед');
-    else if(msg==='ORDER_NOT_EDITABLE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
-    else if(msg==='INVENTORY_ITEM_MISSING') showToast('Маҳсулоти дорухат дар анбор ёфт нашуд');
-    else if(msg==='INSUFFICIENT_STOCK') showToast('Миқдори анбор барои ин заказ кофӣ нест');
-    else { console.error('commitOrderWithInventory failed',e); showToast('Заказ ва анбор якҷоя нигоҳ дошта нашуданд'); }
-  }
-  return false;
-}
-
 async function addAccount(username, password, role){
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
-  const id = 'acc_'+Date.now()+'_'+Math.floor(Math.random()*1000);
-  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
+  const id = uid('acc');
+  const hashedPass = await hashPassword(password);
+  state.accounts.push({id, username, password: hashedPass, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1558,13 +1771,15 @@ async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  acc.username=username; acc.password=password; acc.role=role;
+  const hashedPass = await hashPassword(password);
+  acc.username=username; acc.password=hashedPass; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -1593,21 +1808,14 @@ function isThisMonth(ts){
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth();
 }
 function orderCommission(order){
-  let oshGrams = 0, oshValue = 0;
-  order.items.forEach(it=>{
-    if(getItemCategory(it)==='Ош' && it.unit==='kg'){
-      oshGrams += it.qty;
-      oshValue += lineTotal({unit:'kg', price:it.price}, it.qty);
-    }
-  });
-  const oshCommission = oshGrams >= 500 ? 12 : oshValue*0.05;
-  const otherValue = Math.max(0, (order.total||0) - oshValue);
-  const otherCommission = otherValue*0.05;
-  return oshCommission + otherCommission;
+  let oshGrams=0, oshValue=0, otherValue=0;
+  (order.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
+  const oshCommission=oshGrams>=500?12:(oshGrams>0?oshValue*0.05:0);
+  return oshCommission+otherValue*0.05;
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
-    if(o.status!=='paid' || o.archived) return false;
+    if(o.status!=='paid' || o.archived===true) return false;
     const ts = o.paidAt || o.updatedAt || o.createdAt;
     if(scope==='today' && !isToday(ts)) return false;
     if(scope==='month' && !isThisMonth(ts)) return false;
@@ -1615,17 +1823,12 @@ function staffCommissionBreakdown(username, role, scope){
   });
   let countHigh=0, countLow=0, countNoOsh=0, oshSum=0, otherSum=0;
   orders.forEach(o=>{
-    let oshGrams=0, oshValue=0;
-    o.items.forEach(it=>{
-      if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=it.qty; oshValue+=lineTotal({unit:'kg',price:it.price}, it.qty); }
-    });
-    if(oshGrams>=500){ countHigh++; oshSum+=12; }
-    else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; }
-    else { countNoOsh++; }
-    const otherValue = Math.max(0, (o.total||0)-oshValue);
+    let oshGrams=0, oshValue=0, otherValue=0;
+    (o.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
+    if(oshGrams>=500){ countHigh++; oshSum+=12; } else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; } else { countNoOsh++; }
     otherSum += otherValue*0.05;
   });
-  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total: oshSum+otherSum};
+  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total:oshSum+otherSum};
 }
 function staffCommission(username, role, scope){
   return staffCommissionBreakdown(username, role, scope).total;
@@ -1650,24 +1853,44 @@ function autoBonusToday(username, role){
   return {checkCountBonus, revenueBonus, total: checkCountBonus+revenueBonus, orderCount: breakdown.orderCount, commissionTotal: breakdown.total};
 }
 function computeWages(acc){
+  // reportClearedToday is ONLY true when admin manually pressed "Пок кардани ҳисобот"
+  // (which sets salaryResetAt). Daily closure (closeDailyReport) sets reportClosedAt
+  // but must NOT zero out wages — staff earned their commission on those closed orders.
+  const salaryResetAt = Number(state.settings && state.settings.salaryResetAt) || 0;
+  const salaryResetThisMonth = salaryResetAt && isThisMonth(salaryResetAt);
+  const salaryResetForToday = salaryResetAt && isToday(salaryResetAt);
+
   if(acc.wageType==='commission'){
-    const auto = autoBonusToday(acc.username, acc.role);
-    const manualToday = manualBonusSum(acc.username, 'today');
-    const manualMonth = manualBonusSum(acc.username, 'month');
+    const auto = salaryResetForToday ? {total:0} : autoBonusToday(acc.username, acc.role);
+    const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
+    const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
+    const dailyCommission = salaryResetForToday ? 0 : staffCommission(acc.username, acc.role, 'today');
+    const monthlyCommission = salaryResetThisMonth ? 0 : staffCommission(acc.username, acc.role, 'month');
     return {
-      daily: staffCommission(acc.username, acc.role, 'today') + auto.total + manualToday,
-      monthly: staffCommission(acc.username, acc.role, 'month') + manualMonth,
+      daily: dailyCommission + auto.total + manualToday,
+      monthly: monthlyCommission + manualMonth,
       bonusToday: auto.total + manualToday
     };
   }
+
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   const amount = Number(acc.wageAmount) || 0;
-  const manualToday = manualBonusSum(acc.username, 'today');
-  const manualMonth = manualBonusSum(acc.username, 'month');
+  const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
+  const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
+
   if(acc.wageType==='monthly'){
-    return {daily: amount/days + manualToday, monthly: amount + manualMonth, bonusToday: manualToday};
+    return {
+      daily: salaryResetForToday ? 0 : amount/days + manualToday,
+      monthly: salaryResetThisMonth ? 0 : amount + manualMonth,
+      bonusToday: manualToday
+    };
   }
-  return {daily: amount + manualToday, monthly: amount*days + manualMonth, bonusToday: manualToday};
+
+  return {
+    daily: salaryResetForToday ? 0 : amount + manualToday,
+    monthly: salaryResetThisMonth ? 0 : amount*days + manualMonth,
+    bonusToday: manualToday
+  };
 }
 function formatQtyLabel(it){
   const safeName = escapeHtml(it.name||'');
@@ -1869,15 +2092,17 @@ function renderLogin(){
   </div>`;
 }
 function attachLoginEvents(){
-  const submit = ()=>{
+  const submit = async ()=>{
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===p);
+    if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
+    const hashedInput = await hashPassword(p);
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===hashedInput);
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
-    saveSession({username:acc.username, password:acc.password});
+    saveSession({username:acc.username, role:acc.role});
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -1925,9 +2150,19 @@ function buildTableCards(){
     const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
     const actingName = actingUsername();
     const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !isRealAdmin;
-    let dotClass = 'free', statusText = 'Озод', extra = '';
+    let dotClass = 'free', statusText = 'Озод', extra = '', arrivalBadge = '';
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
+
+      // Show full 9-digit phone number prominently above the table card.
+      // Never show "Бо заказ", "Беззаказ", or masked/truncated phone.
+      const _cardPhone = String(order.customerPhone || '').replace(/\D/g,'').slice(0,9);
+      if(_cardPhone.length===9){
+        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
+      } else if(_cardPhone.length>0){
+        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
+      }
+
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
@@ -1935,9 +2170,7 @@ function buildTableCards(){
       if(order.createdBy){
         extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
       }
-      if(order.customerPhone){
-        extra += `<span class="reserve-detail">📞 ${escapeHtml(order.customerPhone)}</span>`;
-      }
+      // Phone is already shown in arrivalBadge — don't duplicate it in extra
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
         extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
       }
@@ -1955,6 +2188,7 @@ function buildTableCards(){
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
     cards += `
     <button class="table-card ${reservation?'reserved-table':''} ${lockedForMe?'locked-table':''}" data-table="${t}">
+      ${arrivalBadge}
       <div class="row1">
         <span class="tnum">${escapeHtml(tbl.name)}</span>
         <span class="dot ${dotClass}"></span>
@@ -2155,7 +2389,6 @@ async function submitTakeaway(cashAmount, noncashAmount){
   const todayCount = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt)).length;
   const cash = Math.max(0, Number(cashAmount)||0);
   const noncash = Math.max(0, Number(noncashAmount)||0);
-  if(Math.abs(cash+noncash-total)>0.01){ showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return; }
   const order = {
     id: uid('ord'), table: null, type: 'takeaway', status: 'paid', takeawayNumber: todayCount+1,
     items, total, createdAt: Date.now(), updatedAt: Date.now(),
@@ -2164,8 +2397,9 @@ async function submitTakeaway(cashAmount, noncashAmount){
     paymentMethod: cash>0 && noncash>0 ? 'mixed' : (noncash>0 ? 'noncash' : 'cash'),
     prepared: false
   };
-  const committed=await commitOrderWithInventory(order, items, {requireKitchen:true});
-  if(!committed) return;
+  state.orders.push(order);
+  await deductForOrderDelta(order, items);
+  await saveOrders(state.orders);
   showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
   closeTakeaway();
 }
@@ -2237,8 +2471,9 @@ async function submitScheduled(name, phone, time, deliveryType){
     deliveryType: deliveryType==='takeaway' ? 'takeaway' : 'dinein',
     prepared: false
   };
-  const committed=await commitOrderWithInventory(order, items, {requireKitchen:false});
-  if(!committed) return;
+  state.orders.push(order);
+  await deductForOrderDelta(order, items);
+  await saveOrders(state.orders);
   showToast('Фармоиши вақтдор сабт шуд');
   closeScheduled();
 }
@@ -2265,36 +2500,33 @@ function closeOrderView(){
   render();
 }
 async function payOrderById(id,cashAmount,noncashAmount){
-  if(!db) return;
-  const cash=Math.max(0,Number(cashAmount)||0), noncash=Math.max(0,Number(noncashAmount)||0);
-  try{
-    await db.runTransaction(async(tx)=>{
-      const ref=docRef('orders');
-      const snap=await tx.get(ref);
-      let orders=[];
-      if(snap.exists){ try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){ orders=[]; } }
-      const order=orders.find(o=>o.id===id);
-      if(!order) throw new Error('ORDER_NOT_FOUND');
-      if(order.status!=='active') throw new Error('ORDER_NOT_ACTIVE');
-      const expectedTotal=Number(order.total)||0;
-      if(Math.abs(cash+noncash-expectedTotal)>0.01) throw new Error('PAYMENT_MISMATCH');
-      order.status='paid'; order.paidAt=Date.now(); order.paidBy=actingUsername();
-      order.cashAmount=cash; order.noncashAmount=noncash;
-      order.paymentMethod=cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash');
-      order.updatedAt=Date.now();
-      tx.set(ref,{value:JSON.stringify(orders),updatedAt:Date.now()});
-      state.orders=orders;
-      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-    });
-    showToast('Пардохт шуд'); closeOrderView();
-  }catch(e){
-    const msg=String(e&&e.message);
-    if(msg==='ORDER_NOT_FOUND') showToast('Заказ ёфт нашуд');
-    else if(msg==='ORDER_NOT_ACTIVE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
-    else if(msg==='PAYMENT_MISMATCH') showToast('Маблағи пардохт ба маблағи чек баробар нест');
-    else { console.error('payOrderById failed',e); showToast('Пардохт нигоҳ дошта нашуд'); }
+  const order=state.orders.find(o=>o.id===id);
+  if(!order) return;
+  const cash=Math.max(0,Number(cashAmount)||0);
+  const noncash=Math.max(0,Number(noncashAmount)||0);
+  const expected=Number(order.total||0);
+  if(Math.abs(cash+noncash-expected)>0.01){
+    showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return;
   }
+
+  const result=await commitPaidOrderAtomic(id,cash,noncash);
+  if(!result.ok){
+    if(result.alreadyTerminal && result.order){
+      state.orders=state.orders.map(o=>o.id===id?result.order:o);
+      showToast(result.status==='paid'?'Ин чек аллакай баста шудааст':'Ин фармоиш аллакай бекор шудааст');
+    }else{
+      showToast(result.message||'Пардохт сабт нашуд');
+    }
+    render();
+    return;
+  }
+
+  state.orders=state.orders.map(o=>o.id===id?result.order:o);
+  speakPaymentSuccess(result.order);
+  if(state.seenPendingIds instanceof Set) state.seenPendingIds.delete(id);
+  if(state.seenCashierOrderIds instanceof Set) state.seenCashierOrderIds.delete(id);
+  showToast('Пардохт шуд');
+  closeOrderView();
 }
 async function assignScheduledToTable(orderId, tableId){
   const order = state.orders.find(o=>o.id===orderId);
@@ -2592,6 +2824,7 @@ function renderOrderViewOverlay(){
     ? `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">${escapeHtml(order.customerName||'')} ${order.customerPhone?('· '+escapeHtml(order.customerPhone)):''}</p>` : '';
   const waiterLine = order.createdBy
     ? `<p style="padding:0 20px;font-size:12px;color:#9c8f78;margin:0 0 4px;">👤 официант: ${escapeHtml(order.createdBy)}</p>` : '';
+  const tableLine = (order.type!=='takeaway' && order.type!=='scheduled') ? (()=>{ const tbl=state.tables.find(t=>t.id===order.table); const name=tbl ? (tbl.name||('№'+order.table)) : ('№'+order.table); return `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">🪑 Миз: ${escapeHtml(name)}</p>`; })() : '';
   const actionBtn = state.viewingMode==='pay'
     ? `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('payvo', order.total)}</div>` : '';
   const cancelBlock = state.confirmCancelOrderId===order.id ? `
@@ -2611,6 +2844,7 @@ function renderOrderViewOverlay(){
         <button class="close-x" id="closeViewOrder">✕</button>
       </div>
       ${contactLine}
+      ${tableLine}
       ${waiterLine}
       <div class="receipt">
         <div class="receipt-title">Чек</div>
@@ -2957,17 +3191,25 @@ function renderTicketOverlay(){
     actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
   }
 
+  const _activeTbl = state.tables.find(t=>t.id===state.activeTable);
+  const _activeTblName = _activeTbl ? escapeHtml(_activeTbl.name) : ('№'+state.activeTable);
   return `
   <div class="overlay" id="ticketOverlay">
     <div class="ticket-wrap">
       <div class="ticket-head">
-        <h2>Мизи №${state.activeTable}</h2>
+        <h2>Миз: ${_activeTblName}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
+      ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
+      ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
+       <div class="form-box" style="margin:10px 20px 14px;display:block;">
+         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">📞 Рақами телефони клиент (9 рақам)</div>
+         <input id="arrivalPhone" inputmode="numeric" maxlength="9" pattern="[0-9]{9}" value="${escapeHtml(state.customerPhone||'')}" placeholder="918765432" style="display:block;width:180px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;letter-spacing:1px;">
+       </div>` : ''}
       ${menuSection}
       <div class="receipt">
-        <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
+        <div class="receipt-title">Чек — Миз: ${_activeTblName}</div>
         ${receiptLines}
         ${serviceFee>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line"><span>Ҳаққи хизматрасонӣ (${state.settings.serviceChargePct}%)</span><span>+${fmtMoney(serviceFee)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
@@ -2999,6 +3241,15 @@ function attachTicketEvents(){
     state.confirmCancelOrderId = null; render();
   });
   if(mode==='edit'){
+    const arrivalPhone = document.getElementById('arrivalPhone');
+    if(arrivalPhone){
+      arrivalPhone.addEventListener('input', e=>setCustomerPhone(e.target.value));
+      arrivalPhone.addEventListener('keydown', e=>{
+        if(e.ctrlKey || e.metaKey || e.altKey) return;
+        if(['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) return;
+        if(!/^[0-9]$/.test(e.key)) e.preventDefault();
+      });
+    }
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
     });
@@ -3462,7 +3713,7 @@ function renderAdminSalary(){
   return `
     <div class="section-title">Ҳисоби маоши кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
-    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ош дар чек ≥500г бошад — 12 смн аз ҳар чек; агар <500г — 5% аз арзиши он қисм; аз ҳама маҳсули дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
+    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ҳар гуна ош дар чек ≥500г бошад — 12 смн; агар ош <500г бошад — 5% аз арзиши ош; ҳар маҳсулоти дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
     <div class="stat-row" style="margin-bottom:14px;">
       <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
       <div class="stat-card"><div class="label">Ҷамъи бонуси имрӯза (ҳама)</div><div class="value" style="color:${totalBonusToday>0?'var(--olive)':'inherit'};">${totalBonusToday.toFixed(1)} смн</div></div>
@@ -3753,45 +4004,98 @@ function renderAdminMenu(){
 }
 
 async function clearAllReportHistory(){
-  // Accounting records are archived, never physically deleted.
   const now=Date.now();
-  state.orders.forEach(o=>{
-    if(o.status==='paid'){
-      o.archived=true; o.archivedAt=now; o.archivedBy=actingUsername()||'?'; o.updatedAt=now;
-    }
-  });
-  const ok=await saveOrders(state.orders); if(!ok) return;
+  const actor=actingUsername()||'?';
+
+  // Archive records are the daily reports. When the user explicitly chooses
+  // to clear report history, delete both the current report records and the
+  // archived daily summaries.
+  state.orders=(state.orders||[]).map(o=>o.status==='paid'
+    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
+    : o);
+
+  const ok=await saveOrders(state.orders);
+  if(!ok) return;
+
+  state.dailyClosures=[];
+  await saveDailyClosures([]);
+
+  // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
+  // It is rendered from state.dailyClosures, so the next render must show no rows.
+  state.dailyReportRows=[];
+  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
+  await saveSettings(state.settings);
+
   state.confirmClearReport=false;
-  await logActivity('Ҳисоботи ҷорӣ тоза шуд — маълумот ба архив гузашт');
-  showToast('Ҳисоботи ҷорӣ тоза шуд; маълумот дар архив боқӣ монд');
+  render();
+  await logActivity('Ҳисобот ва архиви ҳисоботҳои ҳаррӯза пурра нест карда шуд');
+  showToast('Ҳисобот ва архиви ҳаррӯза нест карда шуд');
 }
 async function closeDailyReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
-  const revenue = paidToday.reduce((s,o)=>s+o.total,0);
-  const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
-  const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
-  const activeCount = state.orders.filter(o=>o.status==='active').length;
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
+  const active = state.orders.filter(o=>o.status==='active');
 
-  const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
-  const staffSummary = commissionAccounts.map(acc=>{
-    const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
-    return {username: acc.username, role: acc.role, total: b.total, checks: b.orderCount};
+  if(active.length){
+    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед');
+    return;
+  }
+
+  if(!paidToday.length){
+    showToast('Имрӯз барои архив ҳисоботи пардохтшуда нест');
+    return;
+  }
+
+  const revenue=paidToday.reduce((s,o)=>s+(Number(o.total)||0),0);
+  const cashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
+  const noncashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+
+  const commissionAccounts=state.accounts.filter(a=>a.wageType==='commission'&&(a.role==='waiter'||a.role==='cashier'));
+  const staffSummary=commissionAccounts.map(acc=>{
+    const b=staffCommissionBreakdown(acc.username,acc.role,'today');
+    return {username:acc.username,role:acc.role,total:b.total,checks:b.orderCount};
   }).filter(s=>s.checks>0);
 
-  const lowStock = state.inventory.filter(i => i.minThreshold>0 && i.qty <= i.minThreshold).map(i=>i.name);
+  const lowStock=state.inventory.filter(i=>i.minThreshold>0&&i.qty<=i.minThreshold).map(i=>i.name);
+  const closedAt=Date.now();
 
-  const closure = {
-    id: uid('close'), date: todayKey(), closedAt: Date.now(), closedBy: actingUsername(),
-    revenue, cashToday, noncashToday, checkCount: paidToday.length,
-    activeCount, staffSummary, lowStock
+  const closure={
+    id:uid('close'),
+    date:todayKey(),
+    closedAt,
+    closedBy:actingUsername(),
+    revenue,
+    cashToday,
+    noncashToday,
+    checkCount:paidToday.length,
+    activeCount:active.length,
+    staffSummary,
+    lowStock,
+    orders:paidToday.map(o=>JSON.parse(JSON.stringify(o)))
   };
-  state.dailyClosures = state.dailyClosures || [];
+
+  state.dailyClosures=state.dailyClosures||[];
   state.dailyClosures.unshift(closure);
-  if(state.dailyClosures.length > 90) state.dailyClosures = state.dailyClosures.slice(0, 90);
+  if(state.dailyClosures.length>365) state.dailyClosures=state.dailyClosures.slice(0,365);
   await saveDailyClosures(state.dailyClosures);
-  await logActivity('Рӯзро пӯшид — даромад: '+fmtMoney(revenue));
-  state.showCloseDayConfirm = false;
-  showToast('Рӯз пӯшида шуд ва сабт гардид');
+
+  // Mark the exact paid orders as archived instead of deleting them.
+  // This survives realtime sync because the accounting record itself carries the flag.
+  const ids=new Set(paidToday.map(o=>o.id));
+  state.orders=state.orders.map(o=>ids.has(o.id)
+    ? {...o, archived:true, archivedAt:closedAt, archivedBy:actingUsername(), updatedAt:closedAt}
+    : o);
+  const saved=await saveOrders(state.orders);
+  if(!saved) return;
+
+  // Keep a simple settings marker for informational purposes, but the report itself
+  // relies on order.archived so stale settings cannot make archived orders reappear.
+  state.settings={...state.settings, reportClosedAt:closedAt};
+  await saveSettings(state.settings);
+
+  await logActivity('Рӯзро пӯшид — '+paidToday.length+' чек ба архив гузашт');
+  state.showCloseDayConfirm=false;
+  state.confirmClearReport=false;
+  showToast('Рӯз пӯшида шуд — ҳисобот архив шуд');
 }
 async function deleteDailyClosure(id){
   const c = (state.dailyClosures||[]).find(x=>x.id===id);
@@ -3801,7 +4105,12 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
+  // Current report contains all paid orders since the last manual clear (inCurrentReportPeriod),
+  // that have NOT been archived. This means the report persists across midnight — day change
+  // does NOT auto-clear the report. Only Admin pressing "Пок кардани ҳисобот" resets it.
+  // Archived orders remain in the accounting database and in the archive, but never
+  // reappear on the current report after realtime sync or refresh.
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -3834,8 +4143,8 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал чекҳои пардохтшударо аз ҳисоботи ҷорӣ пинҳон мекунад. Маълумот дар архив боқӣ мемонад ва нест карда намешавад. Мизҳои фаъол дахл намеёбанд.</p>
-        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, аз ҳисоботи ҷорӣ тоза кун</button>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи ҳисобот, ҷадвали ҳисоботи чандрӯза, архив ва маблағи ҷамъшудаи маош/комиссияро пурра ва бебозгашт пок мекунад. Мизҳои фаъол дахл намеёбанд.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
     </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--brick);border-color:var(--brick);" id="clearReportBtn">🗑 Пок кардани ҳисобот</button>`;
@@ -3844,7 +4153,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--olive);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--olive);font-weight:700;margin:0 0 4px;">📋 Пӯшидани рӯз тасдиқ мешавад?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза (даромад, комиссия, огоҳии анбор) сабт мешавад. Маълумоти чекҳо нест намешавад — ин танҳо як сабти таърихӣ аст.
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза ба архив сабт мешавад ва чекҳои пардохтшуда аз ҳисоботи ҷорӣ хориҷ мешаванд. Маълумоти чекҳо дар база нигоҳ дошта мешавад. Мизҳои фаъол пӯшида намешаванд.
         ${active.length ? `<br><strong style="color:var(--brick);">⚠️ ${active.length} миз/фармоиш ҳанӯз фаъол аст!</strong>` : ''}</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCloseDayBtn">Ҳа, рӯзро пӯш</button>
         <button class="btn-ghost" id="cancelCloseDayBtn">Бекор</button>
@@ -3888,14 +4197,16 @@ function renderAdminReport(){
     ${renderDailyPaymentTable()}
 
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
-    <div class="section-title" style="margin-top:24px;">Чекҳои имрӯза</div>
+    <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
     ${receiptsHtml}
 
     ${(state.dailyClosures&&state.dailyClosures.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}
   `;
 }
 function renderDailyPaymentTable(){
-  const paid = state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt);
+  // The daily payment history is a report view. Archived orders belong to the
+  // closed/cleared accounting archive and must never reappear in this table.
+  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   if(!paid.length) return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ чек пардохт нашудааст</p>`;
   const map = {};
   paid.forEach(o=>{
@@ -3967,7 +4278,7 @@ function renderProductBreakdownTable(orders){
 // as its own sheet — and triggers a browser download.
 function exportReportToExcel(){
   if(typeof XLSX === 'undefined'){ showToast('Китобхонаи Excel бор нашуд — интернетро санҷед'); return; }
-  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && o.archived!==true && o.paidAt && inCurrentReportPeriod(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4011,7 +4322,9 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(receiptRows), 'Чекҳои имрӯза');
 
   const dayMap = {};
-  state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt).forEach(o=>{
+  // Exported daily history must match the on-screen report and exclude archived
+  // orders, including orders archived when the report history was cleared.
+  state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true).forEach(o=>{
     const d = new Date(o.paidAt);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     if(!dayMap[key]) dayMap[key] = {cash:0, noncash:0, count:0, label: d.toLocaleDateString('tg-TJ')};
@@ -4103,6 +4416,24 @@ function renderAdminSettings(){
     </div>
     <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ин фоиз худкор ба чекҳои мизҳо (танҳо фармоишҳое, ки дар кафе хӯрда мешаванд) илова мешавад. Ба фармоишҳои «Бо худ бурдан» татбиқ намешавад (0 = бе ҳаққи хизматрасонӣ).</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveServiceChargeBtn">Сабт кардан</button>
+  </div>
+
+  <div class="section-title" style="margin-top:32px;">🔊 Овози пардохт</div>
+  <div class="settings-form">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+      <input type="checkbox" id="paymentVoiceEnabled" ${state.settings.paymentVoiceEnabled!==false?'checked':''}>
+      Овози пардохт фаъол бошад
+    </label>
+    <div class="field" style="width:100%;">
+      <label>Матни овози пардохт</label>
+      <input type="text" id="paymentVoiceText"
+        value="${escapeHtml(state.settings.paymentVoiceText||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}')}"
+        placeholder="Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}">
+    </div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">
+      <b>{TABLE}</b> = рақами миз · <b>{NAME}</b> = номи клиент, агар бошад.
+    </p>
+    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="savePaymentVoiceBtn">Сабт кардан</button>
   </div>
 
   <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
@@ -4659,6 +4990,33 @@ function attachAdminEvents(){
       showToast('Сабт шуд');
       render();
     });
+    const savePaymentVoice = async ()=>{
+      const enabled = !!document.getElementById('paymentVoiceEnabled').checked;
+      const input = document.getElementById('paymentVoiceText');
+      const voiceText = String(input ? input.value : '').trim()
+        || 'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}';
+
+      const nextSettings = Object.assign({}, state.settings, {
+        paymentVoiceEnabled: enabled,
+        paymentVoiceText: voiceText
+      });
+
+      const ok = await saveSettings(nextSettings);
+      if(!ok) return;
+
+      state.settings = nextSettings;
+      showToast('Матни овози пардохт сабт шуд');
+      render();
+    };
+
+    const savePaymentVoiceBtn = document.getElementById('savePaymentVoiceBtn');
+    if(savePaymentVoiceBtn) savePaymentVoiceBtn.addEventListener('click', savePaymentVoice);
+
+    const paymentVoiceTextInput = document.getElementById('paymentVoiceText');
+    if(paymentVoiceTextInput) paymentVoiceTextInput.addEventListener('keydown', e=>{
+      if(e.key==='Enter'){ e.preventDefault(); savePaymentVoice(); }
+    });
+
     const confirmResetBtn = document.getElementById('confirmResetBtn');
     if(confirmResetBtn) confirmResetBtn.addEventListener('click', async ()=>{
       state.menu = DEFAULT_MENU.map(m=>({...m}));
@@ -4670,9 +5028,6 @@ function attachAdminEvents(){
   }
 }
 
-function escapeHtml(str){
-  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
-}
 
 // Catch up on any real-time data that arrived while a field had focus: the moment focus
 // leaves an input/select/textarea (and doesn't immediately land on another one), redraw once
@@ -4690,6 +5045,7 @@ document.addEventListener('focusout', ()=>{
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
   if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
+    pollOrdersFast();
     pollRefresh();
   }
 });
@@ -4697,7 +5053,8 @@ document.addEventListener('visibilitychange', ()=>{
 // The browser fires this the moment it detects the connection is back after being down —
 // catch up immediately rather than waiting for the next watchdog tick.
 window.addEventListener('online', ()=>{
-  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollRefresh();
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollOrdersFast();
+  pollRefresh();
 });
 
 /* ============ UPDATE CHECK ============
