@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-29-V46';
+const APP_VERSION = '2026-08-29-V46-FIX1';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1126,17 +1126,13 @@ function setCustomerPhone(value){
   if(input && input.value!==clean) input.value=clean;
 }
 function validateCustomerArrival(){
+  // V46 FIX: phone is optional. If entered, it must contain exactly 9 digits.
   if(activeOrderForTable(state.activeTable)) return true;
   if(state.role!=='waiter') return true;
   const ph = String(state.customerPhone||'').replace(/\D/g,'');
+  if(ph.length===0) return true;
   if(/^\d{9}$/.test(ph)) return true;
-  if(ph.length===0){
-    showToast('Рақами телефон бояд 9 рақам бошад.');
-  } else if(ph.length<9){
-    showToast('Рақами телефон бояд 9 рақам бошад. Ҳоло '+ph.length+' рақам ворид шудааст.');
-  } else {
-    showToast('Рақами телефон бояд маҳз 9 рақам бошад.');
-  }
+  showToast('Рақами телефон бояд 9 рақам бошад ё холӣ бошад.');
   return false;
 }
 
@@ -1242,12 +1238,12 @@ async function saveTicket(sendFlag){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
       createdBy: actingUsername(), sentToKitchen:false,
-      customerType: 'with_order',
+      customerType: state.customerPhone ? 'with_order' : 'without_order',
       customerPhone: state.customerPhone || null};
     state.orders.push(order);
   }
   if(isNew && state.role==='waiter'){
-    order.customerType = 'with_order';
+    order.customerType = state.customerPhone ? 'with_order' : 'without_order';
     order.customerPhone = state.customerPhone || null;
   }
   order.items = items;
