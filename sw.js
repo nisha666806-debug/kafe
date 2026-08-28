@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-08-21-4';
+const CACHE_NAME = 'kafe-shell-2026-08-29-V45';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
@@ -12,7 +12,6 @@ self.addEventListener('activate', event => {
   );
 });
 
-// Network-first/no-cache behavior: never serve a stale index.html or Firebase data.
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   event.respondWith(fetch(event.request));
