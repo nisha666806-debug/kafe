@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Идораи Кафе</title>
-<!-- V45: client phone + realtime order sync + stable payment/table flow + admin-visible passwords -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0A0806">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -566,57 +565,6 @@ async function saveOrders(orders){
   state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
   return true;
 }
-
-/* ============ V46 TICKET COMMIT ============
-   The waiter must never see a blocking "another device changed this order" message merely
-   because realtime sync arrived while the ticket form was open. New orders use their unique id.
-   Existing orders are committed from the current server document and terminal states win.
-*/
-async function saveTicketOrderV46(order){
-  if(!db || !order || !order.id){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
-  const ref = orderDocRef(order.id);
-  const incoming = JSON.parse(JSON.stringify(order));
-  delete incoming._migratedAt;
-  incoming.updatedAt = Date.now();
-  try{
-    await db.runTransaction(async tx=>{
-      const snap = await tx.get(ref);
-      const remote = snap.exists ? (snap.data()||{}) : null;
-      if(!remote){
-        tx.set(ref, incoming, {merge:true});
-        return;
-      }
-      const remoteTerminal = remote.status==='paid' || remote.status==='cancelled';
-      if(remoteTerminal && incoming.status!==remote.status){
-        // A stale waiter must never reopen a paid/cancelled check.
-        throw Object.assign(new Error('ORDER_ALREADY_TERMINAL'), {code:'ORDER_ALREADY_TERMINAL', remote});
-      }
-      // For an active order, the waiter intentionally editing this ticket is authoritative
-      // for ticket fields, while server-only metadata is preserved where present.
-      const merged = {...remote, ...incoming};
-      tx.set(ref, merged, {merge:true});
-    });
-    state.orders = state.orders.map(o=>o.id===incoming.id ? {...o,...incoming} : o);
-    state.__lastKnownOrderIds = new Set(state.orders.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    return true;
-  }catch(e){
-    if(e && e.code==='ORDER_ALREADY_TERMINAL'){
-      const remote=e.remote;
-      if(remote){
-        const normalized={...remote,id:remote.id||order.id};
-        state.orders=state.orders.map(o=>o.id===order.id?normalized:o);
-      }
-      showToast(remote && remote.status==='paid' ? 'Ин чек аллакай баста шудааст' : 'Ин фармоиш аллакай бекор шудааст');
-      render();
-      return false;
-    }
-    console.error('saveTicketOrderV46 failed',e);
-    showToast('Хатогӣ дар нигоҳдорӣ');
-    return false;
-  }
-}
-
 async function saveSettings(settings){
   try{
     const ok = await fsSet('settings', JSON.stringify(settings));
@@ -840,28 +788,18 @@ function escapeHtml(str){
 }
 
 /* ============ PASSWORD STORAGE V46 ============
-   New/changed passwords are stored exactly as entered, so a password such as 4444 is stored
-   in Firebase as 4444 and is visible to Admin. Existing SHA-256 hashes are NOT reversible;
-   they remain accepted for login until that account's password is explicitly changed/reset.
-*/
-async function hashPassword(plain){
-  return String(plain ?? '');
-}
-function isLegacyPasswordHash(value){
-  return /^[a-f0-9]{64}$/i.test(String(value ?? ''));
-}
+   New/changed passwords are stored exactly as entered so Admin can view them.
+   Existing legacy SHA-256 hashes remain usable for login until the Admin changes them. */
+async function hashPassword(plain){ return String(plain ?? ''); }
+function isLegacyPasswordHash(value){ return /^[a-f0-9]{64}$/i.test(String(value ?? '')); }
 async function legacyPasswordHash(plain){
-  const enc = new TextEncoder();
-  const buf = await crypto.subtle.digest('SHA-256', enc.encode(String(plain ?? '')));
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(plain ?? '')));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 /* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
    дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
    мекунем ва фавран захира мекунем. */
-async function migrateAccountPasswordsIfNeeded(){
-  // V45: do not convert plaintext passwords to hashes.
-  return true;
-}
+async function migrateAccountPasswordsIfNeeded(){ return true; }
 
 function uid(prefix){
   const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -889,6 +827,7 @@ function isToday(ts){
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
 function reportPeriodStart(){ const t=Number(state.settings&&state.settings.reportClearedAt)||0; return t>0?t:0; }
+function isCurrentReportOrder(o){ return !!(o && o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt)); }
 function inCurrentReportPeriod(ts){ const t=Number(ts)||0, start=reportPeriodStart(); return t>0 && (!start || t>start); }
 function todayKey(){
   const d = new Date();
@@ -1324,11 +1263,7 @@ async function saveTicket(sendFlag){
       return;
     }
   }
-  // V46: commit the ticket against the latest server copy. Realtime updates may arrive
-  // while the waiter is building the order, so never ask the waiter to manually refresh.
-  // A new order has a unique id; an existing order is updated atomically and terminal states
-  // (paid/cancelled) are protected from stale edits.
-  const saved = await saveTicketOrderV46(order);
+  const saved = await saveOrders(state.orders);
   if(!saved) return;
   if(isNew && state.reservations && state.reservations[state.activeTable]){
     delete state.reservations[state.activeTable];
@@ -2147,10 +2082,7 @@ function attachLoginEvents(){
     const p = document.getElementById('loginPassword').value||'';
     if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
     const legacyHashInput = await legacyPasswordHash(p);
-    const acc = state.accounts.find(a=>{
-      if(a.username.toLowerCase()!==u.toLowerCase()) return false;
-      return String(a.password ?? '') === p || String(a.password ?? '') === legacyHashInput;
-    });
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && (String(a.password ?? '')===p || String(a.password ?? '')===legacyHashInput));
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
@@ -3910,7 +3842,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(editTarget.password)}" autocomplete="off"></div>
+      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(isLegacyPasswordHash(editTarget.password)?'':editTarget.password)}" placeholder="${isLegacyPasswordHash(editTarget.password)?'Пароли кӯҳна — пароли нав гузоред':'Парол'}"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
@@ -4059,31 +3991,31 @@ function renderAdminMenu(){
 async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
+  const paidToClear=(state.orders||[]).filter(o=>o.status==='paid' && o.archived!==true && o.paidAt);
 
-  // Archive records are the daily reports. When the user explicitly chooses
-  // to clear report history, delete both the current report records and the
-  // archived daily summaries.
-  state.orders=(state.orders||[]).map(o=>o.status==='paid'
+  // First publish the reset marker so every device knows the report cutoff.
+  // The marker is shared through Firebase settings and is also kept in the local state.
+  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
+  const settingsOk=await saveSettings(state.settings);
+  if(settingsOk===false) return;
+
+  // Archive only the paid orders that existed at the moment of the clear.
+  const ids=new Set(paidToClear.map(o=>o.id));
+  state.orders=(state.orders||[]).map(o=>ids.has(o.id)
     ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
     : o);
-
   const ok=await saveOrders(state.orders);
   if(!ok) return;
 
   state.dailyClosures=[];
   await saveDailyClosures([]);
-
-  // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
-  // It is rendered from state.dailyClosures, so the next render must show no rows.
   state.dailyReportRows=[];
-  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
-  await saveSettings(state.settings);
-
   state.confirmClearReport=false;
   render();
   await logActivity('Ҳисобот ва архиви ҳисоботҳои ҳаррӯза пурра нест карда шуд');
-  showToast('Ҳисобот ва архиви ҳаррӯза нест карда шуд');
+  showToast('Ҳисобот пурра пок шуд');
 }
+
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const active = state.orders.filter(o=>o.status==='active');
