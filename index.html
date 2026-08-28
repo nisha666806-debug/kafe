@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-29-V46-FIX1';
+const APP_VERSION = '2026-08-29-V46-FIX3';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -3170,8 +3170,8 @@ function renderTicketOverlay(){
       ? `<p style="padding:0 20px;margin:-6px 0 8px;font-size:12px;color:${alreadySent?'var(--olive)':'#9c8f78'};">${alreadySent?'✅ Ба ошпаз фиристода шудааст':'⏳ Ҳанӯз ба ошпаз фиристода нашудааст'}</p>`
       : '';
     actions = `${statusLine}<div class="ticket-actions" style="gap:8px;">
-      <button type="button" class="btn-ghost" style="flex:1;" id="saveTicketBtn" ${disabled} onclick="saveTicket(false)">Захира</button>
-      <button type="button" class="btn-pay" style="flex:1;" id="sendKitchenBtn" ${disabled} onclick="saveTicket(true)">🍚 Ба ошпаз фиристодан</button>
+      <button type="button" class="btn-ghost" style="flex:1;" id="saveTicketBtn" ${disabled}>Захира</button>
+      <button type="button" class="btn-pay" style="flex:1;" id="sendKitchenBtn" ${disabled}>🍚 Ба ошпаз фиристодан</button>
     </div>${cancelBlock}`;
   } else if(mode==='pay'){
     actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
@@ -3261,9 +3261,17 @@ function attachTicketEvents(){
       el.addEventListener('click', ()=> removeDraftItem(el.dataset.removeitem));
     });
     const saveBtn = document.getElementById('saveTicketBtn');
-    if(saveBtn) saveBtn.addEventListener('click', e=>{ e.preventDefault(); e.stopPropagation(); });
+    if(saveBtn) saveBtn.addEventListener('click', async e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      await saveTicket(false);
+    });
     const sendKitchenBtn = document.getElementById('sendKitchenBtn');
-    if(sendKitchenBtn) sendKitchenBtn.addEventListener('click', e=>{ e.preventDefault(); e.stopPropagation(); });
+    if(sendKitchenBtn) sendKitchenBtn.addEventListener('click', async e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      await saveTicket(true);
+    });
   } else if(mode==='pay'){
     attachSplitPaymentEvents('paytk', draftTotalWithService(), (cash, noncash)=> payTicket(cash, noncash));
   }
