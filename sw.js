@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX2';
+const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX3';
 
 const APP_SHELL = [
   './',
@@ -20,25 +20,21 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => {
-        return Promise.all(
-          keys
-            .filter(key => key !== CACHE_NAME)
-            .map(key => caches.delete(key))
-        );
-      })
+      .then(keys => Promise.all(
+        keys
+          .filter(key => key !== CACHE_NAME)
+          .map(key => caches.delete(key))
+      ))
       .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') {
-    return;
-  }
+  if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
 
-  // Firebase / Firestore data is NEVER cached.
+  // Firebase / Firestore data is never cached.
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -61,8 +57,6 @@ self.addEventListener('fetch', event => {
 
         return response;
       })
-      .catch(() => {
-        return caches.match(event.request);
-      })
+      .catch(() => caches.match(event.request))
   );
 });
