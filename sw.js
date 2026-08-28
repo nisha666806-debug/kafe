@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX3';
+сonst CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX3';
 
 const APP_SHELL = [
   './',
