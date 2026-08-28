@@ -1,5 +1,4 @@
-сonst CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX3';
-
+const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX3';
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,7 +7,6 @@ const APP_SHELL = [
   './icon-192.png',
   './icon-512.png'
 ];
-
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
@@ -16,7 +14,6 @@ self.addEventListener('install', event => {
       .then(() => self.skipWaiting())
   );
 });
-
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
@@ -28,12 +25,9 @@ self.addEventListener('activate', event => {
       .then(() => self.clients.claim())
   );
 });
-
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
-
   const url = new URL(event.request.url);
-
   // Firebase / Firestore data is never cached.
   if (
     url.hostname.includes('googleapis.com') ||
@@ -43,18 +37,15 @@ self.addEventListener('fetch', event => {
   ) {
     return;
   }
-
   event.respondWith(
     fetch(event.request)
       .then(response => {
         if (response && response.ok) {
           const copy = response.clone();
-
           caches.open(CACHE_NAME)
             .then(cache => cache.put(event.request, copy))
             .catch(() => {});
         }
-
         return response;
       })
       .catch(() => caches.match(event.request))
