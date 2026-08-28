@@ -7,7 +7,6 @@
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0A0806">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Оши Форам">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -72,7 +71,7 @@
     background:linear-gradient(135deg,#171310,#3A2E1F 60%,var(--gold));
     box-shadow:inset 0 0 0 1px rgba(201,162,39,.5);
   }
-  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:visible;text-overflow:clip;max-width:150px;}
+  .brand .name{font-family:'Inter',sans-serif;font-weight:800;font-size:16px;letter-spacing:-.2px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
   .brand .tag{font-size:10px;letter-spacing:1.3px;text-transform:uppercase;color:var(--text-dim);font-weight:700;display:none;}
   @media(min-width:480px){.brand .name{max-width:none;} .brand .tag{display:inline;}}
   .top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
@@ -300,10 +299,6 @@
   .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-weight:600;}
   .xls-table tr:nth-child(even) td{background:var(--paper-dim);}
   .xls-table td.total-cell{font-weight:700;color:var(--blue);}
-
-  .arrival-badge{display:block;width:max-content;max-width:100%;margin:0 0 7px;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .arrival-badge.with-order{background:#eef5ff;color:#1f5fbf;border:1px solid #cfe0ff;}
-  .arrival-badge.without-order{background:#f4f1eb;color:#6b5f4d;border:1px solid #ded7ca;}
 </style>
 </head>
 <body>
@@ -338,7 +333,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-28-36-LOW-USAGE';
+const APP_VERSION = '2026-08-22-7';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -350,9 +345,7 @@ function docRef(key){
    tab in the background, etc.) so people aren't forced to retype their password constantly. */
 const SESSION_KEY = 'cafeSession_' + (CAFE_ID || 'default');
 function saveSession(user){
-  /* Дар localStorage ТАНҲО username ва role нигоҳ дошта мешавад —
-     парол (ҳатто хаш) ба localStorage нависта намешавад. */
-  try{ localStorage.setItem(SESSION_KEY, JSON.stringify({username: user.username, role: user.role})); }catch(e){}
+  try{ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }catch(e){}
 }
 function loadSession(){
   try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
@@ -420,90 +413,57 @@ async function saveMenu(menu){
 // but it protects the far more common case: an entirely different order disappearing.
 async function saveOrders(orders){
   if(!db){ showToast('Хатогӣ дар нигоҳдорӣ'); return false; }
-  // ACCOUNTING SAFETY:
-  // - Never physically delete an order from this accounting collection.
-  // - If two devices edited different fields of the same order, merge those fields.
-  // - A terminal remote state (paid/cancelled) cannot be silently downgraded by a stale waiter.
   try{
     const localOrders = Array.isArray(orders) ? orders : [];
+    let hadConflict = false;
     await db.runTransaction(async(tx)=>{
       const ref = docRef('orders');
       const snap = await tx.get(ref);
       let remote = [];
-      if(snap.exists){
-        try{ remote = JSON.parse(snap.data().value)||[]; }catch(e){ remote=[]; }
-      }
-
+      if(snap.exists){ try{ remote = JSON.parse(snap.data().value)||[]; }catch(e){ remote=[]; } }
       const localMap = new Map(localOrders.map(o=>[o.id,o]));
       const remoteMap = new Map(remote.map(o=>[o.id,o]));
       const knownMap = state.__lastKnownOrderSnapshots || new Map();
       const allIds = new Set([...remoteMap.keys(), ...localMap.keys()]);
-      const merged = [];
+      const merged=[];
+      const criticalFields = new Set(['status','items','total','subtotal','serviceCharge','cashAmount','noncashAmount','paymentMethod','paidAt','paidBy','table','type']);
 
       allIds.forEach(id=>{
-        const l = localMap.get(id);
-        const r = remoteMap.get(id);
-        const known = knownMap.get(id);
-
+        const l=localMap.get(id), r=remoteMap.get(id), known=knownMap.get(id);
         if(!r){ merged.push(l); return; }
         if(!l){ merged.push(r); return; }
 
-        // If the remote order became paid/cancelled after this device last saw it,
-        // never let a stale local active copy resurrect/downgrade it.
-        const terminal = s => s==='paid' || s==='cancelled';
-        if(terminal(r.status) && l.status!==r.status){
-          // A terminal Firestore state is authoritative. Never resurrect a paid/cancelled
-          // order from a stale local copy after a payment has committed.
-          merged.push(r);
+        const terminal = st => st==='paid' || st==='cancelled';
+        if(terminal(r.status) && l.status!==r.status){ merged.push(r); return; }
+
+        if(!known){
+          merged.push((Number(l.updatedAt||l.createdAt||0)>=Number(r.updatedAt||r.createdAt||0))?l:r);
           return;
         }
-        if(r.status==='paid' && l.status==='paid'){
-          // Preserve the newest payment metadata AND never lose an archive flag.
-          // A paid order can be archived by one device while another still holds
-          // the older paid copy. The archive state must win in that merge.
-          const newest = (Number(r.lockedAt||r.paidAt||0) >= Number(l.lockedAt||l.paidAt||0)) ? r : l;
-          const older = newest===r ? l : r;
-          const mergedPaid = {...newest};
-          if(r.archived===true || l.archived===true){
-            mergedPaid.archived = true;
-            mergedPaid.archivedAt = Math.max(Number(r.archivedAt||0), Number(l.archivedAt||0), Date.now());
-            mergedPaid.archivedBy = (newest.archivedBy || older.archivedBy || actingUsername() || '?');
+
+        const result={...r};
+        const keys=new Set([...Object.keys(known),...Object.keys(l),...Object.keys(r)]);
+        keys.forEach(k=>{
+          if(k==='updatedAt') return;
+          const localChanged=JSON.stringify(l[k])!==JSON.stringify(known[k]);
+          const remoteChanged=JSON.stringify(r[k])!==JSON.stringify(known[k]);
+          if(localChanged && remoteChanged && JSON.stringify(l[k])!==JSON.stringify(r[k])){
+            if(criticalFields.has(k)) hadConflict=true;
+            // For accounting-critical conflicts, remote is authoritative so a stale device
+            // cannot silently overwrite a newer payment/order edit.
+            return;
           }
-          merged.push(mergedPaid);
-          return;
-        }
-
-        // For an order this device already knew, apply only fields changed locally
-        // since the last known snapshot onto the current remote record.
-        if(known){
-          const result = {...r};
-          const keys = new Set([...Object.keys(known), ...Object.keys(l)]);
-          keys.forEach(k=>{
-            if(k==='updatedAt') return;
-            if(JSON.stringify(l[k]) !== JSON.stringify(known[k])) result[k] = l[k];
-          });
-          result.updatedAt = Math.max(
-            Number(r.updatedAt||r.createdAt||0),
-            Number(l.updatedAt||l.createdAt||0),
-            Date.now()
-          );
-          merged.push(result);
-        }else{
-          // Unknown to this device: newest complete record wins.
-          const lt = Number(l.updatedAt||l.createdAt||0);
-          const rt = Number(r.updatedAt||r.createdAt||0);
-          merged.push(lt>=rt ? l : r);
-        }
+          if(localChanged) result[k]=l[k];
+        });
+        result.updatedAt=Math.max(Number(r.updatedAt||r.createdAt||0),Number(l.updatedAt||l.createdAt||0),Date.now());
+        merged.push(result);
       });
-
       merged.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
       tx.set(ref,{value:JSON.stringify(merged),updatedAt:Date.now()});
-
-      state.__lastKnownOrderIds = new Set(merged.map(o=>o.id));
-      state.__lastKnownOrderSnapshots = new Map(
-        merged.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
-      );
+      state.__lastKnownOrderIds=new Set(merged.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(merged.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
     });
+    if(hadConflict) showToast('Фармоиш дар дастгоҳи дигар ҳамзамон тағйир ёфт — тағйири кӯҳна ҳифз нашуд');
     return true;
   }catch(e){
     console.error('saveOrders transaction failed:',e);
@@ -512,18 +472,8 @@ async function saveOrders(orders){
   }
 }
 async function saveSettings(settings){
-  try{
-    const ok = await fsSet('settings', JSON.stringify(settings));
-    if(!ok){
-      showToast('Хатогӣ дар нигоҳдорӣ');
-      return false;
-    }
-    return true;
-  }catch(e){
-    console.error('saveSettings failed',e);
-    showToast('Хатогӣ дар нигоҳдорӣ');
-    return false;
-  }
+  const ok = await fsSet('settings', JSON.stringify(settings));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
 }
 async function saveReservations(reservations){
   const ok = await fsSet('reservations', JSON.stringify(reservations));
@@ -583,8 +533,7 @@ async function saveInventory(inventory){
   if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
 }
 async function saveActivityLog(log){
-  const ok = await fsSet('activityLog', JSON.stringify(log));
-  if(!ok) console.warn('saveActivityLog failed');
+  await fsSet('activityLog', JSON.stringify(log));
 }
 async function logActivity(actionText){
   state.activityLog = state.activityLog || [];
@@ -593,12 +542,10 @@ async function logActivity(actionText){
   await saveActivityLog(state.activityLog);
 }
 async function saveBonuses(bonuses){
-  const ok = await fsSet('bonuses', JSON.stringify(bonuses));
-  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ (бонус)');
+  await fsSet('bonuses', JSON.stringify(bonuses));
 }
 async function saveDailyClosures(closures){
-  const ok = await fsSet('dailyClosures', JSON.stringify(closures));
-  if(!ok) showToast('Хатогӣ: ҳисоботи рӯзона сабт нашуд');
+  await fsSet('dailyClosures', JSON.stringify(closures));
 }
 async function giveBonus(username, amount, reason){
   const amt = Math.max(0, Number(amount)||0);
@@ -615,14 +562,12 @@ async function deleteBonus(id){
   showToast('Бонус нест шуд');
 }
 function downloadBackup(){
-  // Паролҳо (ҳатто хаш) ба файли backup дохил намешаванд
-  const safeAccounts = (state.accounts||[]).map(a=>({id:a.id, username:a.username, role:a.role, wageType:a.wageType, wageAmount:a.wageAmount}));
   const data = {
     exportedAt: new Date().toISOString(),
     cafeName: state.settings.cafeName,
     menu: state.menu, orders: state.orders, settings: state.settings,
     reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
-    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
+    accounts: state.accounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -653,7 +598,7 @@ const DEFAULT_MENU = [
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
   checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
-  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}'};
+  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0};
 
 /* ============ STATE ============ */
 let state = {
@@ -682,7 +627,6 @@ let state = {
   confirmDeleteBonusId:null,
   seenPendingIds:null,
   seenCashierOrderIds:null,
-  customerPhone:'',
   showAddInvForm:false,
   recipeDraft:{},
   menuFormDraft:{name:'', price:'', cat:'', unit:'dona'},
@@ -729,34 +673,7 @@ let state = {
   formOpenAt:null,          // safety timeout for stuck forms
 };
 
-function escapeHtml(str){
-  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
-}
-
-/* ============ PASSWORD HASHING (Web Crypto SHA-256) ============
-   Паролҳо ҳеҷ гоҳ дар матни оддӣ нигоҳ дошта намешаванд.
-   hashPassword() — пароли ворид шударо ба SHA-256 табдил медиҳад.
-   Дар Firestore танҳо хаш нигоҳ дошта мешавад.                  */
-async function hashPassword(plain){
-  const enc = new TextEncoder();
-  const buf = await crypto.subtle.digest('SHA-256', enc.encode(plain));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
-   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
-   мекунем ва фавран захира мекунем. */
-async function migrateAccountPasswordsIfNeeded(){
-  // Passwords are never changed automatically when a new version is deployed.
-  // Existing Firebase account credentials remain exactly as stored.
-  return false;
-}
-
-function uid(prefix){
-  const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
-    ? crypto.randomUUID().replace(/-/g,'')
-    : (Date.now().toString(36) + Math.random().toString(36).slice(2,10));
-  return prefix + '_' + rand;
-}
+function uid(prefix){ return prefix + '_' + Date.now() + '_' + Math.floor(Math.random()*1000); }
 
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -776,8 +693,6 @@ function isToday(ts){
   const d = new Date(ts), n = new Date();
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth() && d.getDate()===n.getDate();
 }
-function reportPeriodStart(){ const t=Number(state.settings&&state.settings.reportClearedAt)||0; return t>0?t:0; }
-function inCurrentReportPeriod(ts){ const t=Number(ts)||0, start=reportPeriodStart(); return t>0 && (!start || t>start); }
 function todayKey(){
   const d = new Date();
   return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
@@ -866,23 +781,19 @@ async function init(){
   if(accounts && accounts.length){
     state.accounts = accounts;
   } else {
-    // Never create or overwrite credentials automatically.
-    state.accounts = [];
-    state.setupError = 'Аккаунтҳо дар Firebase ёфт нашуданд.';
+    // accounts read succeeded (anyFailed already excluded that) and is genuinely empty
+    state.accounts = [{id:'acc_admin', username:'admin', password:'admin123', role:'admin'}];
+    await saveAccounts(state.accounts);
   }
-
-  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
-  await migrateAccountPasswordsIfNeeded();
 
   const session = loadSession();
   if(session){
-    // Session бо username санҷида мешавад — парол дар localStorage нест
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase());
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===(session.username||'').toLowerCase() && a.password===session.password);
     if(acc){
       state.currentUser = {username:acc.username, role:acc.role};
       state.role = acc.role;
     } else {
-      clearSession(); // account was deleted — fall back to login
+      clearSession(); // account was deleted or password changed elsewhere — fall back to login
     }
   }
 
@@ -903,8 +814,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveReservations(state.reservations);
   state.oshStock = {date:'', kg:0};
   await saveOshStock(state.oshStock);
-  const hashedPass = await hashPassword(adminPass);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:hashedPass, role:'admin'};
+  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -913,7 +823,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   state.setupError = null;
   state.currentUser = {username:adminAcc.username, role:'admin'};
   state.role = 'admin';
-  saveSession({username:adminAcc.username, role:'admin'});
+  saveSession({username:adminAcc.username, password:adminAcc.password});
   state.loaded = true;
   render();
   setupRealtimeSync();
@@ -939,111 +849,68 @@ function isActivelyEditingFormField(){
   return tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT';
 }
 function setupRealtimeSync(){
-  // Guard against duplicate listeners when login/setup/reconnect code runs more than once.
-  if(__realtimeUnsubs.length) return;
-
-  // Only data that must be live across devices gets a listener.
-  // Menu/settings/accounts/reports are refreshed periodically or when opened.
-  const fields=[
-    ['orders','orders'],
-    ['tables','tables'],
-    ['reservations','reservations'],
-    ['inventory','inventory']
+  teardownRealtimeSync();
+  const fields = [
+    ['menu','menu'], ['orders','orders'], ['settings','settings'], ['reservations','reservations'],
+    ['tables','tables'], ['oshStock','oshStock'], ['accounts','accounts'], ['inventory','inventory'],
+    ['activityLog','activityLog'], ['bonuses','bonuses'], ['dailyClosures','dailyClosures']
   ];
-
-  fields.forEach(([key,stateKey])=>{
+  fields.forEach(([key, stateKey])=>{
     try{
-      const unsub=docRef(key).onSnapshot({includeMetadataChanges:false},snap=>{
-        if(!state.role || !snap.exists) return;
+      const unsub = docRef(key).onSnapshot((snap)=>{
+        if(!state.role) return; // don't disturb the login screen while typing
+        if(!snap.exists) return;
         try{
-          const parsed=JSON.parse(snap.data().value||'null');
-          if(parsed==null) return;
-          state[stateKey]=parsed;
+          const parsed = JSON.parse(snap.data().value);
+          // Always keep the in-memory data fresh so it's instantly correct the moment any
+          // open form closes. Only the actual screen REDRAW is held back while someone's
+          // cursor is inside a field right now — never delays what other devices see.
+          state[stateKey] = parsed;
           if(stateKey==='orders'){
-            state.__lastKnownOrderIds=new Set(Array.isArray(parsed)?parsed.map(o=>o.id):[]);
-            state.__lastKnownOrderSnapshots=new Map(
-              (Array.isArray(parsed)?parsed:[]).map(o=>[o.id,JSON.parse(JSON.stringify(o))])
-            );
-            state.__lastOrdersServerAt=Date.now();
-            state.__lastOrdersServerStamp=Number(snap.data().updatedAt||Date.now());
+            state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+            state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
           }
           if(!isActivelyEditingFormField()) render();
-        }catch(e){ console.error('Realtime parse failed for',key,e); }
-      },err=>{
-        console.error('Realtime listener error for',key,err);
-        // Do not rebuild ALL listeners when one stream fails. Reconnect only this listener.
-        setTimeout(()=>{
-          if(!state.role || !state.loaded) return;
-          try{
-            const retry=docRef(key).onSnapshot({includeMetadataChanges:false},snap=>{
-              if(!state.role || !snap.exists) return;
-              try{
-                const parsed=JSON.parse(snap.data().value||'null');
-                if(parsed==null) return;
-                state[stateKey]=parsed;
-                if(stateKey==='orders'){
-                  state.__lastOrdersServerAt=Date.now();
-                  state.__lastOrdersServerStamp=Number(snap.data().updatedAt||Date.now());
-                }
-                if(!isActivelyEditingFormField()) render();
-              }catch(e){ console.error('Realtime retry parse failed for',key,e); }
-            },e=>console.error('Realtime retry failed for',key,e));
-            __realtimeUnsubs.push(retry);
-          }catch(e){ console.error('Failed to reconnect',key,e); }
-        },5000);
+        }catch(e){}
+      }, (err)=>{
+        console.error('Realtime listener error for', key, err);
+        // A flaky connection can make a listener die without the SDK cleanly reconnecting on
+        // its own. Rather than leave that one field silently stale until the person manually
+        // logs out and back in, re-subscribe everything shortly after any listener errors.
+        if(__resubscribeTimer) clearTimeout(__resubscribeTimer);
+        __resubscribeTimer = setTimeout(()=>{ if(state.role) setupRealtimeSync(); }, 4000);
       });
       __realtimeUnsubs.push(unsub);
-    }catch(e){ console.error('Failed to attach realtime listener for',key,e); }
+    }catch(e){ console.error('Failed to attach realtime listener for', key, e); }
   });
-
   startSyncWatchdog();
-  startFullSyncWatchdog();
 }
-
-// Low-usage fallback: the orders listener is normally enough.
-// Only query the server when no server-confirmed order snapshot has arrived recently.
+// Belt-and-suspenders safety net: on a weak/flaky (not fully offline) connection, a real-time
+// listener can quietly stop delivering updates without ever firing an error at all — nothing
+// to react to, it just goes stale. Every 25s, do one plain fetch-and-compare regardless of
+// listener health, so the screen is never wrong for longer than that even in the worst case.
 function startSyncWatchdog(){
   if(__watchdogInterval) clearInterval(__watchdogInterval);
-  __watchdogInterval=setInterval(()=>{
-    if(!state.role || !state.loaded || document.visibilityState!=='visible') return;
-    const age=Date.now()-Number(state.__lastOrdersServerAt||0);
-    if(age>60000) pollOrdersFast();
-  },15000);
+  __watchdogInterval = setInterval(()=>{
+    if(state.role && document.visibilityState==='visible') pollRefresh();
+  }, 25000);
 }
-
-let __ordersPollInFlight=false;
-async function pollOrdersFast(){
-  if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight=true;
-  try{
-    const snap=await docRef('orders').get({source:'server'});
-    if(!snap.exists) return;
-    const parsed=JSON.parse(snap.data().value||'[]');
-    const remoteStamp=Number(snap.data().updatedAt||0);
-    if(remoteStamp && remoteStamp===Number(state.__lastOrdersServerStamp||0)){
-      state.__lastOrdersServerAt=Date.now();
-      return;
-    }
-    state.orders=Array.isArray(parsed)?parsed:[];
-    state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
-    state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp=remoteStamp||Date.now();
-    state.__lastOrdersServerAt=Date.now();
-    if(!isActivelyEditingFormField()) render();
-  }catch(e){
-    console.warn('Orders fallback sync skipped; realtime listener remains active',e);
-  }finally{
-    __ordersPollInFlight=false;
-  }
-}
-
-// Full fallback is deliberately infrequent because it reads several documents.
-let __fullWatchdogInterval=null;
-function startFullSyncWatchdog(){
-  if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
-  __fullWatchdogInterval=setInterval(()=>{
-    if(state.role && state.loaded && document.visibilityState==='visible') pollRefresh();
-  },120000);
+async function pollRefresh(){
+  if(!state.role) return; // don't wipe the login form while the person is typing
+  if(isActivelyEditingFormField()) return; // same precise check the real-time path uses
+  const {menu, orders, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = await loadAll();
+  if(menu) state.menu = menu;
+  if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
+  if(settings) state.settings = settings;
+  if(reservations) state.reservations = reservations;
+  if(tables) state.tables = tables;
+  if(oshStock) state.oshStock = oshStock;
+  if(accounts) state.accounts = accounts;
+  if(inventory) state.inventory = inventory;
+  if(activityLog) state.activityLog = activityLog;
+  if(bonuses) state.bonuses = bonuses;
+  if(dailyClosures) state.dailyClosures = dailyClosures;
+  render();
 }
 
 /* ============ ORDER HELPERS ============ */
@@ -1061,28 +928,6 @@ function occupiedTableCount(){
   const tableIds = new Set(state.tables.map(t=>t.id));
   return state.orders.filter(o=>o.status==='active' && o.table!==null && o.table!==undefined && tableIds.has(o.table)).length;
 }
-
-function setCustomerPhone(value){
-  const clean=String(value||'').replace(/\D/g,'').slice(0,9);
-  state.customerPhone=clean;
-  const input=document.getElementById('arrivalPhone');
-  if(input && input.value!==clean) input.value=clean;
-}
-function validateCustomerArrival(){
-  if(activeOrderForTable(state.activeTable)) return true;
-  if(state.role!=='waiter') return true;
-  const ph = String(state.customerPhone||'').replace(/\D/g,'');
-  if(/^\d{9}$/.test(ph)) return true;
-  if(ph.length===0){
-    showToast('Рақами телефон бояд 9 рақам бошад.');
-  } else if(ph.length<9){
-    showToast('Рақами телефон бояд 9 рақам бошад. Ҳоло '+ph.length+' рақам ворид шудааст.');
-  } else {
-    showToast('Рақами телефон бояд маҳз 9 рақам бошад.');
-  }
-  return false;
-}
-
 function openTable(t){
   const existing = activeOrderForTable(t);
   const tbl = state.tables.find(x=>x.id===t);
@@ -1101,9 +946,6 @@ function openTable(t){
   state.ticketMode = state.role==='waiter' ? 'edit' : (state.role==='cashier' ? 'pay' : 'view');
   state.activeTable = t;
   state.draftItems = {};
-  if(!existing && state.role==='waiter'){
-    state.customerPhone = '';
-  }
   if(existing){
     existing.items.forEach(it=>{ state.draftItems[it.menuId] = it.qty; });
   } else if(state.role==='waiter' && state.reservations && state.reservations[t] && state.reservations[t].preOrder && state.reservations[t].preOrder.length){
@@ -1118,7 +960,6 @@ function openTable(t){
 function closeTicket(){
   state.activeTable = null;
   state.draftItems = {};
-  state.customerPhone = '';
   state.confirmCancelOrderId = null;
   render();
 }
@@ -1167,7 +1008,6 @@ function removeDraftItem(mid){
   render();
 }
 async function saveTicket(sendFlag){
-  if(!validateCustomerArrival()) return;
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? order.items : [];
   let droppedAny = false;
@@ -1184,29 +1024,20 @@ async function saveTicket(sendFlag){
   if(!order){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
-      createdBy: actingUsername(), sentToKitchen:false,
-      customerType: 'with_order',
-      customerPhone: state.customerPhone || null};
+      createdBy: actingUsername(), sentToKitchen:false};
     state.orders.push(order);
-  }
-  if(isNew && state.role==='waiter'){
-    order.customerType = 'with_order';
-    order.customerPhone = state.customerPhone || null;
   }
   order.items = items;
   order.total = total;
   order.subtotal = subtotal;
   order.serviceCharge = total - subtotal;
   order.updatedAt = Date.now();
+  let saved=false;
   if(sendFlag){
-    order.sentToKitchen = true;
-    const inventoryOk = await deductForOrderDelta(order, items);
-    if(inventoryOk===false){
-      showToast('Анбор нав нашуд — фармоиш фиристода нашуд');
-      return;
-    }
+    saved = await commitOrderWithInventory(order, items, {requireKitchen:true});
+  }else{
+    saved = await saveOrders(state.orders);
   }
-  const saved = await saveOrders(state.orders);
   if(!saved) return;
   if(isNew && state.reservations && state.reservations[state.activeTable]){
     delete state.reservations[state.activeTable];
@@ -1215,115 +1046,39 @@ async function saveTicket(sendFlag){
   showToast(sendFlag ? '🍚 Ба ошпаз фиристода шуд' : 'Фармоиш захира шуд');
   closeTicket();
 }
-
-/* ---------- PAYMENT SAFETY v11 ----------
-   Payment is committed atomically in Firestore. A paid/cancelled order can never
-   be downgraded by a stale client copy. The same helper is used by cash/non-cash/mixed.
-*/
-async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
-  if(!db) return {ok:false,message:'Хатогӣ дар нигоҳдорӣ'};
-  const cash = Math.max(0, Number(cashAmount)||0);
-  const noncash = Math.max(0, Number(noncashAmount)||0);
-  try{
-    return await db.runTransaction(async(tx)=>{
-      const ref = docRef('orders');
-      const snap = await tx.get(ref);
-      if(!snap.exists) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
-      let orders=[];
-      try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){}
-      const idx=orders.findIndex(o=>o.id===orderId);
-      if(idx<0) return {ok:false,message:'Фармоиш дар база ёфт нашуд'};
-      const remote=orders[idx];
-
-      // Idempotency: an already-terminal order is never paid twice and never reopened.
-      if(remote.status==='paid' || remote.status==='cancelled'){
-        return {ok:false,alreadyTerminal:true,status:remote.status,order:remote};
-      }
-
-      // The order.total already is the accounting amount shown on the saved cheque.
-      // Do NOT recompute it here: a service-charge setting can change later, and that must
-      // never make an otherwise valid payment fail.
-      const total=Number(remote.total||0);
-      if(Math.abs(cash+noncash-total)>0.01){
-        return {ok:false,message:'Маблағи пардохт ба маблағи чек баробар нест'};
-      }
-
-      const now=Date.now();
-      const paid={
-        ...remote,
-        status:'paid',
-        paidAt:now,
-        paidBy:actingUsername(),
-        cashAmount:cash,
-        noncashAmount:noncash,
-        paymentMethod:cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash'),
-        lockedAt:now,
-        updatedAt:now
-      };
-      orders[idx]=paid;
-
-      // Marking paid and writing the complete order array happen in ONE transaction.
-      tx.set(ref,{value:JSON.stringify(orders),updatedAt:now});
-      return {ok:true,order:paid};
-    });
-  }catch(e){
-    console.error('commitPaidOrderAtomic failed:',e);
-    return {ok:false,message:'Пардохт дар база сабт нашуд'};
-  }
-}
-
 async function payTicket(cashAmount, noncashAmount){
-  const order=activeOrderForTable(state.activeTable);
-  if(!order) return;
-  const cash=Math.max(0,Number(cashAmount)||0);
-  const noncash=Math.max(0,Number(noncashAmount)||0);
-  const expected=Number(order.total||0);
-  if(Math.abs(cash+noncash-expected)>0.01){
-    showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return;
-  }
-
-  const result=await commitPaidOrderAtomic(order.id,cash,noncash);
-  if(!result.ok){
-    if(result.alreadyTerminal && result.order){
-      state.orders=state.orders.map(o=>o.id===result.order.id?result.order:o);
-      if(result.status==='paid') showToast('Ин чек аллакай баста шудааст');
-      else showToast('Ин фармоиш аллакай бекор шудааст');
-    }else{
-      showToast(result.message||'Пардохт сабт нашуд');
-    }
-    render();
-    return;
-  }
-
-  // Update local state only AFTER the Firebase transaction has committed.
-  state.orders=state.orders.map(o=>o.id===order.id?result.order:o);
-  speakPaymentSuccess(result.order);
-  // Reset the chef/cashier "new order" detector before redraw so a terminal order
-  // can never generate a false "Фармоиши нав" announcement.
-  if(state.seenPendingIds instanceof Set) state.seenPendingIds.delete(order.id);
-  if(state.seenCashierOrderIds instanceof Set) state.seenCashierOrderIds.delete(order.id);
-  showToast('Чек пардохт шуд');
-  closeTicket();
-}
-
-function speakPaymentSuccess(order){
+  const tableId=state.activeTable;
+  if(!db || tableId==null) return;
+  const cash=Math.max(0,Number(cashAmount)||0), noncash=Math.max(0,Number(noncashAmount)||0);
+  let paid=false, conflict=false;
   try{
-    if(!('speechSynthesis' in window)) return;
-    if(state.settings && state.settings.paymentVoiceEnabled===false) return;
-    const tbl=state.tables.find(t=>t.id===order.table);
-    const tableName=tbl ? String(tbl.name||tbl.number||order.table||'').trim() : String(order.table||'').trim();
-    const customer=String(order.customerName||order.clientName||order.customer||'').trim();
-    const template=String((state.settings && state.settings.paymentVoiceText)||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}');
-    const namePart=customer ? ` Номи клиент: ${customer}.` : '';
-    const spoken=template.replace(/\{TABLE\}/gi,tableName||'—').replace(/\{NAME\}/gi,namePart);
-    if(!spoken.trim()) return;
-    window.speechSynthesis.cancel();
-    const utter=new SpeechSynthesisUtterance(spoken);
-    utter.lang='ru-RU'; utter.rate=0.9; utter.pitch=1;
-    window.speechSynthesis.speak(utter);
-  }catch(e){}
+    await db.runTransaction(async(tx)=>{
+      const ref=docRef('orders');
+      const snap=await tx.get(ref);
+      let orders=[];
+      if(snap.exists){ try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){ orders=[]; } }
+      const order=orders.find(o=>o.table===tableId && o.status==='active');
+      if(!order) throw new Error('ORDER_NOT_ACTIVE');
+      const expectedTotal=Number(order.total)||0;
+      if(Math.abs(cash+noncash-expectedTotal)>0.01) throw new Error('PAYMENT_MISMATCH');
+      order.status='paid'; order.paidAt=Date.now(); order.paidBy=actingUsername();
+      order.cashAmount=cash; order.noncashAmount=noncash;
+      order.paymentMethod=cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash');
+      order.updatedAt=Date.now();
+      tx.set(ref,{value:JSON.stringify(orders),updatedAt:Date.now()});
+      state.orders=orders;
+      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+      paid=true;
+    });
+    if(paid){ showToast('Чек пардохт шуд'); closeTicket(); }
+  }catch(e){
+    const msg=String(e&&e.message);
+    if(msg==='ORDER_NOT_ACTIVE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
+    else if(msg==='PAYMENT_MISMATCH') showToast('Маблағи пардохт ба маблағи чек баробар нест');
+    else { console.error('payTicket failed',e); showToast('Пардохт нигоҳ дошта нашуд'); }
+  }
 }
-
 function actingUsername(){
   return state.previewUsername || (state.currentUser ? state.currentUser.username : null);
 }
@@ -1370,7 +1125,7 @@ function attachSplitPaymentEvents(idPrefix, total, onConfirm){
     const n = clamp(noncashInput.value);
     cashInput.value = fmt(total - n);
   });
-  document.querySelectorAll('[data-splitquick^="' + idPrefix + '|"]').forEach(el=>{
+  document.querySelectorAll(`[data-splitquick^="${idPrefix}|"]`).forEach(el=>{
     el.addEventListener('click', ()=>{
       const mode = el.dataset.splitquick.split('|')[1];
       if(mode==='allcash'){ cashInput.value = fmt(total); noncashInput.value = '0'; }
@@ -1570,28 +1325,51 @@ async function cancelOrphanOrder(id){
 // already deducted for it (recipe-based, from sending to kitchen) is restored, since the food
 // was never actually used.
 async function cancelOrder(id){
-  const order=state.orders.find(o=>o.id===id);
-  if(!order) return;
-  if(order.status==='paid'){showToast('Фармоиши пардохтшударо бекор кардан лозим нест');return;}
-  if(order.status==='cancelled'){showToast('Ин фармоиш аллакай бекор шудааст');return;}
-  if(order.inventoryDeductedFor && Object.keys(order.inventoryDeductedFor).length){
-    const restoreItems=Object.keys(order.inventoryDeductedFor).map(menuId=>({
-      menuId,qty:order.inventoryDeductedFor[menuId],
-      unit:(order.items.find(it=>it.menuId===menuId)||{}).unit
-    }));
-    const deduction=computeInventoryDeduction(restoreItems), restoreDeltas={};
-    Object.keys(deduction).forEach(invId=>restoreDeltas[invId]=deduction[invId]);
-    await applyInventoryDeltas(restoreDeltas);
+  if(!db) return;
+  try{
+    let label='';
+    await db.runTransaction(async(tx)=>{
+      const ordersRef=docRef('orders'), invRef=docRef('inventory');
+      const ordersSnap=await tx.get(ordersRef), invSnap=await tx.get(invRef);
+      let orders=[]; let inventory=[];
+      if(ordersSnap.exists){ try{ orders=JSON.parse(ordersSnap.data().value)||[]; }catch(e){ orders=[]; } }
+      if(invSnap.exists){ try{ inventory=JSON.parse(invSnap.data().value)||[]; }catch(e){ inventory=[]; } }
+      const order=orders.find(o=>o.id===id);
+      if(!order) throw new Error('ORDER_NOT_FOUND');
+      if(order.status==='paid') throw new Error('ORDER_PAID');
+      if(order.status==='cancelled') throw new Error('ORDER_CANCELLED');
+      label=orderLabel(order);
+      const deducted=order.inventoryDeductedFor||{};
+      for(const menuId of Object.keys(deducted)){
+        const qty=Math.max(0,Number(deducted[menuId])||0);
+        if(!qty) continue;
+        const itemData=(order.items||[]).find(it=>it.menuId===menuId);
+        const calc=computeInventoryDeduction([{menuId,qty,unit:itemData&&itemData.unit}]);
+        for(const invId of Object.keys(calc)){
+          const item=inventory.find(i=>i.id===invId);
+          if(!item) throw new Error('INVENTORY_ITEM_MISSING');
+          item.qty=Math.max(0,(Number(item.qty)||0)+calc[invId]);
+          item.updatedAt=Date.now();
+        }
+      }
+      order.status='cancelled'; order.cancelledAt=Date.now(); order.cancelledBy=actingUsername()||'?';
+      order.updatedAt=Date.now(); order.cancelReason=order.cancelReason||'Бекор карда шуд'; order.inventoryDeductedFor={};
+      tx.set(ordersRef,{value:JSON.stringify(orders),updatedAt:Date.now()});
+      tx.set(invRef,{value:JSON.stringify(inventory),updatedAt:Date.now()});
+      state.orders=orders; state.inventory=inventory;
+      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+    });
+    await logActivity('Фармоишро бекор кард: '+label);
+    showToast('Фармоиш бекор карда шуд');
+  }catch(e){
+    const msg=String(e&&e.message);
+    if(msg==='ORDER_PAID') showToast('Фармоиши пардохтшударо бекор кардан мумкин нест');
+    else if(msg==='ORDER_CANCELLED') showToast('Ин фармоиш аллакай бекор шудааст');
+    else if(msg==='ORDER_NOT_FOUND') showToast('Фармоиш ёфт нашуд');
+    else if(msg==='INVENTORY_ITEM_MISSING') showToast('Заказ бекор нашуд: маҳсулоти анбор ёфт нашуд');
+    else { console.error('cancelOrder failed',e); showToast('Фармоиш бекор карда нашуд'); }
   }
-  const label=orderLabel(order);
-  // Never physically delete an accounting record.
-  order.status='cancelled'; order.cancelledAt=Date.now();
-  order.cancelledBy=actingUsername()||'?'; order.updatedAt=Date.now();
-  order.cancelReason=order.cancelReason||'Бекор карда шуд';
-  order.inventoryDeductedFor={};
-  const ok=await saveOrders(state.orders); if(!ok) return;
-  await logActivity('Фармоишро бекор кард: '+label);
-  showToast('Фармоиш бекор карда шуд');
 }
 /* ---------- Inventory (анбор) ---------- */
 async function addInventoryItem(name, unit, qty, unitCost, minThreshold){
@@ -1691,15 +1469,86 @@ async function deductForOrderDelta(order, currentItems){
   order.inventoryDeductedFor = currentMap;
   return true;
 }
+async function commitOrderWithInventory(order, desiredItems, options={}){
+  if(!db) return false;
+  const requireKitchen=!!options.requireKitchen;
+  const currentItems=Array.isArray(desiredItems)?desiredItems:[];
+  const currentMap={};
+  currentItems.forEach(it=>{ currentMap[it.menuId]=Math.max(0,Number(it.qty)||0); });
+  try{
+    let committed=null;
+    await db.runTransaction(async(tx)=>{
+      const ordersRef=docRef('orders');
+      const invRef=docRef('inventory');
+      const ordersSnap=await tx.get(ordersRef);
+      const invSnap=await tx.get(invRef);
+      let orders=[]; let inventory=[];
+      if(ordersSnap.exists){ try{ orders=JSON.parse(ordersSnap.data().value)||[]; }catch(e){ orders=[]; } }
+      if(invSnap.exists){ try{ inventory=JSON.parse(invSnap.data().value)||[]; }catch(e){ inventory=[]; } }
+      const remote=orders.find(o=>o.id===order.id);
+      const known=state.__lastKnownOrderSnapshots && state.__lastKnownOrderSnapshots.get(order.id);
+      if(remote){
+        if(remote.status==='paid' || remote.status==='cancelled') throw new Error('ORDER_NOT_EDITABLE');
+        // Conservative conflict rule: if this order changed remotely since this device last saw it,
+        // refuse the inventory/order write rather than risk double deduction or lost items.
+        if(known && Number(remote.updatedAt||0)!==Number(known.updatedAt||0)) throw new Error('ORDER_CONFLICT');
+      }
+      const prevMap=(remote && remote.inventoryDeductedFor) || {};
+      const allMenuIds=new Set([...Object.keys(prevMap),...Object.keys(currentMap)]);
+      const delta={};
+      allMenuIds.forEach(menuId=>{
+        const prevQty=Math.max(0,Number(prevMap[menuId])||0);
+        const nextQty=Math.max(0,Number(currentMap[menuId])||0);
+        const d=nextQty-prevQty;
+        if(d!==0){
+          const itemsForDelta=[{menuId,qty:Math.abs(d),unit:(currentItems.find(i=>i.menuId===menuId)||{}).unit}];
+          const calc=computeInventoryDeduction(itemsForDelta);
+          Object.keys(calc).forEach(invId=>{ delta[invId]=(delta[invId]||0)+(d>0?-calc[invId]:calc[invId]); });
+        }
+      });
+      for(const invId of Object.keys(delta)){
+        const item=inventory.find(i=>i.id===invId);
+        if(!item) throw new Error('INVENTORY_ITEM_MISSING');
+        const nextQty=(Number(item.qty)||0)+delta[invId];
+        if(nextQty < -0.000001) throw new Error('INSUFFICIENT_STOCK');
+        item.qty=Math.max(0,nextQty); item.updatedAt=Date.now();
+      }
+      const nextOrder={...(remote||{}),...JSON.parse(JSON.stringify(order)),items:currentItems,inventoryDeductedFor:currentMap};
+      if(requireKitchen) nextOrder.sentToKitchen=true;
+      nextOrder.updatedAt=Date.now();
+      if(remote){
+        const idx=orders.findIndex(o=>o.id===order.id); orders[idx]=nextOrder;
+      }else orders.push(nextOrder);
+      tx.set(ordersRef,{value:JSON.stringify(orders),updatedAt:Date.now()});
+      if(Object.keys(delta).length) tx.set(invRef,{value:JSON.stringify(inventory),updatedAt:Date.now()});
+      committed=nextOrder;
+    });
+    if(committed){
+      const idx=state.orders.findIndex(o=>o.id===committed.id);
+      if(idx>=0) state.orders[idx]=committed; else state.orders.push(committed);
+      state.inventory=state.inventory || [];
+      state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+      return true;
+    }
+  }catch(e){
+    const msg=String(e&&e.message);
+    if(msg==='ORDER_CONFLICT') showToast('Ин заказро дастгоҳи дигар тағйир додааст — аввал навсозӣ кунед');
+    else if(msg==='ORDER_NOT_EDITABLE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
+    else if(msg==='INVENTORY_ITEM_MISSING') showToast('Маҳсулоти дорухат дар анбор ёфт нашуд');
+    else if(msg==='INSUFFICIENT_STOCK') showToast('Миқдори анбор барои ин заказ кофӣ нест');
+    else { console.error('commitOrderWithInventory failed',e); showToast('Заказ ва анбор якҷоя нигоҳ дошта нашуданд'); }
+  }
+  return false;
+}
+
 async function addAccount(username, password, role){
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
-  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
-  const id = uid('acc');
-  const hashedPass = await hashPassword(password);
-  state.accounts.push({id, username, password: hashedPass, role, wageType:'daily', wageAmount:0});
+  const id = 'acc_'+Date.now()+'_'+Math.floor(Math.random()*1000);
+  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1709,15 +1558,13 @@ async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
   if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
-  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  const hashedPass = await hashPassword(password);
-  acc.username=username; acc.password=hashedPass; acc.role=role;
+  acc.username=username; acc.password=password; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -1746,14 +1593,21 @@ function isThisMonth(ts){
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth();
 }
 function orderCommission(order){
-  let oshGrams=0, oshValue=0, otherValue=0;
-  (order.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
-  const oshCommission=oshGrams>=500?12:(oshGrams>0?oshValue*0.05:0);
-  return oshCommission+otherValue*0.05;
+  let oshGrams = 0, oshValue = 0;
+  order.items.forEach(it=>{
+    if(getItemCategory(it)==='Ош' && it.unit==='kg'){
+      oshGrams += it.qty;
+      oshValue += lineTotal({unit:'kg', price:it.price}, it.qty);
+    }
+  });
+  const oshCommission = oshGrams >= 500 ? 12 : oshValue*0.05;
+  const otherValue = Math.max(0, (order.total||0) - oshValue);
+  const otherCommission = otherValue*0.05;
+  return oshCommission + otherCommission;
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
-    if(o.status!=='paid' || o.archived===true) return false;
+    if(o.status!=='paid' || o.archived) return false;
     const ts = o.paidAt || o.updatedAt || o.createdAt;
     if(scope==='today' && !isToday(ts)) return false;
     if(scope==='month' && !isThisMonth(ts)) return false;
@@ -1761,12 +1615,17 @@ function staffCommissionBreakdown(username, role, scope){
   });
   let countHigh=0, countLow=0, countNoOsh=0, oshSum=0, otherSum=0;
   orders.forEach(o=>{
-    let oshGrams=0, oshValue=0, otherValue=0;
-    (o.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
-    if(oshGrams>=500){ countHigh++; oshSum+=12; } else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; } else { countNoOsh++; }
+    let oshGrams=0, oshValue=0;
+    o.items.forEach(it=>{
+      if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=it.qty; oshValue+=lineTotal({unit:'kg',price:it.price}, it.qty); }
+    });
+    if(oshGrams>=500){ countHigh++; oshSum+=12; }
+    else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; }
+    else { countNoOsh++; }
+    const otherValue = Math.max(0, (o.total||0)-oshValue);
     otherSum += otherValue*0.05;
   });
-  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total:oshSum+otherSum};
+  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total: oshSum+otherSum};
 }
 function staffCommission(username, role, scope){
   return staffCommissionBreakdown(username, role, scope).total;
@@ -1791,44 +1650,24 @@ function autoBonusToday(username, role){
   return {checkCountBonus, revenueBonus, total: checkCountBonus+revenueBonus, orderCount: breakdown.orderCount, commissionTotal: breakdown.total};
 }
 function computeWages(acc){
-  // reportClearedToday is ONLY true when admin manually pressed "Пок кардани ҳисобот"
-  // (which sets salaryResetAt). Daily closure (closeDailyReport) sets reportClosedAt
-  // but must NOT zero out wages — staff earned their commission on those closed orders.
-  const salaryResetAt = Number(state.settings && state.settings.salaryResetAt) || 0;
-  const salaryResetThisMonth = salaryResetAt && isThisMonth(salaryResetAt);
-  const salaryResetForToday = salaryResetAt && isToday(salaryResetAt);
-
   if(acc.wageType==='commission'){
-    const auto = salaryResetForToday ? {total:0} : autoBonusToday(acc.username, acc.role);
-    const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
-    const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
-    const dailyCommission = salaryResetForToday ? 0 : staffCommission(acc.username, acc.role, 'today');
-    const monthlyCommission = salaryResetThisMonth ? 0 : staffCommission(acc.username, acc.role, 'month');
+    const auto = autoBonusToday(acc.username, acc.role);
+    const manualToday = manualBonusSum(acc.username, 'today');
+    const manualMonth = manualBonusSum(acc.username, 'month');
     return {
-      daily: dailyCommission + auto.total + manualToday,
-      monthly: monthlyCommission + manualMonth,
+      daily: staffCommission(acc.username, acc.role, 'today') + auto.total + manualToday,
+      monthly: staffCommission(acc.username, acc.role, 'month') + manualMonth,
       bonusToday: auto.total + manualToday
     };
   }
-
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
   const amount = Number(acc.wageAmount) || 0;
-  const manualToday = salaryResetForToday ? 0 : manualBonusSum(acc.username, 'today');
-  const manualMonth = salaryResetThisMonth ? 0 : manualBonusSum(acc.username, 'month');
-
+  const manualToday = manualBonusSum(acc.username, 'today');
+  const manualMonth = manualBonusSum(acc.username, 'month');
   if(acc.wageType==='monthly'){
-    return {
-      daily: salaryResetForToday ? 0 : amount/days + manualToday,
-      monthly: salaryResetThisMonth ? 0 : amount + manualMonth,
-      bonusToday: manualToday
-    };
+    return {daily: amount/days + manualToday, monthly: amount + manualMonth, bonusToday: manualToday};
   }
-
-  return {
-    daily: salaryResetForToday ? 0 : amount + manualToday,
-    monthly: salaryResetThisMonth ? 0 : amount*days + manualMonth,
-    bonusToday: manualToday
-  };
+  return {daily: amount + manualToday, monthly: amount*days + manualMonth, bonusToday: manualToday};
 }
 function formatQtyLabel(it){
   const safeName = escapeHtml(it.name||'');
@@ -2030,17 +1869,15 @@ function renderLogin(){
   </div>`;
 }
 function attachLoginEvents(){
-  const submit = async ()=>{
+  const submit = ()=>{
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
-    if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
-    const hashedInput = await hashPassword(p);
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===hashedInput);
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && a.password===p);
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
-    saveSession({username:acc.username, role:acc.role});
+    saveSession({username:acc.username, password:acc.password});
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -2088,19 +1925,9 @@ function buildTableCards(){
     const isRealAdmin = state.currentUser && state.currentUser.role==='admin';
     const actingName = actingUsername();
     const lockedForMe = state.role==='waiter' && tbl.assignedTo && actingName && tbl.assignedTo!==actingName && !isRealAdmin;
-    let dotClass = 'free', statusText = 'Озод', extra = '', arrivalBadge = '';
+    let dotClass = 'free', statusText = 'Озод', extra = '';
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
-
-      // Show full 9-digit phone number prominently above the table card.
-      // Never show "Бо заказ", "Беззаказ", or masked/truncated phone.
-      const _cardPhone = String(order.customerPhone || '').replace(/\D/g,'').slice(0,9);
-      if(_cardPhone.length===9){
-        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
-      } else if(_cardPhone.length>0){
-        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
-      }
-
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
@@ -2108,7 +1935,9 @@ function buildTableCards(){
       if(order.createdBy){
         extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
       }
-      // Phone is already shown in arrivalBadge — don't duplicate it in extra
+      if(order.customerPhone){
+        extra += `<span class="reserve-detail">📞 ${escapeHtml(order.customerPhone)}</span>`;
+      }
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
         extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
       }
@@ -2126,7 +1955,6 @@ function buildTableCards(){
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
     cards += `
     <button class="table-card ${reservation?'reserved-table':''} ${lockedForMe?'locked-table':''}" data-table="${t}">
-      ${arrivalBadge}
       <div class="row1">
         <span class="tnum">${escapeHtml(tbl.name)}</span>
         <span class="dot ${dotClass}"></span>
@@ -2327,6 +2155,7 @@ async function submitTakeaway(cashAmount, noncashAmount){
   const todayCount = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt)).length;
   const cash = Math.max(0, Number(cashAmount)||0);
   const noncash = Math.max(0, Number(noncashAmount)||0);
+  if(Math.abs(cash+noncash-total)>0.01){ showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return; }
   const order = {
     id: uid('ord'), table: null, type: 'takeaway', status: 'paid', takeawayNumber: todayCount+1,
     items, total, createdAt: Date.now(), updatedAt: Date.now(),
@@ -2335,9 +2164,8 @@ async function submitTakeaway(cashAmount, noncashAmount){
     paymentMethod: cash>0 && noncash>0 ? 'mixed' : (noncash>0 ? 'noncash' : 'cash'),
     prepared: false
   };
-  state.orders.push(order);
-  await deductForOrderDelta(order, items);
-  await saveOrders(state.orders);
+  const committed=await commitOrderWithInventory(order, items, {requireKitchen:true});
+  if(!committed) return;
   showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
   closeTakeaway();
 }
@@ -2409,9 +2237,8 @@ async function submitScheduled(name, phone, time, deliveryType){
     deliveryType: deliveryType==='takeaway' ? 'takeaway' : 'dinein',
     prepared: false
   };
-  state.orders.push(order);
-  await deductForOrderDelta(order, items);
-  await saveOrders(state.orders);
+  const committed=await commitOrderWithInventory(order, items, {requireKitchen:false});
+  if(!committed) return;
   showToast('Фармоиши вақтдор сабт шуд');
   closeScheduled();
 }
@@ -2438,33 +2265,36 @@ function closeOrderView(){
   render();
 }
 async function payOrderById(id,cashAmount,noncashAmount){
-  const order=state.orders.find(o=>o.id===id);
-  if(!order) return;
-  const cash=Math.max(0,Number(cashAmount)||0);
-  const noncash=Math.max(0,Number(noncashAmount)||0);
-  const expected=Number(order.total||0);
-  if(Math.abs(cash+noncash-expected)>0.01){
-    showToast('Маблағи нақд + ғайринақд бояд ба маблағи чек баробар бошад'); return;
+  if(!db) return;
+  const cash=Math.max(0,Number(cashAmount)||0), noncash=Math.max(0,Number(noncashAmount)||0);
+  try{
+    await db.runTransaction(async(tx)=>{
+      const ref=docRef('orders');
+      const snap=await tx.get(ref);
+      let orders=[];
+      if(snap.exists){ try{ orders=JSON.parse(snap.data().value)||[]; }catch(e){ orders=[]; } }
+      const order=orders.find(o=>o.id===id);
+      if(!order) throw new Error('ORDER_NOT_FOUND');
+      if(order.status!=='active') throw new Error('ORDER_NOT_ACTIVE');
+      const expectedTotal=Number(order.total)||0;
+      if(Math.abs(cash+noncash-expectedTotal)>0.01) throw new Error('PAYMENT_MISMATCH');
+      order.status='paid'; order.paidAt=Date.now(); order.paidBy=actingUsername();
+      order.cashAmount=cash; order.noncashAmount=noncash;
+      order.paymentMethod=cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash');
+      order.updatedAt=Date.now();
+      tx.set(ref,{value:JSON.stringify(orders),updatedAt:Date.now()});
+      state.orders=orders;
+      state.__lastKnownOrderIds=new Set(orders.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+    });
+    showToast('Пардохт шуд'); closeOrderView();
+  }catch(e){
+    const msg=String(e&&e.message);
+    if(msg==='ORDER_NOT_FOUND') showToast('Заказ ёфт нашуд');
+    else if(msg==='ORDER_NOT_ACTIVE') showToast('Ин заказ аллакай пардохт ё бекор шудааст');
+    else if(msg==='PAYMENT_MISMATCH') showToast('Маблағи пардохт ба маблағи чек баробар нест');
+    else { console.error('payOrderById failed',e); showToast('Пардохт нигоҳ дошта нашуд'); }
   }
-
-  const result=await commitPaidOrderAtomic(id,cash,noncash);
-  if(!result.ok){
-    if(result.alreadyTerminal && result.order){
-      state.orders=state.orders.map(o=>o.id===id?result.order:o);
-      showToast(result.status==='paid'?'Ин чек аллакай баста шудааст':'Ин фармоиш аллакай бекор шудааст');
-    }else{
-      showToast(result.message||'Пардохт сабт нашуд');
-    }
-    render();
-    return;
-  }
-
-  state.orders=state.orders.map(o=>o.id===id?result.order:o);
-  speakPaymentSuccess(result.order);
-  if(state.seenPendingIds instanceof Set) state.seenPendingIds.delete(id);
-  if(state.seenCashierOrderIds instanceof Set) state.seenCashierOrderIds.delete(id);
-  showToast('Пардохт шуд');
-  closeOrderView();
 }
 async function assignScheduledToTable(orderId, tableId){
   const order = state.orders.find(o=>o.id===orderId);
@@ -2762,7 +2592,6 @@ function renderOrderViewOverlay(){
     ? `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">${escapeHtml(order.customerName||'')} ${order.customerPhone?('· '+escapeHtml(order.customerPhone)):''}</p>` : '';
   const waiterLine = order.createdBy
     ? `<p style="padding:0 20px;font-size:12px;color:#9c8f78;margin:0 0 4px;">👤 официант: ${escapeHtml(order.createdBy)}</p>` : '';
-  const tableLine = (order.type!=='takeaway' && order.type!=='scheduled') ? (()=>{ const tbl=state.tables.find(t=>t.id===order.table); const name=tbl ? (tbl.name||('№'+order.table)) : ('№'+order.table); return `<p style="padding:0 20px;font-size:13px;color:#6b5f4d;margin:0 0 4px;">🪑 Миз: ${escapeHtml(name)}</p>`; })() : '';
   const actionBtn = state.viewingMode==='pay'
     ? `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('payvo', order.total)}</div>` : '';
   const cancelBlock = state.confirmCancelOrderId===order.id ? `
@@ -2782,7 +2611,6 @@ function renderOrderViewOverlay(){
         <button class="close-x" id="closeViewOrder">✕</button>
       </div>
       ${contactLine}
-      ${tableLine}
       ${waiterLine}
       <div class="receipt">
         <div class="receipt-title">Чек</div>
@@ -3129,25 +2957,17 @@ function renderTicketOverlay(){
     actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
   }
 
-  const _activeTbl = state.tables.find(t=>t.id===state.activeTable);
-  const _activeTblName = _activeTbl ? escapeHtml(_activeTbl.name) : ('№'+state.activeTable);
   return `
   <div class="overlay" id="ticketOverlay">
     <div class="ticket-wrap">
       <div class="ticket-head">
-        <h2>Миз: ${_activeTblName}</h2>
+        <h2>Мизи №${state.activeTable}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
-      ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
-      ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
-       <div class="form-box" style="margin:10px 20px 14px;display:block;">
-         <div style="font-weight:700;font-size:13px;margin-bottom:10px;">📞 Рақами телефони клиент (9 рақам)</div>
-         <input id="arrivalPhone" inputmode="numeric" maxlength="9" pattern="[0-9]{9}" value="${escapeHtml(state.customerPhone||'')}" placeholder="918765432" style="display:block;width:180px;margin-top:5px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--white);font-family:inherit;font-size:14px;letter-spacing:1px;">
-       </div>` : ''}
       ${menuSection}
       <div class="receipt">
-        <div class="receipt-title">Чек — Миз: ${_activeTblName}</div>
+        <div class="receipt-title">Чек — Мизи №${state.activeTable}</div>
         ${receiptLines}
         ${serviceFee>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line"><span>Ҳаққи хизматрасонӣ (${state.settings.serviceChargePct}%)</span><span>+${fmtMoney(serviceFee)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
@@ -3179,15 +2999,6 @@ function attachTicketEvents(){
     state.confirmCancelOrderId = null; render();
   });
   if(mode==='edit'){
-    const arrivalPhone = document.getElementById('arrivalPhone');
-    if(arrivalPhone){
-      arrivalPhone.addEventListener('input', e=>setCustomerPhone(e.target.value));
-      arrivalPhone.addEventListener('keydown', e=>{
-        if(e.ctrlKey || e.metaKey || e.altKey) return;
-        if(['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) return;
-        if(!/^[0-9]$/.test(e.key)) e.preventDefault();
-      });
-    }
     document.querySelectorAll('.cat-tab').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
     });
@@ -3651,7 +3462,7 @@ function renderAdminSalary(){
   return `
     <div class="section-title">Ҳисоби маоши кормандон</div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
-    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ҳар гуна ош дар чек ≥500г бошад — 12 смн; агар ош <500г бошад — 5% аз арзиши ош; ҳар маҳсулоти дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
+    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ош дар чек ≥500г бошад — 12 смн аз ҳар чек; агар <500г — 5% аз арзиши он қисм; аз ҳама маҳсули дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
     <div class="stat-row" style="margin-bottom:14px;">
       <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
       <div class="stat-card"><div class="label">Ҷамъи бонуси имрӯза (ҳама)</div><div class="value" style="color:${totalBonusToday>0?'var(--olive)':'inherit'};">${totalBonusToday.toFixed(1)} смн</div></div>
@@ -3942,98 +3753,45 @@ function renderAdminMenu(){
 }
 
 async function clearAllReportHistory(){
+  // Accounting records are archived, never physically deleted.
   const now=Date.now();
-  const actor=actingUsername()||'?';
-
-  // Archive records are the daily reports. When the user explicitly chooses
-  // to clear report history, delete both the current report records and the
-  // archived daily summaries.
-  state.orders=(state.orders||[]).map(o=>o.status==='paid'
-    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
-    : o);
-
-  const ok=await saveOrders(state.orders);
-  if(!ok) return;
-
-  state.dailyClosures=[];
-  await saveDailyClosures([]);
-
-  // Clear the visible "Хисоботи ҳаррӯза (нақд/ғайринақд)" table immediately.
-  // It is rendered from state.dailyClosures, so the next render must show no rows.
-  state.dailyReportRows=[];
-  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
-  await saveSettings(state.settings);
-
+  state.orders.forEach(o=>{
+    if(o.status==='paid'){
+      o.archived=true; o.archivedAt=now; o.archivedBy=actingUsername()||'?'; o.updatedAt=now;
+    }
+  });
+  const ok=await saveOrders(state.orders); if(!ok) return;
   state.confirmClearReport=false;
-  render();
-  await logActivity('Ҳисобот ва архиви ҳисоботҳои ҳаррӯза пурра нест карда шуд');
-  showToast('Ҳисобот ва архиви ҳаррӯза нест карда шуд');
+  await logActivity('Ҳисоботи ҷорӣ тоза шуд — маълумот ба архив гузашт');
+  showToast('Ҳисоботи ҷорӣ тоза шуд; маълумот дар архив боқӣ монд');
 }
 async function closeDailyReport(){
-  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
-  const active = state.orders.filter(o=>o.status==='active');
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
+  const revenue = paidToday.reduce((s,o)=>s+o.total,0);
+  const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
+  const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+  const activeCount = state.orders.filter(o=>o.status==='active').length;
 
-  if(active.length){
-    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед');
-    return;
-  }
-
-  if(!paidToday.length){
-    showToast('Имрӯз барои архив ҳисоботи пардохтшуда нест');
-    return;
-  }
-
-  const revenue=paidToday.reduce((s,o)=>s+(Number(o.total)||0),0);
-  const cashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
-  const noncashToday=paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
-
-  const commissionAccounts=state.accounts.filter(a=>a.wageType==='commission'&&(a.role==='waiter'||a.role==='cashier'));
-  const staffSummary=commissionAccounts.map(acc=>{
-    const b=staffCommissionBreakdown(acc.username,acc.role,'today');
-    return {username:acc.username,role:acc.role,total:b.total,checks:b.orderCount};
+  const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
+  const staffSummary = commissionAccounts.map(acc=>{
+    const b = staffCommissionBreakdown(acc.username, acc.role, 'today');
+    return {username: acc.username, role: acc.role, total: b.total, checks: b.orderCount};
   }).filter(s=>s.checks>0);
 
-  const lowStock=state.inventory.filter(i=>i.minThreshold>0&&i.qty<=i.minThreshold).map(i=>i.name);
-  const closedAt=Date.now();
+  const lowStock = state.inventory.filter(i => i.minThreshold>0 && i.qty <= i.minThreshold).map(i=>i.name);
 
-  const closure={
-    id:uid('close'),
-    date:todayKey(),
-    closedAt,
-    closedBy:actingUsername(),
-    revenue,
-    cashToday,
-    noncashToday,
-    checkCount:paidToday.length,
-    activeCount:active.length,
-    staffSummary,
-    lowStock,
-    orders:paidToday.map(o=>JSON.parse(JSON.stringify(o)))
+  const closure = {
+    id: uid('close'), date: todayKey(), closedAt: Date.now(), closedBy: actingUsername(),
+    revenue, cashToday, noncashToday, checkCount: paidToday.length,
+    activeCount, staffSummary, lowStock
   };
-
-  state.dailyClosures=state.dailyClosures||[];
+  state.dailyClosures = state.dailyClosures || [];
   state.dailyClosures.unshift(closure);
-  if(state.dailyClosures.length>365) state.dailyClosures=state.dailyClosures.slice(0,365);
+  if(state.dailyClosures.length > 90) state.dailyClosures = state.dailyClosures.slice(0, 90);
   await saveDailyClosures(state.dailyClosures);
-
-  // Mark the exact paid orders as archived instead of deleting them.
-  // This survives realtime sync because the accounting record itself carries the flag.
-  const ids=new Set(paidToday.map(o=>o.id));
-  state.orders=state.orders.map(o=>ids.has(o.id)
-    ? {...o, archived:true, archivedAt:closedAt, archivedBy:actingUsername(), updatedAt:closedAt}
-    : o);
-  const saved=await saveOrders(state.orders);
-  if(!saved) return;
-
-  // Keep a simple settings marker for informational purposes, but the report itself
-  // relies on order.archived so stale settings cannot make archived orders reappear.
-  state.settings={...state.settings, reportClosedAt:closedAt};
-  await saveSettings(state.settings);
-
-  await logActivity('Рӯзро пӯшид — '+paidToday.length+' чек ба архив гузашт');
-  state.showCloseDayConfirm=false;
-  state.confirmClearReport=false;
-  showToast('Рӯз пӯшида шуд — ҳисобот архив шуд');
+  await logActivity('Рӯзро пӯшид — даромад: '+fmtMoney(revenue));
+  state.showCloseDayConfirm = false;
+  showToast('Рӯз пӯшида шуд ва сабт гардид');
 }
 async function deleteDailyClosure(id){
   const c = (state.dailyClosures||[]).find(x=>x.id===id);
@@ -4043,12 +3801,7 @@ async function deleteDailyClosure(id){
   showToast('Сабт нест карда шуд');
 }
 function renderAdminReport(){
-  // Current report contains all paid orders since the last manual clear (inCurrentReportPeriod),
-  // that have NOT been archived. This means the report persists across midnight — day change
-  // does NOT auto-clear the report. Only Admin pressing "Пок кардани ҳисобот" resets it.
-  // Archived orders remain in the accounting database and in the archive, but never
-  // reappear on the current report after realtime sync or refresh.
-  const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4081,8 +3834,8 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи ҳисобот, ҷадвали ҳисоботи чандрӯза, архив ва маблағи ҷамъшудаи маош/комиссияро пурра ва бебозгашт пок мекунад. Мизҳои фаъол дахл намеёбанд.</p>
-        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал чекҳои пардохтшударо аз ҳисоботи ҷорӣ пинҳон мекунад. Маълумот дар архив боқӣ мемонад ва нест карда намешавад. Мизҳои фаъол дахл намеёбанд.</p>
+        <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, аз ҳисоботи ҷорӣ тоза кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
     </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--brick);border-color:var(--brick);" id="clearReportBtn">🗑 Пок кардани ҳисобот</button>`;
@@ -4091,7 +3844,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--olive);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--olive);font-weight:700;margin:0 0 4px;">📋 Пӯшидани рӯз тасдиқ мешавад?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза ба архив сабт мешавад ва чекҳои пардохтшуда аз ҳисоботи ҷорӣ хориҷ мешаванд. Маълумоти чекҳо дар база нигоҳ дошта мешавад. Мизҳои фаъол пӯшида намешаванд.
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Хулосаи имрӯза (даромад, комиссия, огоҳии анбор) сабт мешавад. Маълумоти чекҳо нест намешавад — ин танҳо як сабти таърихӣ аст.
         ${active.length ? `<br><strong style="color:var(--brick);">⚠️ ${active.length} миз/фармоиш ҳанӯз фаъол аст!</strong>` : ''}</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmCloseDayBtn">Ҳа, рӯзро пӯш</button>
         <button class="btn-ghost" id="cancelCloseDayBtn">Бекор</button>
@@ -4135,16 +3888,14 @@ function renderAdminReport(){
     ${renderDailyPaymentTable()}
 
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
-    <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
+    <div class="section-title" style="margin-top:24px;">Чекҳои имрӯза</div>
     ${receiptsHtml}
 
     ${(state.dailyClosures&&state.dailyClosures.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}
   `;
 }
 function renderDailyPaymentTable(){
-  // The daily payment history is a report view. Archived orders belong to the
-  // closed/cleared accounting archive and must never reappear in this table.
-  const paid = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
+  const paid = state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt);
   if(!paid.length) return `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз ҳеҷ чек пардохт нашудааст</p>`;
   const map = {};
   paid.forEach(o=>{
@@ -4216,7 +3967,7 @@ function renderProductBreakdownTable(orders){
 // as its own sheet — and triggers a browser download.
 function exportReportToExcel(){
   if(typeof XLSX === 'undefined'){ showToast('Китобхонаи Excel бор нашуд — интернетро санҷед'); return; }
-  const paidToday = state.orders.filter(o=>o.status==='paid' && o.archived!==true && o.paidAt && inCurrentReportPeriod(o.paidAt));
+  const paidToday = state.orders.filter(o=>o.status==='paid' && !o.archived && isToday(o.paidAt));
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
@@ -4260,9 +4011,7 @@ function exportReportToExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(receiptRows), 'Чекҳои имрӯза');
 
   const dayMap = {};
-  // Exported daily history must match the on-screen report and exclude archived
-  // orders, including orders archived when the report history was cleared.
-  state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true).forEach(o=>{
+  state.orders.filter(o=>o.status==='paid' && !o.archived && o.paidAt).forEach(o=>{
     const d = new Date(o.paidAt);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     if(!dayMap[key]) dayMap[key] = {cash:0, noncash:0, count:0, label: d.toLocaleDateString('tg-TJ')};
@@ -4354,24 +4103,6 @@ function renderAdminSettings(){
     </div>
     <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ин фоиз худкор ба чекҳои мизҳо (танҳо фармоишҳое, ки дар кафе хӯрда мешаванд) илова мешавад. Ба фармоишҳои «Бо худ бурдан» татбиқ намешавад (0 = бе ҳаққи хизматрасонӣ).</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveServiceChargeBtn">Сабт кардан</button>
-  </div>
-
-  <div class="section-title" style="margin-top:32px;">🔊 Овози пардохт</div>
-  <div class="settings-form">
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
-      <input type="checkbox" id="paymentVoiceEnabled" ${state.settings.paymentVoiceEnabled!==false?'checked':''}>
-      Овози пардохт фаъол бошад
-    </label>
-    <div class="field" style="width:100%;">
-      <label>Матни овози пардохт</label>
-      <input type="text" id="paymentVoiceText"
-        value="${escapeHtml(state.settings.paymentVoiceText||'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}')}"
-        placeholder="Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}">
-    </div>
-    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">
-      <b>{TABLE}</b> = рақами миз · <b>{NAME}</b> = номи клиент, агар бошад.
-    </p>
-    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="savePaymentVoiceBtn">Сабт кардан</button>
   </div>
 
   <div class="section-title" style="margin-top:32px;">Менюи оғозӣ</div>
@@ -4928,33 +4659,6 @@ function attachAdminEvents(){
       showToast('Сабт шуд');
       render();
     });
-    const savePaymentVoice = async ()=>{
-      const enabled = !!document.getElementById('paymentVoiceEnabled').checked;
-      const input = document.getElementById('paymentVoiceText');
-      const voiceText = String(input ? input.value : '').trim()
-        || 'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}';
-
-      const nextSettings = Object.assign({}, state.settings, {
-        paymentVoiceEnabled: enabled,
-        paymentVoiceText: voiceText
-      });
-
-      const ok = await saveSettings(nextSettings);
-      if(!ok) return;
-
-      state.settings = nextSettings;
-      showToast('Матни овози пардохт сабт шуд');
-      render();
-    };
-
-    const savePaymentVoiceBtn = document.getElementById('savePaymentVoiceBtn');
-    if(savePaymentVoiceBtn) savePaymentVoiceBtn.addEventListener('click', savePaymentVoice);
-
-    const paymentVoiceTextInput = document.getElementById('paymentVoiceText');
-    if(paymentVoiceTextInput) paymentVoiceTextInput.addEventListener('keydown', e=>{
-      if(e.key==='Enter'){ e.preventDefault(); savePaymentVoice(); }
-    });
-
     const confirmResetBtn = document.getElementById('confirmResetBtn');
     if(confirmResetBtn) confirmResetBtn.addEventListener('click', async ()=>{
       state.menu = DEFAULT_MENU.map(m=>({...m}));
@@ -4966,6 +4670,9 @@ function attachAdminEvents(){
   }
 }
 
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
 
 // Catch up on any real-time data that arrived while a field had focus: the moment focus
 // leaves an input/select/textarea (and doesn't immediately land on another one), redraw once
@@ -4983,7 +4690,6 @@ document.addEventListener('focusout', ()=>{
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
   if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
-    pollOrdersFast();
     pollRefresh();
   }
 });
@@ -4991,8 +4697,7 @@ document.addEventListener('visibilitychange', ()=>{
 // The browser fires this the moment it detects the connection is back after being down —
 // catch up immediately rather than waiting for the next watchdog tick.
 window.addEventListener('online', ()=>{
-  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollOrdersFast();
-  pollRefresh();
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollRefresh();
 });
 
 /* ============ UPDATE CHECK ============
