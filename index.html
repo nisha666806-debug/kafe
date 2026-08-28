@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-29-V46-FIX3';
+const APP_VERSION = '2026-08-29-V46-FIX1';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -3261,17 +3261,9 @@ function attachTicketEvents(){
       el.addEventListener('click', ()=> removeDraftItem(el.dataset.removeitem));
     });
     const saveBtn = document.getElementById('saveTicketBtn');
-    if(saveBtn) saveBtn.addEventListener('click', async e=>{
-      e.preventDefault();
-      e.stopPropagation();
-      await saveTicket(false);
-    });
+    if(saveBtn) saveBtn.addEventListener('click', e=>{ e.preventDefault(); e.stopPropagation(); saveTicket(false); });
     const sendKitchenBtn = document.getElementById('sendKitchenBtn');
-    if(sendKitchenBtn) sendKitchenBtn.addEventListener('click', async e=>{
-      e.preventDefault();
-      e.stopPropagation();
-      await saveTicket(true);
-    });
+    if(sendKitchenBtn) sendKitchenBtn.addEventListener('click', e=>{ e.preventDefault(); e.stopPropagation(); saveTicket(true); });
   } else if(mode==='pay'){
     attachSplitPaymentEvents('paytk', draftTotalWithService(), (cash, noncash)=> payTicket(cash, noncash));
   }
