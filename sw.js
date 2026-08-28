@@ -1,4 +1,5 @@
-const CACHE_NAME = 'kafe-shell-2026-08-29-V46';
+const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX2';
+
 const APP_SHELL = [
   './',
   './index.html',
@@ -19,27 +20,30 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys =>
-        Promise.all(
+      .then(keys => {
+        return Promise.all(
           keys
             .filter(key => key !== CACHE_NAME)
             .map(key => caches.delete(key))
-        )
-      )
+        );
+      })
       .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
+  if (event.request.method !== 'GET') {
+    return;
+  }
 
-  const u = new URL(event.request.url);
+  const url = new URL(event.request.url);
 
+  // Firebase / Firestore data is NEVER cached.
   if (
-    u.hostname.includes('googleapis.com') ||
-    u.hostname.includes('firebaseio.com') ||
-    u.hostname.includes('firebaseapp.com') ||
-    u.hostname.includes('firestore.googleapis.com')
+    url.hostname.includes('googleapis.com') ||
+    url.hostname.includes('firebaseio.com') ||
+    url.hostname.includes('firebaseapp.com') ||
+    url.hostname.includes('firestore.googleapis.com')
   ) {
     return;
   }
@@ -48,12 +52,17 @@ self.addEventListener('fetch', event => {
     fetch(event.request)
       .then(response => {
         if (response && response.ok) {
+          const copy = response.clone();
+
           caches.open(CACHE_NAME)
-            .then(cache => cache.put(event.request, response.clone()))
+            .then(cache => cache.put(event.request, copy))
             .catch(() => {});
         }
+
         return response;
       })
-      .catch(() => caches.match(event.request))
+      .catch(() => {
+        return caches.match(event.request);
+      })
   );
 });
