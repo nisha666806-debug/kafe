@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX5';
+const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX6';
 
 const APP_SHELL = [
   './',
@@ -20,23 +20,25 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys =>
-        Promise.all(
+      .then(keys => {
+        return Promise.all(
           keys
             .filter(key => key !== CACHE_NAME)
             .map(key => caches.delete(key))
-        )
-      )
+        );
+      })
       .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
+  if (event.request.method !== 'GET') {
+    return;
+  }
 
   const url = new URL(event.request.url);
 
-  // Firebase / Firestore-ро cache намекунем.
+  // Firebase ва Firestore ҳеҷ гоҳ cache намешаванд.
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -53,7 +55,9 @@ self.addEventListener('fetch', event => {
           const copy = response.clone();
 
           caches.open(CACHE_NAME)
-            .then(cache => cache.put(event.request, copy))
+            .then(cache => {
+              return cache.put(event.request, copy);
+            })
             .catch(() => {});
         }
 
