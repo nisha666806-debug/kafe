@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX6';
+const CACHE_NAME = 'kafe-shell-2026-08-29-V46-FIX7';
 
 const APP_SHELL = [
   './',
@@ -38,7 +38,7 @@ self.addEventListener('fetch', event => {
 
   const url = new URL(event.request.url);
 
-  // Firebase ва Firestore ҳеҷ гоҳ cache намешаванд.
+  // Firebase ва Firestore-ро cache намекунем.
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -55,9 +55,7 @@ self.addEventListener('fetch', event => {
           const copy = response.clone();
 
           caches.open(CACHE_NAME)
-            .then(cache => {
-              return cache.put(event.request, copy);
-            })
+            .then(cache => cache.put(event.request, copy))
             .catch(() => {});
         }
 
