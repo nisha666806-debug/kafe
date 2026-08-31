@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-08-29-V46-FIX8';
+const APP_VERSION = '2026-08-31-V49-FINAL-FIXES';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -634,11 +634,14 @@ async function saveActivityLog(log){
   const ok = await fsSet('activityLog', JSON.stringify(log));
   if(!ok) console.warn('saveActivityLog failed');
 }
+let __logFlushTimer = null;
 async function logActivity(actionText){
   state.activityLog = state.activityLog || [];
   state.activityLog.unshift({ts: Date.now(), user: actingUsername()||'?', action: actionText});
   if(state.activityLog.length > 200) state.activityLog = state.activityLog.slice(0, 200);
-  await saveActivityLog(state.activityLog);
+  // Debounce: flush at most once every 5 seconds to avoid a write per action.
+  clearTimeout(__logFlushTimer);
+  __logFlushTimer = setTimeout(()=> saveActivityLog(state.activityLog), 5000);
 }
 async function saveBonuses(bonuses){
   const ok = await fsSet('bonuses', JSON.stringify(bonuses));
@@ -1034,10 +1037,10 @@ function setupRealtimeSync(){
   startSyncWatchdog();
 }
 function startSyncWatchdog(){
+  // onSnapshot handles real-time sync — no polling needed.
+  // Previously this ran every 3s causing 1200+ Firebase reads/hour per device.
   if(__watchdogInterval) clearInterval(__watchdogInterval);
-  __watchdogInterval = setInterval(()=>{
-    if(state.role && state.loaded && document.visibilityState==='visible') pollOrdersFast();
-  }, 3000);
+  // Intentionally left empty: listeners from setupRealtimeSync() are sufficient.
 }
 
 let __ordersPollInFlight = false;
@@ -1070,10 +1073,9 @@ async function pollOrdersFast(){
 // useful for settings/tables/inventory if a listener silently goes stale.
 let __fullWatchdogInterval = null;
 function startFullSyncWatchdog(){
+  // onSnapshot listeners cover all fields — full polling every 30s is redundant
+  // and causes ~1200 extra reads/hour. Removed.
   if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
-  __fullWatchdogInterval = setInterval(()=>{
-    if(state.role && state.loaded && document.visibilityState==='visible') pollRefresh();
-  }, 30000);
 }
 
 async function pollRefresh(){
@@ -1387,8 +1389,10 @@ async function clearChefQueue(){
   showToast('Навбати ошпаз пок карда шуд');
 }
 async function clearActivityLog(){
+  await logActivity('Журнали амалҳоро пок кард'); // log before clearing
+  clearTimeout(__logFlushTimer);
   state.activityLog = [];
-  await logActivity('Журнали амалҳоро пок кард');
+  await saveActivityLog([]); // immediately flush empty log
   showToast('Журнали амалҳо пок карда шуд');
 }
 function renderSplitPaymentForm(idPrefix, total){
@@ -1612,7 +1616,7 @@ async function cancelOrphanOrder(id){
   order.status='cancelled'; order.cancelledAt=Date.now();
   order.cancelledBy=actingUsername()||'?'; order.updatedAt=Date.now();
   order.cancelReason='Мизи фармоиш нест карда шуд';
-  const ok=await saveOrders(state.orders); if(!ok) return;
+  const ok=await saveOrderV2(order); if(!ok) return;
   await logActivity('Фармоиши бесоҳибро бекор кард (мизи нест)');
   showToast('Фармоиш бекор карда шуд');
 }
@@ -1639,7 +1643,7 @@ async function cancelOrder(id){
   order.cancelledBy=actingUsername()||'?'; order.updatedAt=Date.now();
   order.cancelReason=order.cancelReason||'Бекор карда шуд';
   order.inventoryDeductedFor={};
-  const ok=await saveOrders(state.orders); if(!ok) return;
+  const ok=await saveOrderV2(order); if(!ok) return;
   await logActivity('Фармоишро бекор кард: '+label);
   showToast('Фармоиш бекор карда шуд');
 }
@@ -2386,8 +2390,10 @@ async function submitTakeaway(cashAmount, noncashAmount){
     prepared: false
   };
   state.orders.push(order);
+  state.__lastKnownOrderIds = state.__lastKnownOrderIds || new Set();
+  state.__lastKnownOrderIds.add(order.id);
   await deductForOrderDelta(order, items);
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this one order, not the whole array
   showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
   closeTakeaway();
 }
@@ -2460,8 +2466,10 @@ async function submitScheduled(name, phone, time, deliveryType){
     prepared: false
   };
   state.orders.push(order);
+  state.__lastKnownOrderIds = state.__lastKnownOrderIds || new Set();
+  state.__lastKnownOrderIds.add(order.id);
   await deductForOrderDelta(order, items);
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this one order, not the whole array
   showToast('Фармоиши вақтдор сабт шуд');
   closeScheduled();
 }
@@ -2473,7 +2481,7 @@ async function sendScheduledTakeawayToKitchen(orderId){
   order.takeawayNumber = todayCount+1;
   order.sentToKitchen = true;
   order.updatedAt = Date.now();
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this one order
   showToast('Ба ошпаз фиристода шуд');
 }
 function openOrderView(id, mode){
@@ -2525,7 +2533,7 @@ async function assignScheduledToTable(orderId, tableId){
   order.createdBy = actingUsername();
   order.sentToKitchen = true;
   order.updatedAt = Date.now();
-  // Now dining in the café — the service charge (if any) applies from this point on.
+  // Now dining in the cafeé — the service charge (if any) applies from this point on.
   const subtotal = (order.items||[]).reduce((s,it)=>{
     const m = state.menu.find(x=>x.id===it.menuId);
     return s + (m ? lineTotal(m, it.qty) : 0);
@@ -2533,7 +2541,7 @@ async function assignScheduledToTable(orderId, tableId){
   order.subtotal = subtotal;
   order.serviceCharge = serviceChargeAmount(subtotal);
   order.total = subtotal + order.serviceCharge;
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this order
   showToast('Ба миз гузошта шуд');
 }
 function renderTakeawayOverlay(){
@@ -2875,7 +2883,7 @@ async function toggleOrderPrepared(orderId){
   if(!order) return;
   order.prepared = !order.prepared;
   order.updatedAt = Date.now();
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this order
 }
 async function markItemServed(orderId, menuId, amount){
   const order = state.orders.find(o=>o.id===orderId);
@@ -2887,7 +2895,7 @@ async function markItemServed(orderId, menuId, amount){
   const served = Math.min(item.qty, (item.servedQty||0) + amt);
   item.servedQty = served;
   order.updatedAt = Date.now();
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this order
   showToast('Кашида шуд');
 }
 async function undoItemServed(orderId, menuId){
@@ -2897,7 +2905,7 @@ async function undoItemServed(orderId, menuId){
   if(!item) return;
   item.servedQty = 0;
   order.updatedAt = Date.now();
-  await saveOrders(state.orders);
+  await saveOrderV2(order); // save only this order
 }
 function renderChef(){
   const todays = state.orders.filter(o=>isToday(o.createdAt));
@@ -3436,7 +3444,7 @@ async function deleteClientRecord(delType, delId){
         o.cancelReason = 'Сабти мизоҷ аз рӯйхат пинҳон карда шуд';
       }
       o.updatedAt = Date.now();
-      const saved = await saveOrders(state.orders);
+      const saved = await saveOrderV2(o);
       if(!saved) return;
     }
     await logActivity('Сабти мизоҷро архив кард: '+(o?o.customerName:delId));
@@ -4015,16 +4023,22 @@ async function clearAllReportHistory(){
   state.orders=(state.orders||[]).map(o=>ids.has(o.id)
     ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
     : o);
-  const ok=await saveOrders(state.orders);
-  if(!ok) return;
+  // Save each archived order individually (not the whole array) to minimise writes
+  const toSave=state.orders.filter(o=>ids.has(o.id));
+  for(const o of toSave){ await saveOrderV2(o); }
+  const ok=true;
+
+  // Clear all manual bonuses so salary resets to zero along with the report.
+  state.bonuses = [];
+  await saveBonuses([]);
 
   state.dailyClosures=[];
   await saveDailyClosures([]);
   state.dailyReportRows=[];
   state.confirmClearReport=false;
   render();
-  await logActivity('Ҳисобот ва архиви ҳисоботҳои ҳаррӯза пурра нест карда шуд');
-  showToast('Ҳисобот пурра пок шуд');
+  await logActivity('Ҳисобот, бонусҳо ва маоши кормандон пурра пок карда шуд');
+  showToast('Ҳисобот ва маош пурра пок шуд');
 }
 
 async function closeDailyReport(){
@@ -4080,7 +4094,11 @@ async function closeDailyReport(){
   state.orders=state.orders.map(o=>ids.has(o.id)
     ? {...o, archived:true, archivedAt:closedAt, archivedBy:actingUsername(), updatedAt:closedAt}
     : o);
-  const saved=await saveOrders(state.orders);
+  // Save each archived order individually to avoid rewriting the entire orders collection
+  const toArchive=state.orders.filter(o=>ids.has(o.id));
+  let allSaved=true;
+  for(const o of toArchive){ if(!await saveOrderV2(o)) allSaved=false; }
+  const saved=allSaved;
   if(!saved) return;
 
   // Keep a simple settings marker for informational purposes, but the report itself
@@ -5040,17 +5058,23 @@ document.addEventListener('focusout', ()=>{
 // for Firestore's listeners to reconnect on their own) so the screen is correct within moments
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
+  // When the app comes back to foreground, just re-render from current state.
+  // onSnapshot listeners reconnect automatically; a full re-read is not needed
+  // and was causing a surge of reads every time the phone screen was unlocked.
   if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
-    pollOrdersFast();
-    pollRefresh();
+    render();
   }
 });
 
 // The browser fires this the moment it detects the connection is back after being down —
 // catch up immediately rather than waiting for the next watchdog tick.
 window.addEventListener('online', ()=>{
-  if(state.role && state.loaded && !state.loadError && !state.needsSetup) pollOrdersFast();
-  pollRefresh();
+  // Connection restored: re-attach realtime listeners so Firestore reconnects cleanly.
+  // A full pollRefresh() here caused a spike of reads every network reconnect.
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup){
+    teardownRealtimeSync();
+    setupRealtimeSync();
+  }
 });
 
 /* ============ UPDATE CHECK ============
