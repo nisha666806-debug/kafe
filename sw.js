@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-01-V53-REALTIME-READ-OPTIMIZED';
+const CACHE_NAME = 'kafe-shell-2026-09-01-V54-REALTIME-READ-OPTIMIZED';
 
 const APP_SHELL = [
   './',
@@ -38,7 +38,7 @@ self.addEventListener('fetch', event => {
 
   const url = new URL(event.request.url);
 
-  // Firebase / Firestore data is NEVER cached.
+  // Firebase / Firestore NEVER goes through the cache.
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
