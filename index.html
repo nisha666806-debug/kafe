@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V50-NO-METADATA';
+const APP_VERSION = '2026-09-01-V51-ARCHIVED-CLEAR';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -4009,35 +4009,79 @@ function renderAdminMenu(){
 async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
-  const paidToClear=(state.orders||[]).filter(o=>o.status==='paid' && o.archived!==true && o.paidAt);
 
-  // First publish the reset marker so every device knows the report cutoff.
-  // The marker is shared through Firebase settings and is also kept in the local state.
+  // IMPORTANT: "Пок кардани ҳисобот" permanently deletes ONLY orders that
+  // are already paid AND archived. Active orders are never touched.
+  // We delete them from Firestore rather than merely marking them archived,
+  // so future full reads of the orders collection do not keep paying for
+  // historical documents that the admin has intentionally cleared.
+  const archivedPaid=(state.orders||[]).filter(o=>
+    o && o.status==='paid' && o.archived===true && o.paidAt
+  );
+
+  // Also include any paid+archived documents that may exist remotely but
+  // are not currently present in this device's local realtime snapshot.
+  // Use a server query so the clear operation is complete across devices.
+  let remoteArchivedPaid=[];
+  try{
+    const snap=await ordersCollectionRef().get();
+    snap.forEach(d=>{
+      const o=d.data()||{};
+      if(o.status==='paid' && o.archived===true && o.paidAt){
+        remoteArchivedPaid.push({...o,id:o.id||d.id});
+      }
+    });
+  }catch(e){
+    console.error('Could not verify archived orders before clear',e);
+    showToast('Хатогӣ: чекҳои архившуда санҷида нашуданд');
+    return;
+  }
+
+  const ids=new Set([...archivedPaid,...remoteArchivedPaid]
+    .filter(o=>o&&o.id).map(o=>String(o.id)));
+
+  // Delete only paid+archived documents. Never sweep active orders.
+  let deleted=0;
+  let failed=0;
+  for(const id of ids){
+    try{
+      await orderDocRef(id).delete();
+      deleted++;
+    }catch(e){
+      failed++;
+      console.error('Failed to delete archived paid order',id,e);
+    }
+  }
+
+  if(failed>0){
+    showToast('Баъзе чекҳо пок нашуданд — амалиёт пурра анҷом нашуд');
+    return;
+  }
+
+  // Reset report metadata only after all archived paid orders were deleted.
   state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
   const settingsOk=await saveSettings(state.settings);
-  if(settingsOk===false) return;
+  if(settingsOk===false){
+    showToast('Чекҳо пок шуданд, аммо ҳисобот пурра нав карда нашуд');
+    return;
+  }
 
-  // Archive only the paid orders that existed at the moment of the clear.
-  const ids=new Set(paidToClear.map(o=>o.id));
-  state.orders=(state.orders||[]).map(o=>ids.has(o.id)
-    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
-    : o);
-  // Save each archived order individually (not the whole array) to minimise writes
-  const toSave=state.orders.filter(o=>ids.has(o.id));
-  for(const o of toSave){ await saveOrderV2(o); }
-  const ok=true;
+  // Keep the normal report cleanup behavior.
+  state.orders=(state.orders||[]).filter(o=>!ids.has(String(o.id)));
+  state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+  state.__lastKnownOrderSnapshots=new Map(
+    state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
+  );
 
-  // Clear all manual bonuses so salary resets to zero along with the report.
-  state.bonuses = [];
+  state.bonuses=[];
   await saveBonuses([]);
-
   state.dailyClosures=[];
   await saveDailyClosures([]);
   state.dailyReportRows=[];
   state.confirmClearReport=false;
   render();
-  await logActivity('Ҳисобот, бонусҳо ва маоши кормандон пурра пок карда шуд');
-  showToast('Ҳисобот ва маош пурра пок шуд');
+  await logActivity('Ҳисобот пок шуд — '+deleted+' чеки архившуда аз база нест карда шуд');
+  showToast(deleted+' чеки архившуда аз база пок шуд');
 }
 
 async function closeDailyReport(){
@@ -4156,7 +4200,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи ҳисобот, ҷадвали ҳисоботи чандрӯза, архив ва маблағи ҷамъшудаи маош/комиссияро пурра ва бебозгашт пок мекунад. Мизҳои фаъол дахл намеёбанд.</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҳамаи чекҳои аллакай пардохтшуда ва архившударо аз базаи Firebase бебозгашт нест мекунад. Мизҳои фаъол ва чекҳои фаъол дахл намеёбанд.</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
