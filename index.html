@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V51-ARCHIVED-CLEAR';
+const APP_VERSION = '2026-09-01-V52-READ-OPTIMIZED-ARCHIVE-CLEAR';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -387,11 +387,15 @@ async function migrateOrdersToV2(){
 }
 async function loadOrdersV2(){
   try{
-    const snap=await ordersCollectionRef().get(), orders=[];
+    // Archived paid orders are historical and excluded from normal reads.
+    const snap=await ordersCollectionRef().where('archived','==',false).get(), orders=[];
     snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
     orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
     return {ok:true,value:orders};
-  }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
+  }catch(e){
+    console.error('loadOrdersV2 filtered read failed',e);
+    return {ok:false,value:null};
+  }
 }
 async function saveOrderV2(order){
   if(!db || !order || !order.id) return false;
@@ -1004,7 +1008,7 @@ function setupRealtimeSync(){
   teardownRealtimeSync();
   migrateOrdersToV2().catch(console.error);
   try{
-    const unsub=ordersCollectionRef().onSnapshot(snap=>{
+    const unsub=ordersCollectionRef().where('archived','==',false).onSnapshot(snap=>{
       if(!state.role)return;
       const parsed=[];
       snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
@@ -1044,30 +1048,10 @@ function startSyncWatchdog(){
 
 let __ordersPollInFlight = false;
 async function pollOrdersFast(){
-  if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight = true;
-  try{
-    const snap = await ordersCollectionRef().get({source:'server'});
-    const parsed = [];
-    snap.forEach(d=>{
-      const x = d.data() || {};
-      delete x._migratedAt;
-      parsed.push({...x, id:x.id || d.id});
-    });
-    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-    state.orders = parsed;
-    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp = Date.now();
-    state.__lastOrdersServerAt = Date.now();
-    if(state.activeTable===null && !isActivelyEditingFormField()) render();
-  }catch(e){
-    console.warn('Fast orders sync failed; realtime listener remains active', e);
-  }finally{
-    __ordersPollInFlight = false;
-  }
+  // Disabled: onSnapshot already provides realtime order updates.
+  // A second periodic full collection read only increases Firestore reads.
+  return;
 }
-
 // Full fallback is intentionally less frequent because it reads many documents. It is still
 // useful for settings/tables/inventory if a listener silently goes stale.
 let __fullWatchdogInterval = null;
@@ -4010,55 +3994,45 @@ async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
 
-  // IMPORTANT: "Пок кардани ҳисобот" permanently deletes ONLY orders that
-  // are already paid AND archived. Active orders are never touched.
-  // We delete them from Firestore rather than merely marking them archived,
-  // so future full reads of the orders collection do not keep paying for
-  // historical documents that the admin has intentionally cleared.
-  const archivedPaid=(state.orders||[]).filter(o=>
-    o && o.status==='paid' && o.archived===true && o.paidAt
-  );
-
-  // Also include any paid+archived documents that may exist remotely but
-  // are not currently present in this device's local realtime snapshot.
-  // Use a server query so the clear operation is complete across devices.
-  let remoteArchivedPaid=[];
+  // Only paid + archived orders may be permanently deleted.
+  // Active and current non-archived orders are never touched.
+  let remoteDocs=[];
   try{
-    const snap=await ordersCollectionRef().get();
-    snap.forEach(d=>{
-      const o=d.data()||{};
-      if(o.status==='paid' && o.archived===true && o.paidAt){
-        remoteArchivedPaid.push({...o,id:o.id||d.id});
-      }
-    });
+    const snap=await ordersCollectionRef()
+      .where('status','==','paid')
+      .where('archived','==',true)
+      .get();
+    remoteDocs=snap.docs;
   }catch(e){
-    console.error('Could not verify archived orders before clear',e);
+    console.error('Could not query archived paid orders before clear',e);
     showToast('Хатогӣ: чекҳои архившуда санҷида нашуданд');
     return;
   }
 
-  const ids=new Set([...archivedPaid,...remoteArchivedPaid]
-    .filter(o=>o&&o.id).map(o=>String(o.id)));
+  const ids=new Set();
+  remoteDocs.forEach(d=>{
+    const o=d.data()||{};
+    if(o.paidAt) ids.add(String(o.id||d.id));
+  });
 
-  // Delete only paid+archived documents. Never sweep active orders.
+  // Delete in batches of 400 (Firestore batch maximum is 500).
   let deleted=0;
-  let failed=0;
-  for(const id of ids){
-    try{
-      await orderDocRef(id).delete();
-      deleted++;
-    }catch(e){
-      failed++;
-      console.error('Failed to delete archived paid order',id,e);
+  try{
+    for(let i=0;i<remoteDocs.length;i+=400){
+      const batch=db.batch();
+      const chunk=remoteDocs.slice(i,i+400);
+      chunk.forEach(d=>batch.delete(d.ref));
+      if(chunk.length){
+        await batch.commit();
+        deleted+=chunk.length;
+      }
     }
-  }
-
-  if(failed>0){
+  }catch(e){
+    console.error('Failed to delete archived paid orders',e);
     showToast('Баъзе чекҳо пок нашуданд — амалиёт пурра анҷом нашуд');
     return;
   }
 
-  // Reset report metadata only after all archived paid orders were deleted.
   state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
   const settingsOk=await saveSettings(state.settings);
   if(settingsOk===false){
@@ -4066,24 +4040,21 @@ async function clearAllReportHistory(){
     return;
   }
 
-  // Keep the normal report cleanup behavior.
   state.orders=(state.orders||[]).filter(o=>!ids.has(String(o.id)));
   state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
   state.__lastKnownOrderSnapshots=new Map(
     state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
   );
 
-  state.bonuses=[];
-  await saveBonuses([]);
   state.dailyClosures=[];
   await saveDailyClosures([]);
   state.dailyReportRows=[];
   state.confirmClearReport=false;
   render();
+
   await logActivity('Ҳисобот пок шуд — '+deleted+' чеки архившуда аз база нест карда шуд');
   showToast(deleted+' чеки архившуда аз база пок шуд');
 }
-
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const active = state.orders.filter(o=>o.status==='active');
