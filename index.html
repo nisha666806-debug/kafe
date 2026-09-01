@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V54-REALTIME-READ-OPTIMIZED';
+const APP_VERSION = '2026-09-01-V54.1-REPORT-CLEANUP-FIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -362,12 +362,13 @@ async function loadOrdersV2(){
     // Instead, read only the two live states used by this app: active and paid.
     const [activeSnap, paidSnap] = await Promise.all([
       ordersCollectionRef().where('status','==','active').get(),
-      ordersCollectionRef().where('status','==','paid').where('archived','==',false).get()
+      ordersCollectionRef().where('status','==','paid').get()
     ]);
     const byId=new Map();
     [activeSnap,paidSnap].forEach(snap=>snap.forEach(d=>{
       const x=d.data()||{};
       delete x._migratedAt;
+      if(snap===paidSnap && x.archived===true) return;
       byId.set(d.id,{...x,id:x.id||d.id});
     }));
     const orders=Array.from(byId.values());
@@ -1023,7 +1024,7 @@ function setupRealtimeSync(){
       __realtimeUnsubs.push(unsub);
     };
     attachLive(ordersCollectionRef().where('status','==','active'),'active');
-    attachLive(ordersCollectionRef().where('status','==','paid').where('archived','==',false),'paid');
+    attachLive(ordersCollectionRef().where('status','==','paid'),'paid');
   }catch(e){console.error('orders listener attach failed',e);}
   const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
   fields.forEach(([key,stateKey])=>{
@@ -3996,25 +3997,24 @@ async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
 
-  // Only paid + archived orders may be permanently deleted.
-  // Active and current non-archived orders are never touched.
+  // All paid orders may be permanently deleted by this explicit report-clear action.
+  // Active and cancelled orders are never touched.
   let remoteDocs=[];
   try{
     const snap=await ordersCollectionRef()
       .where('status','==','paid')
-      .where('archived','==',true)
       .get();
     remoteDocs=snap.docs;
   }catch(e){
     console.error('Could not query archived paid orders before clear',e);
-    showToast('Хатогӣ: чекҳои архившуда санҷида нашуданд');
+    showToast('Хатогӣ: чекҳои пардохтшуда санҷида нашуданд');
     return;
   }
 
   const ids=new Set();
   remoteDocs.forEach(d=>{
     const o=d.data()||{};
-    if(o.paidAt) ids.add(String(o.id||d.id));
+    if(o.paidAt || o.status==='paid') ids.add(String(o.id||d.id));
   });
 
   // Delete in batches of 400 (Firestore batch maximum is 500).
@@ -4030,7 +4030,7 @@ async function clearAllReportHistory(){
       }
     }
   }catch(e){
-    console.error('Failed to delete archived paid orders',e);
+    console.error('Failed to delete paid orders',e);
     showToast('Баъзе чекҳо пок нашуданд — амалиёт пурра анҷом нашуд');
     return;
   }
@@ -4054,8 +4054,8 @@ async function clearAllReportHistory(){
   state.confirmClearReport=false;
   render();
 
-  await logActivity('Ҳисобот пок шуд — '+deleted+' чеки архившуда аз база нест карда шуд');
-  showToast(deleted+' чеки архившуда аз база пок шуд');
+  await logActivity('Ҳисобот пок шуд — '+deleted+' чеки пардохтшуда аз база нест карда шуд');
+  showToast(deleted+' чеки пардохтшуда аз база пок шуд');
 }
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
