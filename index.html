@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V52-READ-OPTIMIZED-ARCHIVE-CLEAR';
+const APP_VERSION = '2026-09-01-V53-REALTIME-READ-OPTIMIZED';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -351,49 +351,30 @@ function ordersCollectionRef(){
 function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
 const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
 async function migrateOrdersToV2(){
-  if(!db) return false;
-  try{
-    // Migration state is local to this browser. We intentionally do not use
-    // a separate Firestore marker collection, so opening the app does not
-    // require any extra Firestore permission just for migration bookkeeping.
-    const localMarker = 'orders_v2_migrated_' + (CAFE_ID || 'default');
-    try{
-      if(localStorage.getItem(localMarker)==='1') return true;
-    }catch(e){}
-    const legacy=await fsGet('orders');
-    if(!legacy.ok){
-      // If V2 already contains orders, do not block the application because
-      // the legacy backup is unavailable (for example after security rules
-      // were tightened). Mark migration complete without deleting V2.
-      try{
-        const existing = await ordersCollectionRef().limit(1).get();
-        if(!existing.empty){
-          try{localStorage.setItem(localMarker,'1');}catch(e){}
-          return true;
-        }
-      }catch(e){}
-      return false;
-    }
-    let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
-    if(!Array.isArray(orders)) orders=[];
-    for(let i=0;i<orders.length;i+=400){
-      const batch=db.batch(), chunk=orders.slice(i,i+400);
-      chunk.forEach(o=>{if(o&&o.id) batch.set(orderDocRef(o.id),{...o,_migratedAt:Date.now()},{merge:true});});
-      if(chunk.length) await batch.commit();
-    }
-    try{localStorage.setItem(localMarker,'1');}catch(e){}
-    return true;
-  }catch(e){console.error('Orders V2 migration failed',e);return false;}
+  // Legacy cafeData/orders was permanently removed after migration.
+  // Never read or recreate it again.
+  return true;
 }
 async function loadOrdersV2(){
   try{
-    // Archived paid orders are historical and excluded from normal reads.
-    const snap=await ordersCollectionRef().where('archived','==',false).get(), orders=[];
-    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
+    // Do NOT query the whole orders collection. New active orders do not always
+    // contain archived:false, so querying archived==false would hide them.
+    // Instead, read only the two live states used by this app: active and paid.
+    const [activeSnap, paidSnap] = await Promise.all([
+      ordersCollectionRef().where('status','==','active').get(),
+      ordersCollectionRef().where('status','==','paid').where('archived','==',false).get()
+    ]);
+    const byId=new Map();
+    [activeSnap,paidSnap].forEach(snap=>snap.forEach(d=>{
+      const x=d.data()||{};
+      delete x._migratedAt;
+      byId.set(d.id,{...x,id:x.id||d.id});
+    }));
+    const orders=Array.from(byId.values());
     orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
     return {ok:true,value:orders};
   }catch(e){
-    console.error('loadOrdersV2 filtered read failed',e);
+    console.error('loadOrdersV2 live queries failed',e);
     return {ok:false,value:null};
   }
 }
@@ -1008,20 +989,41 @@ function setupRealtimeSync(){
   teardownRealtimeSync();
   migrateOrdersToV2().catch(console.error);
   try{
-    const unsub=ordersCollectionRef().where('archived','==',false).onSnapshot(snap=>{
-      if(!state.role)return;
-      const parsed=[];
-      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
+    const liveById = new Map();
+    const applyLive = () => {
+      const parsed = Array.from(liveById.values());
       parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-      state.orders=parsed;
-      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+      state.orders = parsed;
+      state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+      state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
       if(state.activeTable===null && !isActivelyEditingFormField())render();
-    },err=>{
-      console.error('Orders realtime error',err);
-      clearTimeout(__resubscribeTimer);
-      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
-    });
-    __realtimeUnsubs.push(unsub);
+    };
+    const attachLive = (query, label) => {
+      const unsub = query.onSnapshot(snap=>{
+        // Snapshot represents the complete result of this query, so first remove
+        // previous documents belonging to the same status group.
+        const ids = new Set();
+        snap.forEach(d=>{
+          const x=d.data()||{}; delete x._migratedAt;
+          const order={...x,id:x.id||d.id};
+          liveById.set(d.id,order); ids.add(d.id);
+        });
+        // Remove stale docs from this query group.
+        for(const [id,o] of liveById){
+          if((label==='active' && o.status==='active') || (label==='paid' && o.status==='paid' && o.archived===false)){
+            if(!ids.has(id)) liveById.delete(id);
+          }
+        }
+        applyLive();
+      },err=>{
+        console.error('Orders realtime error ('+label+')',err);
+        clearTimeout(__resubscribeTimer);
+        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+      });
+      __realtimeUnsubs.push(unsub);
+    };
+    attachLive(ordersCollectionRef().where('status','==','active'),'active');
+    attachLive(ordersCollectionRef().where('status','==','paid').where('archived','==',false),'paid');
   }catch(e){console.error('orders listener attach failed',e);}
   const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
   fields.forEach(([key,stateKey])=>{
