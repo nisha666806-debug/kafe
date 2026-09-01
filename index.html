@@ -5098,48 +5098,9 @@ window.addEventListener('online', ()=>{
    launch — a fix shipped after that stays invisible until the person happens to fully close
    and reopen the app. Periodically check a small version file (never cached) and, if it no
    longer matches what's running, show a banner offering an immediate reload. */
-let __updateBannerShown = false;
-// Fully clears everything the browser cached for this app — unregisters the service worker
-// (so a stale worker never intercepts requests again) and empties every Cache Storage bucket
-// it created — then reloads. This is what staff used to have to do by hand in Chrome's
-// settings; doing it here means the "Навсозӣ" button alone is enough, every time.
-async function hardRefreshApp(){
-  try{
-    if('serviceWorker' in navigator){
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r=>r.unregister()));
-    }
-    if('caches' in window){
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k=>caches.delete(k)));
-    }
-  }catch(e){ console.error('hardRefreshApp cleanup failed', e); }
-  window.location.reload();
-}
-function showUpdateBanner(){
-  if(__updateBannerShown) return;
-  __updateBannerShown = true;
-  const bar = document.createElement('div');
-  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999;background:var(--ink);color:var(--paper);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;box-shadow:0 -2px 10px rgba(0,0,0,.2);';
-  bar.innerHTML = `<span>🔄 Нусхаи нави барнома дастрас аст</span><button style="background:var(--brick);color:#fff;border:none;padding:8px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;">Навсозӣ</button>`;
-  bar.querySelector('button').addEventListener('click', hardRefreshApp);
-  document.body.appendChild(bar);
-}
-async function checkForUpdate(){
-  try{
-    const res = await fetch('./version.json?t=' + Date.now(), {cache:'no-store'});
-    if(!res.ok) return;
-    const data = await res.json();
-    if(data && data.version && data.version !== APP_VERSION) showUpdateBanner();
-  }catch(e){}
-}
-setInterval(checkForUpdate, 3*60*1000); // every 3 minutes
-document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState==='visible') checkForUpdate();
-});
-window.addEventListener('online', checkForUpdate);
-setTimeout(checkForUpdate, 5000); // one soon after launch too, not just on the long timer
-
+// Automatic update popup disabled.
+// Manual hard refresh button remains available for staff when needed.
+async function checkForUpdate(){ return false; }
 init();
 
 if('serviceWorker' in navigator){
