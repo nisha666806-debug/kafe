@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-04-V56-SERVER-RESUME-SYNC';
+const CACHE_NAME = 'kafe-shell-2026-09-04-V57-UPDATE-REALTIME-FIX';
 
 const APP_SHELL = [
   './',
@@ -9,10 +9,6 @@ const APP_SHELL = [
   './icon-512.png'
 ];
 
-/* ================================
-   INSTALL
-================================ */
-
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
@@ -21,44 +17,26 @@ self.addEventListener('install', event => {
   );
 });
 
-
-/* ================================
-   ACTIVATE
-================================ */
-
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => {
-        return Promise.all(
+      .then(keys =>
+        Promise.all(
           keys
             .filter(key => key !== CACHE_NAME)
             .map(key => caches.delete(key))
-        );
-      })
+        )
+      )
       .then(() => self.clients.claim())
   );
 });
 
-
-/* ================================
-   FETCH
-================================ */
-
 self.addEventListener('fetch', event => {
-
-  if (event.request.method !== 'GET') {
-    return;
-  }
+  if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
 
-
-  /* --------------------------------
-     FIREBASE / FIRESTORE
-     NEVER CACHE
-  -------------------------------- */
-
+  // Firebase / Firestore ҳеҷ гоҳ cache намешавад
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -68,34 +46,28 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // version.json ҳамеша аз интернет гирифта мешавад
+  // то системаи муайян кардани навсозӣ дуруст кор кунад
+  if (url.pathname.endsWith('/version.json')) {
+    return;
+  }
 
-  /* --------------------------------
-     APPLICATION FILES
-     NETWORK FIRST
-  -------------------------------- */
-
+  // Аввал Network, агар интернет набошад -> Cache
   event.respondWith(
     fetch(event.request)
       .then(response => {
-
         if (response && response.ok) {
-
-          const responseCopy = response.clone();
+          const copy = response.clone();
 
           caches.open(CACHE_NAME)
-            .then(cache => {
-              cache.put(event.request, responseCopy);
-            })
+            .then(cache => cache.put(event.request, copy))
             .catch(() => {});
         }
 
         return response;
       })
-
       .catch(() => {
-
         return caches.match(event.request);
-
       })
   );
 });
