@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-03-V55-REALTIME-RESUME-SAFE';
+const CACHE_NAME = 'kafe-shell-2026-09-04-V56-SERVER-RESUME-SYNC';
 
 const APP_SHELL = [
   './',
@@ -47,7 +47,6 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
 
-  // Only handle GET requests
   if (event.request.method !== 'GET') {
     return;
   }
@@ -71,24 +70,21 @@ self.addEventListener('fetch', event => {
 
 
   /* --------------------------------
-     APP FILES
+     APPLICATION FILES
      NETWORK FIRST
   -------------------------------- */
 
   event.respondWith(
-
     fetch(event.request)
-
       .then(response => {
 
-        // Save only successful normal web responses
         if (response && response.ok) {
 
           const responseCopy = response.clone();
 
           caches.open(CACHE_NAME)
             .then(cache => {
-              return cache.put(event.request, responseCopy);
+              cache.put(event.request, responseCopy);
             })
             .catch(() => {});
         }
@@ -98,11 +94,8 @@ self.addEventListener('fetch', event => {
 
       .catch(() => {
 
-        // If internet is unavailable,
-        // use cached application shell
         return caches.match(event.request);
 
       })
-
   );
 });
