@@ -1,5 +1,4 @@
 const CACHE_NAME = 'kafe-shell-2026-09-05-V58-UPDATE-FIX';
-
 const APP_SHELL = [
   './',
   './index.html',
@@ -7,11 +6,9 @@ const APP_SHELL = [
   './icon-192.png',
   './icon-512.png'
 ];
-
 function isFirebaseRequest(request) {
   try {
     const url = new URL(request.url);
-
     return (
       url.hostname.includes('firebaseio.com') ||
       url.hostname.includes('firebaseapp.com') ||
@@ -23,7 +20,6 @@ function isFirebaseRequest(request) {
     return false;
   }
 }
-
 function isVersionRequest(request) {
   try {
     const url = new URL(request.url);
@@ -32,12 +28,9 @@ function isVersionRequest(request) {
     return false;
   }
 }
-
-
 /* =========================
    INSTALL
 ========================= */
-
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
@@ -48,12 +41,9 @@ self.addEventListener('install', event => {
       })
   );
 });
-
-
 /* =========================
    ACTIVATE
 ========================= */
-
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
@@ -70,25 +60,19 @@ self.addEventListener('activate', event => {
       })
   );
 });
-
-
 /* =========================
    FETCH
 ========================= */
-
 self.addEventListener('fetch', event => {
   const request = event.request;
-
   // Танҳо GET
   if (request.method !== 'GET') {
     return;
   }
-
   // Firebase / Firestore ҳеҷ вақт cache нашавад
   if (isFirebaseRequest(request)) {
     return;
   }
-
   // version.json ҳамеша аз сервер гирифта шавад
   if (isVersionRequest(request)) {
     event.respondWith(
@@ -108,22 +92,17 @@ self.addEventListener('fetch', event => {
         );
       })
     );
-
     return;
   }
-
-
   /*
    * NETWORK FIRST
    *
    * Аввал сервер.
    * Агар интернет набошад → cache.
    */
-
   event.respondWith(
     fetch(request)
       .then(response => {
-
         if (
           !response ||
           response.status !== 200 ||
@@ -131,26 +110,20 @@ self.addEventListener('fetch', event => {
         ) {
           return response;
         }
-
         const responseCopy = response.clone();
-
         caches.open(CACHE_NAME)
           .then(cache => {
             return cache.put(request, responseCopy);
           })
           .catch(() => {});
-
         return response;
       })
-
       .catch(() => {
         return caches.match(request)
           .then(cachedResponse => {
-
             if (cachedResponse) {
               return cachedResponse;
             }
-
             // Агар файл дар cache набошад,
             // index.html ҳамчун fallback
             return caches.match('./index.html');
@@ -158,20 +131,14 @@ self.addEventListener('fetch', event => {
       })
   );
 });
-
-
 /* =========================
    MESSAGE
 ========================= */
-
 self.addEventListener('message', event => {
-
   if (!event.data) {
     return;
   }
-
   if (event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
-
 });
