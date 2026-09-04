@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-01-V54.1-REPORT-CLEANUP-FIX';
+const CACHE_NAME = 'kafe-shell-2026-09-03-V55-REALTIME-RESUME-SAFE';
 
 const APP_SHELL = [
   './',
@@ -9,6 +9,10 @@ const APP_SHELL = [
   './icon-512.png'
 ];
 
+/* ================================
+   INSTALL
+================================ */
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
@@ -16,6 +20,11 @@ self.addEventListener('install', event => {
       .then(() => self.skipWaiting())
   );
 });
+
+
+/* ================================
+   ACTIVATE
+================================ */
 
 self.addEventListener('activate', event => {
   event.waitUntil(
@@ -31,14 +40,26 @@ self.addEventListener('activate', event => {
   );
 });
 
+
+/* ================================
+   FETCH
+================================ */
+
 self.addEventListener('fetch', event => {
+
+  // Only handle GET requests
   if (event.request.method !== 'GET') {
     return;
   }
 
   const url = new URL(event.request.url);
 
-  // Firebase / Firestore NEVER goes through the cache.
+
+  /* --------------------------------
+     FIREBASE / FIRESTORE
+     NEVER CACHE
+  -------------------------------- */
+
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -48,21 +69,40 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+
+  /* --------------------------------
+     APP FILES
+     NETWORK FIRST
+  -------------------------------- */
+
   event.respondWith(
+
     fetch(event.request)
+
       .then(response => {
+
+        // Save only successful normal web responses
         if (response && response.ok) {
-          const copy = response.clone();
+
+          const responseCopy = response.clone();
 
           caches.open(CACHE_NAME)
-            .then(cache => cache.put(event.request, copy))
+            .then(cache => {
+              return cache.put(event.request, responseCopy);
+            })
             .catch(() => {});
         }
 
         return response;
       })
+
       .catch(() => {
+
+        // If internet is unavailable,
+        // use cached application shell
         return caches.match(event.request);
+
       })
+
   );
 });
