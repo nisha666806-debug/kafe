@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-04-V56-SERVER-RESUME-SYNC';
+const APP_VERSION = '2026-09-04-V57-UPDATE-REALTIME-FIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -5119,13 +5119,50 @@ window.addEventListener('pageshow', ()=> refreshAfterResume('pageshow'));
 window.addEventListener('online', ()=> refreshAfterResume('online'));
 
 /* ============ UPDATE CHECK ============
-   A PWA that's been left open for hours (a whole shift) keeps running the JS it loaded at
-   launch — a fix shipped after that stays invisible until the person happens to fully close
-   and reopen the app. Periodically check a small version file (never cached) and, if it no
-   longer matches what's running, show a banner offering an immediate reload. */
-// Automatic update popup disabled.
-// Manual hard refresh button remains available for staff when needed.
-async function checkForUpdate(){ return false; }
+   Detect a newly deployed build even when the PWA has been open for hours. */
+let __updateBannerShown = false;
+
+async function checkForUpdate(){
+  try{
+    const res = await fetch('./version.json?update_check=' + Date.now(), {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' }
+    });
+    if(!res.ok) return false;
+    const data = await res.json();
+    const remoteVersion = String(data && data.version || '').trim();
+    if(remoteVersion && remoteVersion !== APP_VERSION){
+      showUpdateBanner();
+      return true;
+    }
+  }catch(e){
+    console.warn('Update check failed', e);
+  }
+  return false;
+}
+
+function showUpdateBanner(){
+  if(__updateBannerShown || document.getElementById('appUpdateBanner')) return;
+  __updateBannerShown = true;
+  const bar = document.createElement('div');
+  bar.id = 'appUpdateBanner';
+  bar.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:99999;background:var(--ink);color:var(--paper);padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.25);';
+  bar.innerHTML = '<span style="font-weight:700">🔄 Нусхаи нави барнома дастрас аст</span><button type="button" style="background:var(--brick);color:#fff;border:none;padding:9px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;cursor:pointer">Навсозӣ</button>';
+  bar.querySelector('button').addEventListener('click', async ()=>{
+    const btn = bar.querySelector('button');
+    if(btn){ btn.disabled=true; btn.textContent='Навсозӣ...'; }
+    await hardRefreshApp();
+  });
+  document.body.appendChild(bar);
+}
+
+setTimeout(checkForUpdate, 3000);
+setInterval(checkForUpdate, 3 * 60 * 1000);
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible') checkForUpdate();
+});
+window.addEventListener('online', checkForUpdate);
+
 init();
 
 if('serviceWorker' in navigator){
