@@ -8,11 +8,6 @@ const APP_SHELL = [
   './icon-512.png'
 ];
 
-/*
-  Firebase / Firestore is NEVER cached.
-  version.json is NEVER cached.
-*/
-
 function isFirebaseRequest(request) {
   try {
     const url = new URL(request.url);
@@ -84,21 +79,17 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
 
+  // Танҳо GET
   if (request.method !== 'GET') {
     return;
   }
 
-  /*
-    NEVER intercept Firebase / Firestore.
-  */
+  // Firebase / Firestore ҳеҷ вақт cache нашавад
   if (isFirebaseRequest(request)) {
     return;
   }
 
-  /*
-    version.json MUST always go directly to the server.
-    It is intentionally not cached.
-  */
+  // version.json ҳамеша аз сервер гирифта шавад
   if (isVersionRequest(request)) {
     event.respondWith(
       fetch(request, {
@@ -121,10 +112,14 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+
   /*
-    Network first:
-    Network -> Cache fallback
-  */
+   * NETWORK FIRST
+   *
+   * Аввал сервер.
+   * Агар интернет набошад → cache.
+   */
+
   event.respondWith(
     fetch(request)
       .then(response => {
@@ -137,16 +132,17 @@ self.addEventListener('fetch', event => {
           return response;
         }
 
-        const copy = response.clone();
+        const responseCopy = response.clone();
 
         caches.open(CACHE_NAME)
           .then(cache => {
-            cache.put(request, copy).catch(() => {});
+            return cache.put(request, responseCopy);
           })
           .catch(() => {});
 
         return response;
       })
+
       .catch(() => {
         return caches.match(request)
           .then(cachedResponse => {
@@ -155,6 +151,8 @@ self.addEventListener('fetch', event => {
               return cachedResponse;
             }
 
+            // Агар файл дар cache набошад,
+            // index.html ҳамчун fallback
             return caches.match('./index.html');
           });
       })
