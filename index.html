@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-03-V55-REALTIME-RESUME-SAFE';
+const APP_VERSION = '2026-09-04-V56-SERVER-RESUME-SYNC';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -355,14 +355,15 @@ async function migrateOrdersToV2(){
   // Never read or recreate it again.
   return true;
 }
-async function loadOrdersV2(){
+async function loadOrdersV2(options){
+  const source = options && options.source ? options.source : null;
   try{
-    // Do NOT query the whole orders collection. New active orders do not always
-    // contain archived:false, so querying archived==false would hide them.
-    // Instead, read only the two live states used by this app: active and paid.
+    const getOptions = source ? {source} : undefined;
+    // Read both live states from the server when explicitly requested after resume.
+    // This prevents a suspended mobile tab from restoring an old Firestore cache snapshot.
     const [activeSnap, paidSnap] = await Promise.all([
-      ordersCollectionRef().where('status','==','active').get(),
-      ordersCollectionRef().where('status','==','paid').get()
+      ordersCollectionRef().where('status','==','active').get(getOptions),
+      ordersCollectionRef().where('status','==','paid').get(getOptions)
     ]);
     const byId=new Map();
     [activeSnap,paidSnap].forEach(snap=>snap.forEach(d=>{
@@ -467,9 +468,9 @@ function clearSession(){
 // FAILED (network blip, etc.) — callers must NOT treat this as "empty" or they will
 // overwrite real data with defaults. This distinction is critical: a transient failure
 // must never be allowed to look like "this is a brand new café".
-async function fsGet(key){
+async function fsGet(key, options){
   try{
-    const snap = await docRef(key).get();
+    const snap = await docRef(key).get(options && options.source ? {source:options.source} : undefined);
     return {ok:true, value: snap.exists ? snap.data().value : null};
   }catch(e){ console.error('fsGet failed', key, e); return {ok:false, value:null}; }
 }
@@ -481,12 +482,12 @@ async function fsSet(key, value){
 }
 
 /* ============ STORAGE HELPERS ============ */
-async function loadAll(){
+async function loadAll(options){
   // Orders are intentionally excluded here. They live in the V2 subcollection
   // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
   const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
-    const r = await fsGet(key);
+    const r = await fsGet(key, options);
     if(!r.ok){ out.failed[outKey] = true; return; }
     try{ out[outKey] = r.value ? JSON.parse(r.value) : null; }
     catch(e){ out.failed[outKey] = true; }
@@ -1020,31 +1021,50 @@ function setupRealtimeSync(){
 // Event-driven recovery for phones that were backgrounded/locked. It performs one fresh
 // Firestore read when the app returns, then recreates listeners. No periodic polling is used.
 let __resumeRefreshInFlight=false;
+let __lastResumeRefreshAt=0;
 async function refreshAfterResume(reason){
   if(__resumeRefreshInFlight || !state.role || !state.loaded || state.loadError || state.needsSetup) return;
   if(typeof navigator!=='undefined' && navigator.onLine===false) return;
-  if(isActivelyEditingFormField()) return;
+
+  // Mobile browsers can fire visibilitychange/pageshow/focus together. Do not run
+  // three simultaneous Firestore reads, but always allow a fresh read after a short gap.
+  const now=Date.now();
+  if(now-__lastResumeRefreshAt<1200) return;
+  __lastResumeRefreshAt=now;
   __resumeRefreshInFlight=true;
+
   try{
-    const all=await loadAll();
-    if(Object.keys(all.failed||{}).some(k=>all.failed[k])) return;
-    const ordersResult=await loadOrdersV2();
+    // Orders are the critical shared state. Read them explicitly from the SERVER,
+    // not from IndexedDB/Firestore's local cache, so orders created by another phone
+    // while this phone was suspended are present immediately after resume.
+    const ordersResult=await loadOrdersV2({source:'server'});
     if(ordersResult.ok){
       state.orders=ordersResult.value||[];
       state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
       state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+      if(state.activeTable===null) render();
     }
-    ['menu','settings','reservations','tables','oshStock','accounts','inventory','activityLog','bonuses','dailyClosures'].forEach(k=>{
-      if(all[k]!==null && all[k]!==undefined) state[k]=all[k];
-    });
-    if(state.activeTable===null && !isActivelyEditingFormField()) render();
+
+    // Refresh shared single-document state from SERVER too. Never replace a field with
+    // null/empty data when its read failed.
+    const all=await loadAll({source:'server'});
+    if(!Object.keys(all.failed||{}).some(k=>all.failed[k])){
+      ['menu','settings','reservations','tables','oshStock','accounts','inventory','activityLog','bonuses','dailyClosures'].forEach(k=>{
+        if(all[k]!==null && all[k]!==undefined) state[k]=all[k];
+      });
+      if(state.activeTable===null) render();
+    }
+
+    // Recreate listeners after the server catch-up. This is especially important on
+    // Android/iOS after the browser has suspended the tab's websocket connection.
     setupRealtimeSync();
   }catch(e){
     console.error('Resume refresh failed ('+reason+')',e);
     setupRealtimeSync();
-  }finally{ __resumeRefreshInFlight=false; }
+  }finally{
+    __resumeRefreshInFlight=false;
+  }
 }
-
 function startSyncWatchdog(){
   // onSnapshot handles real-time sync — no polling needed.
   // Previously this ran every 3s causing 1200+ Firebase reads/hour per device.
