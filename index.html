@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V54.1-REPORT-CLEANUP-FIX';
+const APP_VERSION = '2026-09-03-V55-REALTIME-RESUME-SAFE';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -523,26 +523,13 @@ async function saveMenu(menu){
 async function saveOrders(orders){
   if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
   const list = Array.isArray(orders) ? orders : [];
-  const previous = state.__lastKnownOrderIds || new Set();
-  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
-
-  // Save/update every current order first.
+  // NEVER delete remote orders merely because this phone has a temporary empty/incomplete
+  // state after background suspension, cache clearing, or a reconnect. Explicit delete/archive
+  // actions are responsible for deletion; normal saving only writes current documents.
   const ok = await saveOrdersV2(list);
   if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-
-  // Only delete documents that THIS device previously knew about and that the
-  // user intentionally removed from its local state. Never sweep unknown remote
-  // orders here, because another device may have just created them.
-  for(const id of previous){
-    if(!current.has(String(id))){
-      const deleted = await deleteOrderV2(id);
-      if(!deleted){
-        console.warn('Could not delete order document',id);
-      }
-    }
-  }
-  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
-  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+  state.__lastKnownOrderIds = new Set(list.filter(o=>o&&o.id).map(o=>o.id));
+  state.__lastKnownOrderSnapshots = new Map(list.filter(o=>o&&o.id).map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
   return true;
 }
 async function saveSettings(settings){
@@ -990,41 +977,28 @@ function setupRealtimeSync(){
   teardownRealtimeSync();
   migrateOrdersToV2().catch(console.error);
   try{
-    const liveById = new Map();
-    const applyLive = () => {
-      const parsed = Array.from(liveById.values());
-      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-      state.orders = parsed;
-      state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-      state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-      if(state.activeTable===null && !isActivelyEditingFormField())render();
-    };
-    const attachLive = (query, label) => {
-      const unsub = query.onSnapshot(snap=>{
-        // Snapshot represents the complete result of this query, so first remove
-        // previous documents belonging to the same status group.
-        const ids = new Set();
-        snap.forEach(d=>{
-          const x=d.data()||{}; delete x._migratedAt;
-          const order={...x,id:x.id||d.id};
-          liveById.set(d.id,order); ids.add(d.id);
-        });
-        // Remove stale docs from this query group.
-        for(const [id,o] of liveById){
-          if((label==='active' && o.status==='active') || (label==='paid' && o.status==='paid' && o.archived===false)){
-            if(!ids.has(id)) liveById.delete(id);
-          }
-        }
-        applyLive();
-      },err=>{
-        console.error('Orders realtime error ('+label+')',err);
-        clearTimeout(__resubscribeTimer);
-        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+    // One listener for both active and paid orders. This avoids race/stale-state bugs when
+    // a cashier changes an order from active -> paid and another phone is listening too.
+    const ordersQuery = ordersCollectionRef().where('status','in',['active','paid']);
+    const unsub = ordersQuery.onSnapshot(snap=>{
+      const parsed=[];
+      snap.forEach(d=>{
+        const x=d.data()||{};
+        delete x._migratedAt;
+        if(x.status==='paid' && x.archived===true) return;
+        parsed.push({...x,id:x.id||d.id});
       });
-      __realtimeUnsubs.push(unsub);
-    };
-    attachLive(ordersCollectionRef().where('status','==','active'),'active');
-    attachLive(ordersCollectionRef().where('status','==','paid'),'paid');
+      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+      state.orders=parsed;
+      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(parsed.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+      if(state.activeTable===null && !isActivelyEditingFormField()) render();
+    },err=>{
+      console.error('Orders realtime error',err);
+      clearTimeout(__resubscribeTimer);
+      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
+    });
+    __realtimeUnsubs.push(unsub);
   }catch(e){console.error('orders listener attach failed',e);}
   const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures']];
   fields.forEach(([key,stateKey])=>{
@@ -1042,6 +1016,35 @@ function setupRealtimeSync(){
   });
   startSyncWatchdog();
 }
+
+// Event-driven recovery for phones that were backgrounded/locked. It performs one fresh
+// Firestore read when the app returns, then recreates listeners. No periodic polling is used.
+let __resumeRefreshInFlight=false;
+async function refreshAfterResume(reason){
+  if(__resumeRefreshInFlight || !state.role || !state.loaded || state.loadError || state.needsSetup) return;
+  if(typeof navigator!=='undefined' && navigator.onLine===false) return;
+  if(isActivelyEditingFormField()) return;
+  __resumeRefreshInFlight=true;
+  try{
+    const all=await loadAll();
+    if(Object.keys(all.failed||{}).some(k=>all.failed[k])) return;
+    const ordersResult=await loadOrdersV2();
+    if(ordersResult.ok){
+      state.orders=ordersResult.value||[];
+      state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+      state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+    }
+    ['menu','settings','reservations','tables','oshStock','accounts','inventory','activityLog','bonuses','dailyClosures'].forEach(k=>{
+      if(all[k]!==null && all[k]!==undefined) state[k]=all[k];
+    });
+    if(state.activeTable===null && !isActivelyEditingFormField()) render();
+    setupRealtimeSync();
+  }catch(e){
+    console.error('Resume refresh failed ('+reason+')',e);
+    setupRealtimeSync();
+  }finally{ __resumeRefreshInFlight=false; }
+}
+
 function startSyncWatchdog(){
   // onSnapshot handles real-time sync — no polling needed.
   // Previously this ran every 3s causing 1200+ Firebase reads/hour per device.
@@ -2089,6 +2092,21 @@ function attachLoginEvents(){
   if(pw) pw.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
   const un = document.getElementById('loginUsername');
   if(un) un.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+}
+
+async function hardRefreshApp(){
+  // Browser/PWA cache only. This function never reads, writes, or deletes Firestore data.
+  try{
+    if('serviceWorker' in navigator){
+      const regs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister()));
+    }
+    if('caches' in window){
+      const keys=await caches.keys();
+      await Promise.all(keys.map(k=>caches.delete(k)));
+    }
+  }catch(e){ console.error('hardRefreshApp cleanup failed',e); }
+  window.location.reload();
 }
 
 function attachCommonEvents(){
@@ -5074,24 +5092,11 @@ document.addEventListener('focusout', ()=>{
 // for Firestore's listeners to reconnect on their own) so the screen is correct within moments
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
-  // When the app comes back to foreground, just re-render from current state.
-  // onSnapshot listeners reconnect automatically; a full re-read is not needed
-  // and was causing a surge of reads every time the phone screen was unlocked.
-  if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
-    render();
-  }
+  if(document.visibilityState==='visible') refreshAfterResume('visibilitychange');
 });
-
-// The browser fires this the moment it detects the connection is back after being down —
-// catch up immediately rather than waiting for the next watchdog tick.
-window.addEventListener('online', ()=>{
-  // Connection restored: re-attach realtime listeners so Firestore reconnects cleanly.
-  // A full pollRefresh() here caused a spike of reads every network reconnect.
-  if(state.role && state.loaded && !state.loadError && !state.needsSetup){
-    teardownRealtimeSync();
-    setupRealtimeSync();
-  }
-});
+window.addEventListener('focus', ()=> refreshAfterResume('focus'));
+window.addEventListener('pageshow', ()=> refreshAfterResume('pageshow'));
+window.addEventListener('online', ()=> refreshAfterResume('online'));
 
 /* ============ UPDATE CHECK ============
    A PWA that's been left open for hours (a whole shift) keeps running the JS it loaded at
