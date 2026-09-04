@@ -1,19 +1,16 @@
-const CACHE_NAME = 'kafe-shell-2026-09-04-V57-UPDATE-REALTIME-FIX';
+const CACHE_NAME = 'kafe-shell-2026-09-05-V58-UPDATE-FIX';
 
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
-  './version.json',
   './icon-192.png',
   './icon-512.png'
 ];
 
 /*
-  IMPORTANT:
-  Firebase / Firestore traffic is NEVER cached.
-  version.json is also bypassed so the update checker can always
-  receive the latest version from the server.
+  Firebase / Firestore is NEVER cached.
+  version.json is NEVER cached.
 */
 
 function isFirebaseRequest(request) {
@@ -49,14 +46,10 @@ function isVersionRequest(request) {
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => {
-        return cache.addAll(APP_SHELL);
-      })
-      .then(() => {
-        return self.skipWaiting();
-      })
+      .then(cache => cache.addAll(APP_SHELL))
+      .then(() => self.skipWaiting())
       .catch(error => {
-        console.error('Service Worker install failed:', error);
+        console.error('SW install failed:', error);
       })
   );
 });
@@ -76,11 +69,9 @@ self.addEventListener('activate', event => {
             .map(name => caches.delete(name))
         );
       })
-      .then(() => {
-        return self.clients.claim();
-      })
+      .then(() => self.clients.claim())
       .catch(error => {
-        console.error('Service Worker activate failed:', error);
+        console.error('SW activate failed:', error);
       })
   );
 });
@@ -93,47 +84,51 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
 
-  /*
-    Only handle GET requests.
-    POST/PUT/PATCH/DELETE requests must go directly to the network.
-  */
   if (request.method !== 'GET') {
     return;
   }
 
   /*
-    Never cache Firebase / Firestore requests.
+    NEVER intercept Firebase / Firestore.
   */
   if (isFirebaseRequest(request)) {
     return;
   }
 
   /*
-    version.json must ALWAYS come from the network.
-    This is important for detecting new app versions.
+    version.json MUST always go directly to the server.
+    It is intentionally not cached.
   */
   if (isVersionRequest(request)) {
     event.respondWith(
       fetch(request, {
         cache: 'no-store'
+      }).catch(() => {
+        return new Response(
+          JSON.stringify({
+            version: ''
+          }),
+          {
+            status: 503,
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          }
+        );
       })
     );
+
     return;
   }
 
   /*
-    Network-first strategy:
-    1. Try network.
-    2. If network fails, use cache.
-    3. Save successful app-file responses into cache.
+    Network first:
+    Network -> Cache fallback
   */
   event.respondWith(
     fetch(request)
       .then(response => {
 
-        /*
-          Do not cache invalid responses.
-        */
         if (
           !response ||
           response.status !== 200 ||
@@ -142,33 +137,24 @@ self.addEventListener('fetch', event => {
           return response;
         }
 
-        /*
-          Clone response because one copy is returned to browser
-          and another copy is stored in cache.
-        */
-        const responseToCache = response.clone();
+        const copy = response.clone();
 
         caches.open(CACHE_NAME)
           .then(cache => {
-            cache.put(request, responseToCache).catch(() => {});
+            cache.put(request, copy).catch(() => {});
           })
           .catch(() => {});
 
         return response;
       })
       .catch(() => {
-        /*
-          Offline fallback.
-        */
         return caches.match(request)
           .then(cachedResponse => {
+
             if (cachedResponse) {
               return cachedResponse;
             }
 
-            /*
-              If requested page is not cached, try index.html.
-            */
             return caches.match('./index.html');
           });
       })
@@ -181,9 +167,13 @@ self.addEventListener('fetch', event => {
 ========================= */
 
 self.addEventListener('message', event => {
-  if (!event.data) return;
+
+  if (!event.data) {
+    return;
+  }
 
   if (event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
+
 });
