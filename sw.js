@@ -9,65 +9,181 @@ const APP_SHELL = [
   './icon-512.png'
 ];
 
+/*
+  IMPORTANT:
+  Firebase / Firestore traffic is NEVER cached.
+  version.json is also bypassed so the update checker can always
+  receive the latest version from the server.
+*/
+
+function isFirebaseRequest(request) {
+  try {
+    const url = new URL(request.url);
+
+    return (
+      url.hostname.includes('firebaseio.com') ||
+      url.hostname.includes('firebaseapp.com') ||
+      url.hostname.includes('googleapis.com') ||
+      url.hostname.includes('firestore.googleapis.com') ||
+      url.hostname.includes('firebase.google.com')
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function isVersionRequest(request) {
+  try {
+    const url = new URL(request.url);
+    return url.pathname.endsWith('/version.json');
+  } catch (e) {
+    return false;
+  }
+}
+
+
+/* =========================
+   INSTALL
+========================= */
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
+      .then(cache => {
+        return cache.addAll(APP_SHELL);
+      })
+      .then(() => {
+        return self.skipWaiting();
+      })
+      .catch(error => {
+        console.error('Service Worker install failed:', error);
+      })
   );
 });
+
+
+/* =========================
+   ACTIVATE
+========================= */
 
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys =>
-        Promise.all(
-          keys
-            .filter(key => key !== CACHE_NAME)
-            .map(key => caches.delete(key))
-        )
-      )
-      .then(() => self.clients.claim())
+      .then(cacheNames => {
+        return Promise.all(
+          cacheNames
+            .filter(name => name !== CACHE_NAME)
+            .map(name => caches.delete(name))
+        );
+      })
+      .then(() => {
+        return self.clients.claim();
+      })
+      .catch(error => {
+        console.error('Service Worker activate failed:', error);
+      })
   );
 });
 
+
+/* =========================
+   FETCH
+========================= */
+
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
+  const request = event.request;
 
-  const url = new URL(event.request.url);
-
-  // Firebase / Firestore ҳеҷ гоҳ cache намешавад
-  if (
-    url.hostname.includes('googleapis.com') ||
-    url.hostname.includes('firebaseio.com') ||
-    url.hostname.includes('firebaseapp.com') ||
-    url.hostname.includes('firestore.googleapis.com')
-  ) {
+  /*
+    Only handle GET requests.
+    POST/PUT/PATCH/DELETE requests must go directly to the network.
+  */
+  if (request.method !== 'GET') {
     return;
   }
 
-  // version.json ҳамеша аз интернет гирифта мешавад
-  // то системаи муайян кардани навсозӣ дуруст кор кунад
-  if (url.pathname.endsWith('/version.json')) {
+  /*
+    Never cache Firebase / Firestore requests.
+  */
+  if (isFirebaseRequest(request)) {
     return;
   }
 
-  // Аввал Network, агар интернет набошад -> Cache
+  /*
+    version.json must ALWAYS come from the network.
+    This is important for detecting new app versions.
+  */
+  if (isVersionRequest(request)) {
+    event.respondWith(
+      fetch(request, {
+        cache: 'no-store'
+      })
+    );
+    return;
+  }
+
+  /*
+    Network-first strategy:
+    1. Try network.
+    2. If network fails, use cache.
+    3. Save successful app-file responses into cache.
+  */
   event.respondWith(
-    fetch(event.request)
+    fetch(request)
       .then(response => {
-        if (response && response.ok) {
-          const copy = response.clone();
 
-          caches.open(CACHE_NAME)
-            .then(cache => cache.put(event.request, copy))
-            .catch(() => {});
+        /*
+          Do not cache invalid responses.
+        */
+        if (
+          !response ||
+          response.status !== 200 ||
+          response.type === 'opaque'
+        ) {
+          return response;
         }
+
+        /*
+          Clone response because one copy is returned to browser
+          and another copy is stored in cache.
+        */
+        const responseToCache = response.clone();
+
+        caches.open(CACHE_NAME)
+          .then(cache => {
+            cache.put(request, responseToCache).catch(() => {});
+          })
+          .catch(() => {});
 
         return response;
       })
       .catch(() => {
-        return caches.match(event.request);
+        /*
+          Offline fallback.
+        */
+        return caches.match(request)
+          .then(cachedResponse => {
+            if (cachedResponse) {
+              return cachedResponse;
+            }
+
+            /*
+              If requested page is not cached, try index.html.
+            */
+            return caches.match('./index.html');
+          });
       })
   );
+});
+
+
+/* =========================
+   MESSAGE
+========================= */
+
+self.addEventListener('message', event => {
+  if (!event.data) return;
+
+  if (event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
