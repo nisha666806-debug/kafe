@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-05-V58-UPDATE-FIX';
+const APP_VERSION = '2026-09-01-V55-TECH-CLEAN';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -351,34 +351,47 @@ function ordersCollectionRef(){
 function orderDocRef(orderId){ return ordersCollectionRef().doc(String(orderId)); }
 const ORDER_MIGRATION_KEY='orders_v2_'+(CAFE_ID||'default');
 async function migrateOrdersToV2(){
-  // Legacy cafeData/orders was permanently removed after migration.
-  // Never read or recreate it again.
-  return true;
-}
-async function loadOrdersV2(options){
-  const source = options && options.source ? options.source : null;
+  if(!db) return false;
   try{
-    const getOptions = source ? {source} : undefined;
-    // Read both live states from the server when explicitly requested after resume.
-    // This prevents a suspended mobile tab from restoring an old Firestore cache snapshot.
-    const [activeSnap, paidSnap] = await Promise.all([
-      ordersCollectionRef().where('status','==','active').get(getOptions),
-      ordersCollectionRef().where('status','==','paid').get(getOptions)
-    ]);
-    const byId=new Map();
-    [activeSnap,paidSnap].forEach(snap=>snap.forEach(d=>{
-      const x=d.data()||{};
-      delete x._migratedAt;
-      if(snap===paidSnap && x.archived===true) return;
-      byId.set(d.id,{...x,id:x.id||d.id});
-    }));
-    const orders=Array.from(byId.values());
+    // Migration state is local to this browser. We intentionally do not use
+    // a separate Firestore marker collection, so opening the app does not
+    // require any extra Firestore permission just for migration bookkeeping.
+    const localMarker = 'orders_v2_migrated_' + (CAFE_ID || 'default');
+    try{
+      if(localStorage.getItem(localMarker)==='1') return true;
+    }catch(e){}
+    const legacy=await fsGet('orders');
+    if(!legacy.ok){
+      // If V2 already contains orders, do not block the application because
+      // the legacy backup is unavailable (for example after security rules
+      // were tightened). Mark migration complete without deleting V2.
+      try{
+        const existing = await ordersCollectionRef().limit(1).get();
+        if(!existing.empty){
+          try{localStorage.setItem(localMarker,'1');}catch(e){}
+          return true;
+        }
+      }catch(e){}
+      return false;
+    }
+    let orders=[]; try{orders=legacy.value?JSON.parse(legacy.value):[];}catch(e){}
+    if(!Array.isArray(orders)) orders=[];
+    for(let i=0;i<orders.length;i+=400){
+      const batch=db.batch(), chunk=orders.slice(i,i+400);
+      chunk.forEach(o=>{if(o&&o.id) batch.set(orderDocRef(o.id),{...o,_migratedAt:Date.now()},{merge:true});});
+      if(chunk.length) await batch.commit();
+    }
+    try{localStorage.setItem(localMarker,'1');}catch(e){}
+    return true;
+  }catch(e){console.error('Orders V2 migration failed',e);return false;}
+}
+async function loadOrdersV2(){
+  try{
+    const snap=await ordersCollectionRef().get(), orders=[];
+    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
     orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
     return {ok:true,value:orders};
-  }catch(e){
-    console.error('loadOrdersV2 live queries failed',e);
-    return {ok:false,value:null};
-  }
+  }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
 }
 async function saveOrderV2(order){
   if(!db || !order || !order.id) return false;
@@ -468,9 +481,9 @@ function clearSession(){
 // FAILED (network blip, etc.) — callers must NOT treat this as "empty" or they will
 // overwrite real data with defaults. This distinction is critical: a transient failure
 // must never be allowed to look like "this is a brand new café".
-async function fsGet(key, options){
+async function fsGet(key){
   try{
-    const snap = await docRef(key).get(options && options.source ? {source:options.source} : undefined);
+    const snap = await docRef(key).get();
     return {ok:true, value: snap.exists ? snap.data().value : null};
   }catch(e){ console.error('fsGet failed', key, e); return {ok:false, value:null}; }
 }
@@ -482,12 +495,12 @@ async function fsSet(key, value){
 }
 
 /* ============ STORAGE HELPERS ============ */
-async function loadAll(options){
+async function loadAll(){
   // Orders are intentionally excluded here. They live in the V2 subcollection
   // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
   const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
   const parseField = async (key, outKey)=>{
-    const r = await fsGet(key, options);
+    const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
     try{ out[outKey] = r.value ? JSON.parse(r.value) : null; }
     catch(e){ out.failed[outKey] = true; }
@@ -524,13 +537,26 @@ async function saveMenu(menu){
 async function saveOrders(orders){
   if(!db){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
   const list = Array.isArray(orders) ? orders : [];
-  // NEVER delete remote orders merely because this phone has a temporary empty/incomplete
-  // state after background suspension, cache clearing, or a reconnect. Explicit delete/archive
-  // actions are responsible for deletion; normal saving only writes current documents.
+  const previous = state.__lastKnownOrderIds || new Set();
+  const current = new Set(list.filter(o=>o&&o.id).map(o=>String(o.id)));
+
+  // Save/update every current order first.
   const ok = await saveOrdersV2(list);
   if(!ok){showToast('Хатогӣ дар нигоҳдорӣ');return false;}
-  state.__lastKnownOrderIds = new Set(list.filter(o=>o&&o.id).map(o=>o.id));
-  state.__lastKnownOrderSnapshots = new Map(list.filter(o=>o&&o.id).map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
+
+  // Only delete documents that THIS device previously knew about and that the
+  // user intentionally removed from its local state. Never sweep unknown remote
+  // orders here, because another device may have just created them.
+  for(const id of previous){
+    if(!current.has(String(id))){
+      const deleted = await deleteOrderV2(id);
+      if(!deleted){
+        console.warn('Could not delete order document',id);
+      }
+    }
+  }
+  state.__lastKnownOrderIds = new Set(list.map(o=>o.id));
+  state.__lastKnownOrderSnapshots = new Map(list.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
   return true;
 }
 async function saveSettings(settings){
@@ -752,6 +778,8 @@ let state = {
   confirmDeleteTableId:null,
   formOpen:false,           // prevents polling refresh while typing
   formOpenAt:null,          // safety timeout for stuck forms
+  cashierTab:'main',        // active tab for cashier view
+  _assignSelMap:{},         // persists scheduled-order table selection across re-renders
 };
 
 function escapeHtml(str){
@@ -822,6 +850,32 @@ function oshOrderedKgToday(){
 // i.e. demand that isn't a walk-in dine-in table yet, useful for planning how much to cook.
 // A scheduled order that's already been seated (type becomes 'dine-in') no longer counts here —
 // at that point it's ordinary table demand, tracked by oshOrderedKgToday() instead.
+
+function oshRemainingBadge(){
+  // Нишондиҳандаи оши боқимонда барои форми заказ
+  const hasStock = state.oshStock && state.oshStock.date === todayKey();
+  if(!hasStock) return '';
+  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
+  // osh ordered including scheduled and active orders
+  let kgOrdered = 0;
+  state.orders.filter(o=>isToday(o.createdAt) && o.status!=='cancelled').forEach(o=>{
+    o.items.forEach(it=>{
+      if(getItemCategory(it)==='Ош'){
+        if(it.unit==='kg') kgOrdered += it.qty/1000;
+        else kgOrdered += it.qty * porsiyaKg;
+      }
+    });
+  });
+  const cookedKg = Number(state.oshStock.kg)||0;
+  const remaining = cookedKg - kgOrdered;
+  const color = remaining <= 0 ? 'var(--brick)' : remaining < 3 ? '#c07f00' : 'var(--olive)';
+  const msg = remaining <= 0 ? 'Ош тамом шуд!' : remaining.toFixed(1)+' кг боқӣ';
+  return `<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--card);border:1.5px solid ${color};border-radius:10px;margin:0 0 10px;font-size:13px;">
+    <span style="font-size:16px;">🍚</span>
+    <span style="color:${color};font-weight:700;">${msg}</span>
+    <span style="color:#9c8f78;font-size:11px;">аз ${cookedKg} кг пухта</span>
+  </div>`;
+}
 function oshWeightForOrdersTab(){
   let kgTotal = 0;
   const porsiyaKg = (Number(state.settings.porsiyaGrams) || 120) / 1000;
@@ -976,24 +1030,16 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  migrateOrdersToV2().catch(console.error);
+  // Migration runs once in init() — no need to repeat it here.
   try{
-    // One listener for both active and paid orders. This avoids race/stale-state bugs when
-    // a cashier changes an order from active -> paid and another phone is listening too.
-    const ordersQuery = ordersCollectionRef().where('status','in',['active','paid']);
-    const unsub = ordersQuery.onSnapshot(snap=>{
+    const unsub=ordersCollectionRef().onSnapshot(snap=>{
+      if(!state.role)return;
       const parsed=[];
-      snap.forEach(d=>{
-        const x=d.data()||{};
-        delete x._migratedAt;
-        if(x.status==='paid' && x.archived===true) return;
-        parsed.push({...x,id:x.id||d.id});
-      });
+      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
       parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
       state.orders=parsed;
       state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(parsed.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-      if(state.activeTable===null && !isActivelyEditingFormField()) render();
+      if(state.activeTable===null && !isActivelyEditingFormField())render();
     },err=>{
       console.error('Orders realtime error',err);
       clearTimeout(__resubscribeTimer);
@@ -1017,54 +1063,6 @@ function setupRealtimeSync(){
   });
   startSyncWatchdog();
 }
-
-// Event-driven recovery for phones that were backgrounded/locked. It performs one fresh
-// Firestore read when the app returns, then recreates listeners. No periodic polling is used.
-let __resumeRefreshInFlight=false;
-let __lastResumeRefreshAt=0;
-async function refreshAfterResume(reason){
-  if(__resumeRefreshInFlight || !state.role || !state.loaded || state.loadError || state.needsSetup) return;
-  if(typeof navigator!=='undefined' && navigator.onLine===false) return;
-
-  // Mobile browsers can fire visibilitychange/pageshow/focus together. Do not run
-  // three simultaneous Firestore reads, but always allow a fresh read after a short gap.
-  const now=Date.now();
-  if(now-__lastResumeRefreshAt<1200) return;
-  __lastResumeRefreshAt=now;
-  __resumeRefreshInFlight=true;
-
-  try{
-    // Orders are the critical shared state. Read them explicitly from the SERVER,
-    // not from IndexedDB/Firestore's local cache, so orders created by another phone
-    // while this phone was suspended are present immediately after resume.
-    const ordersResult=await loadOrdersV2({source:'server'});
-    if(ordersResult.ok){
-      state.orders=ordersResult.value||[];
-      state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
-      state.__lastKnownOrderSnapshots=new Map(state.orders.map(o=>[o.id,JSON.parse(JSON.stringify(o))]));
-      if(state.activeTable===null) render();
-    }
-
-    // Refresh shared single-document state from SERVER too. Never replace a field with
-    // null/empty data when its read failed.
-    const all=await loadAll({source:'server'});
-    if(!Object.keys(all.failed||{}).some(k=>all.failed[k])){
-      ['menu','settings','reservations','tables','oshStock','accounts','inventory','activityLog','bonuses','dailyClosures'].forEach(k=>{
-        if(all[k]!==null && all[k]!==undefined) state[k]=all[k];
-      });
-      if(state.activeTable===null) render();
-    }
-
-    // Recreate listeners after the server catch-up. This is especially important on
-    // Android/iOS after the browser has suspended the tab's websocket connection.
-    setupRealtimeSync();
-  }catch(e){
-    console.error('Resume refresh failed ('+reason+')',e);
-    setupRealtimeSync();
-  }finally{
-    __resumeRefreshInFlight=false;
-  }
-}
 function startSyncWatchdog(){
   // onSnapshot handles real-time sync — no polling needed.
   // Previously this ran every 3s causing 1200+ Firebase reads/hour per device.
@@ -1074,10 +1072,30 @@ function startSyncWatchdog(){
 
 let __ordersPollInFlight = false;
 async function pollOrdersFast(){
-  // Disabled: onSnapshot already provides realtime order updates.
-  // A second periodic full collection read only increases Firestore reads.
-  return;
+  if(__ordersPollInFlight || !state.role || !state.loaded) return;
+  __ordersPollInFlight = true;
+  try{
+    const snap = await ordersCollectionRef().get({source:'server'});
+    const parsed = [];
+    snap.forEach(d=>{
+      const x = d.data() || {};
+      delete x._migratedAt;
+      parsed.push({...x, id:x.id || d.id});
+    });
+    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    state.orders = parsed;
+    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
+    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
+    state.__lastOrdersServerStamp = Date.now();
+    state.__lastOrdersServerAt = Date.now();
+    if(state.activeTable===null && !isActivelyEditingFormField()) render();
+  }catch(e){
+    console.warn('Fast orders sync failed; realtime listener remains active', e);
+  }finally{
+    __ordersPollInFlight = false;
+  }
 }
+
 // Full fallback is intentionally less frequent because it reads many documents. It is still
 // useful for settings/tables/inventory if a listener silently goes stale.
 let __fullWatchdogInterval = null;
@@ -1809,10 +1827,9 @@ function isThisMonth(ts){
   return d.getFullYear()===n.getFullYear() && d.getMonth()===n.getMonth();
 }
 function orderCommission(order){
-  let oshGrams=0, oshValue=0, otherValue=0;
-  (order.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
-  const oshCommission=oshGrams>=500?12:(oshGrams>0?oshValue*0.05:0);
-  return oshCommission+otherValue*0.05;
+  // 5% аз умумии чек (ош + нӯшокиҳо + дигар ҳама чизҳо)
+  const total = (order.items||[]).reduce((s,it)=>s+lineTotal({unit:it.unit,price:it.price},it.qty),0);
+  return total * 0.05;
 }
 function staffCommissionBreakdown(username, role, scope){
   const orders = state.orders.filter(o=>{
@@ -1822,14 +1839,9 @@ function staffCommissionBreakdown(username, role, scope){
     if(scope==='month' && !isThisMonth(ts)) return false;
     return (role==='waiter' && o.createdBy===username) || (role==='cashier' && o.paidBy===username);
   });
-  let countHigh=0, countLow=0, countNoOsh=0, oshSum=0, otherSum=0;
-  orders.forEach(o=>{
-    let oshGrams=0, oshValue=0, otherValue=0;
-    (o.items||[]).forEach(it=>{ const value=lineTotal({unit:it.unit,price:it.price},it.qty); if(getItemCategory(it)==='Ош' && it.unit==='kg'){ oshGrams+=Number(it.qty)||0; oshValue+=value; } else { otherValue+=value; } });
-    if(oshGrams>=500){ countHigh++; oshSum+=12; } else if(oshGrams>0){ countLow++; oshSum+=oshValue*0.05; } else { countNoOsh++; }
-    otherSum += otherValue*0.05;
-  });
-  return {orderCount:orders.length, countHigh, countLow, countNoOsh, oshSum, otherSum, total:oshSum+otherSum};
+  let total=0;
+  orders.forEach(o=>{ total+=orderCommission(o); });
+  return {orderCount:orders.length, countHigh:0, countLow:0, countNoOsh:0, oshSum:0, otherSum:total, total};
 }
 function staffCommission(username, role, scope){
   return staffCommissionBreakdown(username, role, scope).total;
@@ -1974,6 +1986,12 @@ function render(){
   attachCommonEvents();
   if(state.role==='waiter') attachWaiterEvents();
   if(state.role==='cashier'){
+    document.querySelectorAll('[data-cashiertab]').forEach(el=>{
+      el.addEventListener('click', ()=>{ state.cashierTab = el.dataset.cashiertab; render(); });
+    });
+    if((state.cashierTab||'main')==='orders'){
+      attachAdminOrdersEvents();
+    }
     attachTableGridEvents();
     const openBtn = document.getElementById('openTakeawayBtn');
     if(openBtn) openBtn.addEventListener('click', openTakeaway);
@@ -2114,21 +2132,6 @@ function attachLoginEvents(){
   if(un) un.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
 }
 
-async function hardRefreshApp(){
-  // Browser/PWA cache only. This function never reads, writes, or deletes Firestore data.
-  try{
-    if('serviceWorker' in navigator){
-      const regs=await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r=>r.unregister()));
-    }
-    if('caches' in window){
-      const keys=await caches.keys();
-      await Promise.all(keys.map(k=>caches.delete(k)));
-    }
-  }catch(e){ console.error('hardRefreshApp cleanup failed',e); }
-  window.location.reload();
-}
-
 function attachCommonEvents(){
   const hardRefreshBtn = document.getElementById('hardRefreshBtn');
   if(hardRefreshBtn) hardRefreshBtn.addEventListener('click', ()=>{
@@ -2257,11 +2260,24 @@ function renderWaiter(){
 function attachWaiterEvents(){
   attachTableGridEvents();
   document.querySelectorAll('[data-assignsched]').forEach(el=>{
+    // Restore saved selection after re-render
+    const orderId = el.dataset.assignsched;
+    const sel = document.getElementById('assignSel-'+orderId);
+    if(sel && state._assignSelMap && state._assignSelMap[orderId]){
+      sel.value = state._assignSelMap[orderId];
+    }
+    if(sel){
+      sel.addEventListener('change', ()=>{
+        state._assignSelMap = state._assignSelMap || {};
+        state._assignSelMap[orderId] = sel.value;
+      });
+    }
     el.addEventListener('click', async ()=>{
-      const orderId = el.dataset.assignsched;
-      const sel = document.getElementById('assignSel-'+orderId);
-      const tableId = sel ? Number(sel.value) : null;
+      const s = document.getElementById('assignSel-'+orderId);
+      const tableId = s ? Number(s.value) : null;
       if(!tableId){ showToast('Мизро интихоб кунед'); return; }
+      // clear saved selection for this order
+      if(state._assignSelMap) delete state._assignSelMap[orderId];
       await assignScheduledToTable(orderId, tableId);
       render();
     });
@@ -2326,8 +2342,19 @@ function renderCashier(){
       </div>
     </div>`).join('') : '';
 
+  const cashierTab = state.cashierTab || 'main';
+  const tabBar = `<div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;">
+    <button class="cat-tab ${cashierTab==='main'?'active':''}" data-cashiertab="main">🏠 Асосӣ</button>
+    <button class="cat-tab ${cashierTab==='orders'?'active':''}" data-cashiertab="orders">📋 Фармоишҳо</button>
+  </div>`;
+
+  if(cashierTab==='orders'){
+    return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
+  }
+
   return `
   <div class="container">
+    ${tabBar}
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
       <button class="btn-primary" id="openTakeawayBtn" style="padding:11px 18px;">🥡 + Фармоиши бо худ бурдан</button>
       <button class="btn-primary" id="openScheduledBtn" style="padding:11px 18px;background:var(--olive);">🕐 + Фармоиши вақтдор</button>
@@ -2351,8 +2378,17 @@ function takeawaySubtotal(){
   return total;
 }
 function takeawayDiscountAmount(){
+  // Тахфиф танҳо барои ош (категория "Ош", unit===kg), на барои нӯшокиҳо ва дигар чизҳо
   const pct = Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0));
-  return takeawaySubtotal() * (pct/100);
+  if(pct<=0) return 0;
+  let oshTotal = 0;
+  Object.keys(state.takeawayItems).forEach(mid=>{
+    const item = state.menu.find(m=>m.id===mid);
+    if(item && getItemCategory(item)==='Ош' && item.unit==='kg'){
+      oshTotal += lineTotal(item, state.takeawayItems[mid]);
+    }
+  });
+  return oshTotal * (pct/100);
 }
 function takeawayTotal(){
   return Math.max(0, takeawaySubtotal() - takeawayDiscountAmount());
@@ -2480,7 +2516,7 @@ async function submitScheduled(name, phone, time, deliveryType){
   }).filter(Boolean);
   if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
   if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
-  if(!time){ showToast('Соатро таъин кунед'); return; }
+  // Вақт ва ном ихтиёрианд — агар нависта нашавад, холӣ мемонад
   const total = scheduledTotal();
   const order = {
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
@@ -2643,6 +2679,7 @@ function renderTakeawayOverlay(){
         <h2>🥡 Бо худ бурдан</h2>
         <button class="close-x" id="closeTakeaway">✕</button>
       </div>
+      <div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>
       <div class="cat-tabs">${tabs}</div>
       <div class="menu-list">${items}</div>
       <div class="receipt">
@@ -2761,10 +2798,10 @@ function renderScheduledOverlay(){
         <h2>🕐 Фармоиши вақтдор</h2>
         <button class="close-x" id="closeScheduled">✕</button>
       </div>
+      <div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>
       <div style="padding:14px 20px 0;display:flex;flex-wrap:wrap;gap:10px;">
-        <div class="field"><label>Номи мизожон</label><input type="text" id="schedNameInput" value="${escapeHtml(state.scheduledName)}" placeholder="масалан: Каримов"></div>
-        <div class="field"><label>Рақами телефон</label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
-        <div class="field small"><label>То соати</label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime)}"></div>
+        <div class="field"><label>Номи мизожон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="text" id="schedNameInput" value="${escapeHtml(state.scheduledName)}" placeholder="масалан: Каримов"></div>
+        <div class="field"><label>Рақами телефон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
       </div>
       <div style="padding:12px 20px 0;">
         <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Навъи фармоиш</label>
@@ -3220,6 +3257,7 @@ function renderTicketOverlay(){
         <h2>Миз: ${_activeTblName}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
+      <div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
       ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
@@ -3511,6 +3549,7 @@ function renderAdminOrders(){
 
   return `
     <div class="section-title">📋 Фармоишҳо — брон ва вақтдор</div>
+    ${oshRemainingBadge()}
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳамаи мизоҷоне, ки миз брон кардаанд ё фармоиши вақтдор додаанд. Бо ном ё рақами телефон ҷустуҷӯ кунед.</p>
     <input type="text" id="clientSearchInput" value="${escapeHtml(state.clientSearchQuery)}" placeholder="Ном ё рақами телефон..." style="width:100%;max-width:420px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:16px;">
     <div class="stat-row" style="margin-bottom:18px;">
@@ -4034,67 +4073,37 @@ function renderAdminMenu(){
 async function clearAllReportHistory(){
   const now=Date.now();
   const actor=actingUsername()||'?';
+  const paidToClear=(state.orders||[]).filter(o=>o.status==='paid' && o.archived!==true && o.paidAt);
 
-  // All paid orders may be permanently deleted by this explicit report-clear action.
-  // Active and cancelled orders are never touched.
-  let remoteDocs=[];
-  try{
-    const snap=await ordersCollectionRef()
-      .where('status','==','paid')
-      .get();
-    remoteDocs=snap.docs;
-  }catch(e){
-    console.error('Could not query archived paid orders before clear',e);
-    showToast('Хатогӣ: чекҳои пардохтшуда санҷида нашуданд');
-    return;
-  }
-
-  const ids=new Set();
-  remoteDocs.forEach(d=>{
-    const o=d.data()||{};
-    if(o.paidAt || o.status==='paid') ids.add(String(o.id||d.id));
-  });
-
-  // Delete in batches of 400 (Firestore batch maximum is 500).
-  let deleted=0;
-  try{
-    for(let i=0;i<remoteDocs.length;i+=400){
-      const batch=db.batch();
-      const chunk=remoteDocs.slice(i,i+400);
-      chunk.forEach(d=>batch.delete(d.ref));
-      if(chunk.length){
-        await batch.commit();
-        deleted+=chunk.length;
-      }
-    }
-  }catch(e){
-    console.error('Failed to delete paid orders',e);
-    showToast('Баъзе чекҳо пок нашуданд — амалиёт пурра анҷом нашуд');
-    return;
-  }
-
+  // First publish the reset marker so every device knows the report cutoff.
+  // The marker is shared through Firebase settings and is also kept in the local state.
   state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
   const settingsOk=await saveSettings(state.settings);
-  if(settingsOk===false){
-    showToast('Чекҳо пок шуданд, аммо ҳисобот пурра нав карда нашуд');
-    return;
-  }
+  if(settingsOk===false) return;
 
-  state.orders=(state.orders||[]).filter(o=>!ids.has(String(o.id)));
-  state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
-  state.__lastKnownOrderSnapshots=new Map(
-    state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])
-  );
+  // Archive only the paid orders that existed at the moment of the clear.
+  const ids=new Set(paidToClear.map(o=>o.id));
+  state.orders=(state.orders||[]).map(o=>ids.has(o.id)
+    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
+    : o);
+  // Save each archived order individually (not the whole array) to minimise writes
+  const toSave=state.orders.filter(o=>ids.has(o.id));
+  for(const o of toSave){ await saveOrderV2(o); }
+  const ok=true;
+
+  // Clear all manual bonuses so salary resets to zero along with the report.
+  state.bonuses = [];
+  await saveBonuses([]);
 
   state.dailyClosures=[];
   await saveDailyClosures([]);
   state.dailyReportRows=[];
   state.confirmClearReport=false;
   render();
-
-  await logActivity('Ҳисобот пок шуд — '+deleted+' чеки пардохтшуда аз база нест карда шуд');
-  showToast(deleted+' чеки пардохтшуда аз база пок шуд');
+  await logActivity('Ҳисобот, бонусҳо ва маоши кормандон пурра пок карда шуд');
+  showToast('Ҳисобот ва маош пурра пок шуд');
 }
+
 async function closeDailyReport(){
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
   const active = state.orders.filter(o=>o.status==='active');
@@ -4190,6 +4199,7 @@ function renderAdminReport(){
     <div class="receipt-item-row">
       <div>
         <div class="l1">${orderLabel(o)}</div>
+        ${o.customerPhone ? `<div class="l2">📞 ${escapeHtml(o.customerPhone)}</div>` : ''}
         <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
       </div>
       <div style="text-align:right;">
@@ -4211,7 +4221,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҳамаи чекҳои аллакай пардохтшуда ва архившударо аз базаи Firebase бебозгашт нест мекунад. Мизҳои фаъол ва чекҳои фаъол дахл намеёбанд.</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи ҳисобот, ҷадвали ҳисоботи чандрӯза, архив ва маблағи ҷамъшудаи маош/комиссияро пурра ва бебозгашт пок мекунад. Мизҳои фаъол дахл намеёбанд.</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
@@ -4517,6 +4527,30 @@ function renderAdminSettings(){
   </div>`;
 }
 
+function attachAdminOrdersEvents(){
+  const clientSearchInput = document.getElementById('clientSearchInput');
+  if(clientSearchInput){
+    clientSearchInput.addEventListener('input', ()=>{
+      state.clientSearchQuery = clientSearchInput.value;
+      render();
+      const el = document.getElementById('clientSearchInput');
+      if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
+    });
+  }
+  document.querySelectorAll('[data-delclient]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = el.dataset.delclient; render(); });
+  });
+  document.querySelectorAll('[data-canceldelclient]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = null; render(); });
+  });
+  document.querySelectorAll('[data-confirmdelclient]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      state.confirmDeleteClientKey = null;
+      await deleteClientRecord(el.dataset.deltype, el.dataset.delid);
+      render();
+    });
+  });
+}
 function attachAdminEvents(){
   // keep typing safe from the 6s poll wipe while on tabs with persistent free-typed fields
   if(state.adminTab==='tables' || state.adminTab==='salary' || state.adminTab==='settings' || state.adminTab==='inventory' || state.adminTab==='orders'){
@@ -4878,28 +4912,7 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='orders'){
-    const clientSearchInput = document.getElementById('clientSearchInput');
-    if(clientSearchInput){
-      clientSearchInput.addEventListener('input', ()=>{
-        state.clientSearchQuery = clientSearchInput.value;
-        render();
-        const el = document.getElementById('clientSearchInput');
-        if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
-      });
-    }
-    document.querySelectorAll('[data-delclient]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = el.dataset.delclient; render(); });
-    });
-    document.querySelectorAll('[data-canceldelclient]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.confirmDeleteClientKey = null; render(); });
-    });
-    document.querySelectorAll('[data-confirmdelclient]').forEach(el=>{
-      el.addEventListener('click', async ()=>{
-        state.confirmDeleteClientKey = null;
-        await deleteClientRecord(el.dataset.deltype, el.dataset.delid);
-        render();
-      });
-    });
+    attachAdminOrdersEvents();
   }
 
   if(state.adminTab==='menu'){
@@ -5112,86 +5125,77 @@ document.addEventListener('focusout', ()=>{
 // for Firestore's listeners to reconnect on their own) so the screen is correct within moments
 // of the person looking at it again, regardless of how long it was backgrounded.
 document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState==='visible') refreshAfterResume('visibilitychange');
+  // When the app comes back to foreground, just re-render from current state.
+  // onSnapshot listeners reconnect automatically; a full re-read is not needed
+  // and was causing a surge of reads every time the phone screen was unlocked.
+  if(document.visibilityState==='visible' && state.role && state.loaded && !state.loadError && !state.needsSetup){
+    render();
+  }
 });
-window.addEventListener('focus', ()=> refreshAfterResume('focus'));
-window.addEventListener('pageshow', ()=> refreshAfterResume('pageshow'));
-window.addEventListener('online', ()=> refreshAfterResume('online'));
+
+// The browser fires this the moment it detects the connection is back after being down —
+// catch up immediately rather than waiting for the next watchdog tick.
+window.addEventListener('online', ()=>{
+  // Connection restored: re-attach realtime listeners so Firestore reconnects cleanly.
+  // A full pollRefresh() here caused a spike of reads every network reconnect.
+  if(state.role && state.loaded && !state.loadError && !state.needsSetup){
+    teardownRealtimeSync();
+    setupRealtimeSync();
+  }
+});
 
 /* ============ UPDATE CHECK ============
-   Detect a newly deployed build even when the PWA has been open for hours. */
+   A PWA that's been left open for hours (a whole shift) keeps running the JS it loaded at
+   launch — a fix shipped after that stays invisible until the person happens to fully close
+   and reopen the app. Periodically check a small version file (never cached) and, if it no
+   longer matches what's running, show a banner offering an immediate reload. */
 let __updateBannerShown = false;
-
-async function checkForUpdate(){
+// Fully clears everything the browser cached for this app — unregisters the service worker
+// (so a stale worker never intercepts requests again) and empties every Cache Storage bucket
+// it created — then reloads. This is what staff used to have to do by hand in Chrome's
+// settings; doing it here means the "Навсозӣ" button alone is enough, every time.
+async function hardRefreshApp(){
   try{
-    // IMPORTANT: version.json must NEVER come from the browser/PWA cache.
-    // cache:'reload' forces a fresh validation even when an old Service Worker exists.
-    const url = new URL('./version.json', window.location.href);
-    url.searchParams.set('vcheck', String(Date.now()));
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      cache: 'reload',
-      credentials: 'same-origin',
-      headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
-    });
-    if(!res.ok) {
-      console.warn('Update check HTTP status:', res.status);
-      return false;
+    if('serviceWorker' in navigator){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister()));
     }
-    const text = await res.text();
-    let data;
-    try{ data = JSON.parse(text); }catch(e){
-      console.warn('Update check returned invalid JSON:', text.slice(0,200));
-      return false;
+    if('caches' in window){
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k=>caches.delete(k)));
     }
-    const remoteVersion = String(data && data.version || '').trim();
-    console.log('[UPDATE CHECK] local=', APP_VERSION, 'remote=', remoteVersion);
-    if(remoteVersion && remoteVersion !== APP_VERSION){
-      showUpdateBanner();
-      return true;
-    }
-  }catch(e){
-    console.warn('Update check failed', e);
-  }
-  return false;
+  }catch(e){ console.error('hardRefreshApp cleanup failed', e); }
+  window.location.reload();
 }
-
 function showUpdateBanner(){
-  if(__updateBannerShown || document.getElementById('appUpdateBanner')) return;
+  if(__updateBannerShown) return;
   __updateBannerShown = true;
   const bar = document.createElement('div');
-  bar.id = 'appUpdateBanner';
-  bar.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:99999;background:var(--ink);color:var(--paper);padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.25);';
-  bar.innerHTML = '<span style="font-weight:700">🔄 Нусхаи нави барнома дастрас аст</span><button type="button" style="background:var(--brick);color:#fff;border:none;padding:9px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;cursor:pointer">Навсозӣ</button>';
-  bar.querySelector('button').addEventListener('click', async ()=>{
-    const btn = bar.querySelector('button');
-    if(btn){ btn.disabled=true; btn.textContent='Навсозӣ...'; }
-    await hardRefreshApp();
-  });
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999;background:var(--ink);color:var(--paper);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;box-shadow:0 -2px 10px rgba(0,0,0,.2);';
+  bar.innerHTML = `<span>🔄 Нусхаи нави барнома дастрас аст</span><button style="background:var(--brick);color:#fff;border:none;padding:8px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;">Навсозӣ</button>`;
+  bar.querySelector('button').addEventListener('click', hardRefreshApp);
   document.body.appendChild(bar);
 }
-
-setTimeout(checkForUpdate, 3000);
-setInterval(checkForUpdate, 3 * 60 * 1000);
+async function checkForUpdate(){
+  try{
+    const res = await fetch('./version.json?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) return;
+    const data = await res.json();
+    if(data && data.version && data.version !== APP_VERSION) showUpdateBanner();
+  }catch(e){}
+}
+setInterval(checkForUpdate, 3*60*1000); // every 3 minutes
 document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState === 'visible') checkForUpdate();
+  if(document.visibilityState==='visible') checkForUpdate();
 });
 window.addEventListener('online', checkForUpdate);
+setTimeout(checkForUpdate, 5000); // one soon after launch too, not just on the long timer
 
 init();
 
 if('serviceWorker' in navigator){
-  window.addEventListener('load', async ()=>{
-    try{
-      const registration = await navigator.serviceWorker.register('./sw.js', {updateViaCache:'none'});
-      await registration.update();
-      console.log('Service Worker registered and update checked:', registration.scope);
-    }catch(e){
-      console.error('Service Worker registration/update failed:', e);
-    }
-    // Check AFTER the SW update attempt as well as on the normal timer.
-    // This catches devices that were opened with an older cached app shell.
-    setTimeout(()=>checkForUpdate(), 500);
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
   });
 }
 </script>
