@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-01-V55-TECH-CLEAN';
+const APP_VERSION = '2026-09-14-V56-BUGFIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -5167,7 +5167,12 @@ async function hardRefreshApp(){
       await Promise.all(keys.map(k=>caches.delete(k)));
     }
   }catch(e){ console.error('hardRefreshApp cleanup failed', e); }
-  window.location.reload();
+  // A plain reload() can still be answered by the browser's (or a CDN's) HTTP cache with the
+  // very same stale index.html — the service worker and Cache Storage are clean, but that
+  // doesn't touch this layer, so the banner would just reappear forever. Force a truly fresh
+  // fetch by navigating to a cache-busted URL instead of calling reload().
+  const bustUrl = window.location.pathname + '?_v=' + Date.now();
+  window.location.replace(bustUrl);
 }
 function showUpdateBanner(){
   if(__updateBannerShown) return;
