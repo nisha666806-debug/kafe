@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-14-V58-NO-BOOKING';
+const APP_VERSION = '2026-09-14-V59-SCHED-PHONE';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1519,7 +1519,7 @@ function speakCashierAlert(order){
 }
 function orderLabel(o){
   if(o.type==='takeaway') return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?');
-  if(o.type==='scheduled') return '🕐 '+escapeHtml(o.readyTime||'?')+' — '+escapeHtml(o.customerName||'мизожон');
+  if(o.type==='scheduled') return '🕐 '+escapeHtml(o.readyTime||'?')+' — '+escapeHtml(o.customerName||'мизожон')+(o.customerPhone ? ' · 📞 '+escapeHtml(o.customerPhone) : '');
   const tbl = state.tables.find(t=>t.id===o.table);
   return tbl ? escapeHtml(tbl.name) : ('Мизи №'+o.table);
 }
