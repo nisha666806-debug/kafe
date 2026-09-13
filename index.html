@@ -2802,6 +2802,7 @@ function renderScheduledOverlay(){
       <div style="padding:14px 20px 0;display:flex;flex-wrap:wrap;gap:10px;">
         <div class="field"><label>Номи мизожон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="text" id="schedNameInput" value="${escapeHtml(state.scheduledName)}" placeholder="масалан: Каримов"></div>
         <div class="field"><label>Рақами телефон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
+        <div class="field"><label>Вақти омадан <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime||'')}"></div>
       </div>
       <div style="padding:12px 20px 0;">
         <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Навъи фармоиш</label>
@@ -2864,7 +2865,8 @@ function attachScheduledEvents(){
   if(submitBtn) submitBtn.addEventListener('click', ()=>{
     const name = document.getElementById('schedNameInput').value.trim();
     const phone = document.getElementById('schedPhoneInput').value.trim();
-    const time = document.getElementById('schedTimeInput').value;
+    const timeEl = document.getElementById('schedTimeInput');
+    const time = timeEl ? timeEl.value : '';
     submitScheduled(name, phone, time, state.scheduledDeliveryType);
   });
 }
@@ -3257,7 +3259,7 @@ function renderTicketOverlay(){
         <h2>Миз: ${_activeTblName}</h2>
         <button class="close-x" id="closeTicket">✕</button>
       </div>
-      <div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>
+      ${state.role!=='waiter' ? `<div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>` : ''}
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
       ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
@@ -3469,7 +3471,7 @@ function renderAdminInventory(){
 function allKnownClients(){
   const list = [];
   state.orders.forEach(o=>{
-    if(o.type==='scheduled' && (o.customerName || o.customerPhone)){
+    if(o.type==='scheduled'){
       list.push({
         key: 'sched:'+o.id, delType: 'scheduled', delId: o.id,
         name: o.customerName||'', phone: o.customerPhone||'', ts: o.createdAt,
