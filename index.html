@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-14-V59-SCHED-PHONE';
+const APP_VERSION = '2026-09-15-V62-WAITER-PHONE-SEARCH';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -755,6 +755,7 @@ let state = {
   confirmClearChefQueue:false,
   confirmCancelOrderId:null,
   clientSearchQuery:'',
+  waiterSchedPhoneQuery:'',
   confirmDeleteClientKey:null,
   confirmClearLog:false,
   showAddTableForm:false,
@@ -884,7 +885,21 @@ function oshWeightForOrdersTab(){
       }
     });
   };
-  state.orders.filter(o=>isToday(o.createdAt) && (o.type==='takeaway' || o.type==='scheduled')).forEach(o=>addItems(o.items));
+  state.orders.filter(o=>isToday(o.createdAt) && (o.type==='takeaway' || o.type==='scheduled') && o.status!=='cancelled').forEach(o=>addItems(o.items));
+  return kgTotal;
+}
+function oshWeightScheduledOnly(){
+  let kgTotal = 0;
+  const porsiyaKg = (Number(state.settings.porsiyaGrams) || 120) / 1000;
+  const addItems = (items)=>{
+    (items||[]).forEach(it=>{
+      if(getItemCategory(it)==='Ош'){
+        if(it.unit==='kg') kgTotal += it.qty/1000;
+        else kgTotal += it.qty * porsiyaKg;
+      }
+    });
+  };
+  state.orders.filter(o=>isToday(o.createdAt) && o.type==='scheduled' && o.status!=='cancelled').forEach(o=>addItems(o.items));
   return kgTotal;
 }
 
@@ -1518,7 +1533,10 @@ function speakCashierAlert(order){
   speakOrderAlert(order, state.settings.cashierAlertText);
 }
 function orderLabel(o){
-  if(o.type==='takeaway') return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?');
+  if(o.type==='takeaway'){
+    const who = (o.customerName || o.customerPhone) ? ' — '+escapeHtml(o.customerName||'мизожон')+(o.customerPhone ? ' · 📞 '+escapeHtml(o.customerPhone) : '') : '';
+    return '🥡 Бо худ бурдан №'+(o.takeawayNumber||'?')+who;
+  }
   if(o.type==='scheduled') return '🕐 '+escapeHtml(o.readyTime||'?')+' — '+escapeHtml(o.customerName||'мизожон')+(o.customerPhone ? ' · 📞 '+escapeHtml(o.customerPhone) : '');
   const tbl = state.tables.find(t=>t.id===o.table);
   return tbl ? escapeHtml(tbl.name) : ('Мизи №'+o.table);
@@ -2128,8 +2146,10 @@ function attachTableGridEvents(){
 /* ---------- Waiter view ---------- */
 function renderWaiter(){
   const occCount = occupiedTableCount();
-  const pendingScheduled = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType!=='takeaway')
+  const schedPhoneQuery = (state.waiterSchedPhoneQuery||'').replace(/\D/g,'');
+  const pendingScheduledAll = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType!=='takeaway')
     .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
+  const pendingScheduled = schedPhoneQuery ? pendingScheduledAll.filter(o=>String(o.customerPhone||'').replace(/\D/g,'').includes(schedPhoneQuery)) : pendingScheduledAll;
   const freeTables = state.tables.filter(t=>!activeOrderForTable(t.id));
   const scheduledHtml = pendingScheduled.length ? pendingScheduled.map(o=>{
     const tableOptions = freeTables.map(t=>`<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
@@ -2146,16 +2166,27 @@ function renderWaiter(){
         ` : `<span style="font-size:12px;color:#9c8f78;">мизи озод нест</span>`}
       </div>
     </div>`;
-  }).join('') : '';
+  }).join('') : (schedPhoneQuery ? `<p style="font-size:13px;color:#9c8f78;">Ҳеҷ фармоиши вақтдор бо ин рақам ёфт нашуд</p>` : '');
   return `
   <div class="container">
     <div class="section-title">Мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <div class="table-grid">${buildTableCards()}</div>
-    ${pendingScheduled.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор</div><p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳангоми омадани мизожон, мизи озодро интихоб карда «Ба миз гузоштан»-ро занед</p>${scheduledHtml}` : ''}
+    ${pendingScheduledAll.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор</div><p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳангоми омадани мизожон, мизи озодро интихоб карда «Ба миз гузоштан»-ро занед</p>
+    <input type="tel" id="waiterSchedPhoneInput" value="${escapeHtml(state.waiterSchedPhoneQuery||'')}" placeholder="Ҷустуҷӯ бо рақами телефон..." style="width:100%;max-width:320px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:12px;">
+    ${scheduledHtml}` : ''}
   </div>`;
 }
 function attachWaiterEvents(){
   attachTableGridEvents();
+  const schedPhoneInput = document.getElementById('waiterSchedPhoneInput');
+  if(schedPhoneInput){
+    schedPhoneInput.addEventListener('input', ()=>{
+      state.waiterSchedPhoneQuery = schedPhoneInput.value;
+      render();
+      const el = document.getElementById('waiterSchedPhoneInput');
+      if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }
+    });
+  }
   document.querySelectorAll('[data-assignsched]').forEach(el=>{
     // Restore saved selection after re-render
     const orderId = el.dataset.assignsched;
@@ -2256,6 +2287,7 @@ function renderCashier(){
       <button class="btn-primary" id="openTakeawayBtn" style="padding:11px 18px;">🥡 + Фармоиши бо худ бурдан</button>
       <button class="btn-primary" id="openScheduledBtn" style="padding:11px 18px;background:var(--olive);">🕐 + Фармоиши вақтдор</button>
     </div>
+    ${oshRemainingBadge()}
     <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
     <div class="table-grid">${buildTableCards()}</div>
@@ -3441,6 +3473,7 @@ function renderAdminOrders(){
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
       <div class="stat-card"><div class="label">Вазни оши имрӯза (бо худ бурдан+вақтдор)</div><div class="value">${oshWeightForOrdersTab().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
     </div>
     ${rowsHtml}
   `;
@@ -4275,6 +4308,7 @@ function renderAdminSettings(){
     </div>
     <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
   </div>
+  ${oshRemainingBadge()}
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
       <label>Вазни 1 порсияи ош (грамм)</label>
