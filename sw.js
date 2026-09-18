@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-15-V62-WAITER-PHONE-SEARCH';
+const CACHE_NAME = 'kafe-shell-2026-09-17-V63-OSH-TOTAL';
 const APP_SHELL = [
   './',
   './index.html',
