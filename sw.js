@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-17-V63-OSH-TOTAL';
+const CACHE_NAME = 'kafe-shell-2026-09-18-V65-DELETE-OLD-ORDERS';
 const APP_SHELL = [
   './',
   './index.html',
