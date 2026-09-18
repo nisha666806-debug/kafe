@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-15-V62-WAITER-PHONE-SEARCH';
+const APP_VERSION = '2026-09-17-V63-OSH-TOTAL';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -849,12 +849,11 @@ function oshOrderedKgToday(){
 // A scheduled order that's already been seated (type becomes 'dine-in') no longer counts here —
 // at that point it's ordinary table demand, tracked by oshOrderedKgToday() instead.
 
-function oshRemainingBadge(){
-  // Нишондиҳандаи оши боқимонда барои форми заказ
-  const hasStock = state.oshStock && state.oshStock.date === todayKey();
-  if(!hasStock) return '';
+function oshTotalOrderedToday(){
+  // Вазни умумии ошест, ки имрӯз фармоиш дода шудааст — ин рақам ҳеҷ гоҳ кам намешавад
+  // (на ҳангоми ба миз гузоштани фармоиши вактдор, на ҳангоми пӯшидани чек) — танҳо бекоршавии
+  // фармоиш метавонад онро кам кунад. Барои ин мақсад қасдан ҳамаи намуди фармоиш ҳисоб мешавад.
   const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
-  // osh ordered including scheduled and active orders
   let kgOrdered = 0;
   state.orders.filter(o=>isToday(o.createdAt) && o.status!=='cancelled').forEach(o=>{
     o.items.forEach(it=>{
@@ -864,6 +863,13 @@ function oshRemainingBadge(){
       }
     });
   });
+  return kgOrdered;
+}
+function oshRemainingBadge(){
+  // Нишондиҳандаи оши боқимонда барои форми заказ
+  const hasStock = state.oshStock && state.oshStock.date === todayKey();
+  if(!hasStock) return '';
+  const kgOrdered = oshTotalOrderedToday();
   const cookedKg = Number(state.oshStock.kg)||0;
   const remaining = cookedKg - kgOrdered;
   const color = remaining <= 0 ? 'var(--brick)' : remaining < 3 ? '#c07f00' : 'var(--olive)';
@@ -3472,8 +3478,20 @@ function renderAdminOrders(){
     <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
+      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div></div>
       <div class="stat-card"><div class="label">Вазни оши имрӯза (бо худ бурдан+вақтдор)</div><div class="value">${oshWeightForOrdersTab().toFixed(2)} кг</div></div>
       <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
+    </div>
+    <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
+      <p style="font-size:13px;color:#6b5f4d;margin:0 0 8px;">Миқдори кг оше, ки имрӯз пухта шуд — аз рӯи ин ҳисобу китоби «оши боқимонда» иҷро мешавад.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+        <div class="field">
+          <label>Ош пухта шуд (кг)</label>
+          <input type="number" id="oshStockInput" value="${state.oshStock && state.oshStock.date===todayKey() ? state.oshStock.kg : ''}" min="0" step="0.5" placeholder="масалан: 20">
+        </div>
+        <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
+      </div>
+      ${oshRemainingBadge() ? `<div style="margin-top:12px;">${oshRemainingBadge()}</div>` : ''}
     </div>
     ${rowsHtml}
   `;
@@ -4388,6 +4406,14 @@ function renderAdminSettings(){
 }
 
 function attachAdminOrdersEvents(){
+  const saveOshBtn = document.getElementById('saveOshStockBtn');
+  if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
+    const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
+    state.oshStock = {date: todayKey(), kg};
+    await saveOshStock(state.oshStock);
+    showToast('Миқдори ош сабт шуд');
+    render();
+  });
   const clientSearchInput = document.getElementById('clientSearchInput');
   if(clientSearchInput){
     clientSearchInput.addEventListener('input', ()=>{
