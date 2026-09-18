@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-18-V65-DELETE-OLD-ORDERS';
+const APP_VERSION = '2026-09-18-V66-PRO';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -384,6 +384,93 @@ async function migrateOrdersToV2(){
     try{localStorage.setItem(localMarker,'1');}catch(e){}
     return true;
   }catch(e){console.error('Orders V2 migration failed',e);return false;}
+}
+async function loadActiveOrdersV2(){
+  try{
+    const snap=await ordersCollectionRef().where('status','==','active').get();
+    const orders=[];
+    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;orders.push({...x,id:x.id||d.id});});
+    orders.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+    return {ok:true,value:orders};
+  }catch(e){console.error('loadActiveOrdersV2 failed',e);return {ok:false,value:null};}
+}
+async function loadPaidOrdersSinceV2(sinceTs){
+  try{
+    const start=Math.max(0,Number(sinceTs)||0);
+    const snap=await ordersCollectionRef().where('paidAt','>=',start).get();
+    const orders=[];
+    snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;if(x.status==='paid')orders.push({...x,id:x.id||d.id});});
+    orders.sort((a,b)=>(Number(a.paidAt)||0)-(Number(b.paidAt)||0));
+    return {ok:true,value:orders};
+  }catch(e){console.error('loadPaidOrdersSinceV2 failed',e);return {ok:false,value:null};}
+}
+function mergeActiveOrdersIntoState(activeOrders){
+  const nonActive=(state.orders||[]).filter(o=>o.status!=='active');
+  const byId=new Map(nonActive.map(o=>[String(o.id),o]));
+  (activeOrders||[]).forEach(o=>byId.set(String(o.id),o));
+  state.orders=Array.from(byId.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+  state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+}
+function mergePaidOrdersIntoState(paidOrders){
+  const active=(state.orders||[]).filter(o=>o.status==='active');
+  const byId=new Map(active.map(o=>[String(o.id),o]));
+  (paidOrders||[]).forEach(o=>byId.set(String(o.id),o));
+  state.orders=Array.from(byId.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+  state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
+}
+async function ensurePaidOrdersLoaded(scope){
+  const start = scope==='month' ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime() : reportPeriodStart();
+  const key=String(Math.max(0,Number(start)||0));
+  if(state.__paidOrdersLoadedSince===key) return true;
+  if(state.__dataLoadPromises.paid) return await state.__dataLoadPromises.paid;
+  state.__dataLoadPromises.paid=(async()=>{
+    const result=await loadPaidOrdersSinceV2(start);
+    if(!result.ok) return false;
+    mergePaidOrdersIntoState(result.value);
+    if(state.__paidOrdersUnsub){try{state.__paidOrdersUnsub();}catch(e){}}
+    try{
+      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',Math.max(0,Number(start)||0)).onSnapshot(snap=>{
+        const paid=[];
+        snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;if(x.status==='paid')paid.push({...x,id:x.id||d.id});});
+        const active=(state.orders||[]).filter(o=>o.status==='active');
+        const byId=new Map(active.map(o=>[String(o.id),o]));
+        paid.forEach(o=>byId.set(String(o.id),o));
+        state.orders=Array.from(byId.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+        if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
+      },err=>console.error('Paid orders realtime error',err));
+    }catch(e){console.error('Paid orders listener attach failed',e);}
+    state.__paidOrdersLoadedSince=key;
+    return true;
+  })();
+  try{return await state.__dataLoadPromises.paid;}finally{delete state.__dataLoadPromises.paid;}
+}
+async function ensureScheduledOrdersLoaded(){
+  if(state.__scheduledOrdersLoaded) return true;
+  if(state.__dataLoadPromises.scheduled) return await state.__dataLoadPromises.scheduled;
+  state.__dataLoadPromises.scheduled=(async()=>{
+    try{
+      const snap=await ordersCollectionRef().where('type','==','scheduled').get();
+      const scheduled=[];
+      snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;scheduled.push({...x,id:x.id||d.id});});
+      const keep=(state.orders||[]).filter(o=>o.type!=='scheduled');
+      const byId=new Map(keep.map(o=>[String(o.id),o]));
+      scheduled.forEach(o=>byId.set(String(o.id),o));
+      state.orders=Array.from(byId.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+      if(state.__scheduledOrdersUnsub){try{state.__scheduledOrdersUnsub();}catch(e){}}
+      state.__scheduledOrdersUnsub=ordersCollectionRef().where('type','==','scheduled').onSnapshot(snap2=>{
+        const incoming=[];
+        snap2.forEach(d=>{const x=d.data()||{};delete x._migratedAt;incoming.push({...x,id:x.id||d.id});});
+        const keep=(state.orders||[]).filter(o=>o.type!=='scheduled');
+        const m=new Map(keep.map(o=>[String(o.id),o]));
+        incoming.forEach(o=>m.set(String(o.id),o));
+        state.orders=Array.from(m.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+        if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
+      });
+      state.__scheduledOrdersLoaded=true;
+      return true;
+    }catch(e){console.error('Scheduled orders load failed',e);return false;}
+  })();
+  try{return await state.__dataLoadPromises.scheduled;}finally{delete state.__dataLoadPromises.scheduled;}
 }
 async function loadOrdersV2(){
   try{
@@ -438,6 +525,7 @@ async function deleteOldOrders(){
     const todayStart = new Date(); todayStart.setHours(0,0,0,0);
     const cutoff = todayStart.getTime();
     const toDeleteRefs = [];
+    const deletedIds = [];
     snap.forEach(d=>{
       const data = d.data()||{};
       const createdAt = Number(data.createdAt)||0;
@@ -445,6 +533,7 @@ async function deleteOldOrders(){
       // чекҳои рӯзҳои гузашта, ки аллакай пӯшида шудаанд.
       if(createdAt < cutoff && data.status !== 'active'){
         toDeleteRefs.push(d.ref);
+        deletedIds.push(d.id);
       }
     });
     for(let i=0;i<toDeleteRefs.length;i+=400){
@@ -452,7 +541,12 @@ async function deleteOldOrders(){
       toDeleteRefs.slice(i,i+400).forEach(ref=>batch.delete(ref));
       await batch.commit();
     }
-    return {ok:true, deleted:toDeleteRefs.length};
+    if(deletedIds.length){
+      const removed=new Set(deletedIds.map(String));
+      state.orders=(state.orders||[]).filter(o=>!removed.has(String(o.id)));
+      state.__lastKnownOrderIds=new Set((state.orders||[]).map(o=>o.id));
+    }
+    return {ok:true, deleted:deletedIds.length};
   }catch(e){
     console.error('deleteOldOrders failed', e);
     return {ok:false, deleted:0};
@@ -692,15 +786,24 @@ async function deleteBonus(id){
   await saveBonuses(state.bonuses);
   showToast('Бонус нест шуд');
 }
-function downloadBackup(){
+async function downloadBackup(){
+  // Backup is intentionally a manual, explicit full read. The live application uses
+  // filtered/lazy order reads, but a backup must contain the complete order history
+  // currently present in Firestore rather than only whatever screen was opened.
+  let backupOrders=state.orders||[];
+  if(db){
+    const result=await loadOrdersV2();
+    if(!result.ok){ showToast('Захира гирифта нашуд — таърихи чекҳо пурра хонда нашуд'); return; }
+    backupOrders=result.value||[];
+  }
   // Паролҳо (ҳатто хаш) ба файли backup дохил намешаванд
   const safeAccounts = (state.accounts||[]).map(a=>({id:a.id, username:a.username, role:a.role, wageType:a.wageType, wageAmount:a.wageAmount}));
   const data = {
     exportedAt: new Date().toISOString(),
     cafeName: state.settings.cafeName,
-    menu: state.menu, orders: state.orders, settings: state.settings,
+    menu: state.menu, orders: backupOrders, settings: state.settings,
     reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
-    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses
+    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses, dailyClosures: state.dailyClosures
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -806,25 +909,19 @@ let state = {
   formOpenAt:null,          // safety timeout for stuck forms
   cashierTab:'main',        // active tab for cashier view
   _assignSelMap:{},         // persists scheduled-order table selection across re-renders
+  __paidOrdersLoadedSince:null,
+  __paidOrdersUnsub:null,
+  __scheduledOrdersLoaded:false,
+  __scheduledOrdersUnsub:null,
+  __dataLoadPromises:{},
 };
 
 function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
-/* ============ PASSWORD STORAGE V46 ============
-   New/changed passwords are stored exactly as entered so Admin can view them.
-   Existing legacy SHA-256 hashes remain usable for login until the Admin changes them. */
-async function hashPassword(plain){ return String(plain ?? ''); }
-function isLegacyPasswordHash(value){ return /^[a-f0-9]{64}$/i.test(String(value ?? '')); }
-async function legacyPasswordHash(plain){
-  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(plain ?? '')));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
-   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
-   мекунем ва фавран захира мекунем. */
-async function migrateAccountPasswordsIfNeeded(){ return true; }
+/* ============ PASSWORD STORAGE ============
+   Passwords are intentionally stored as plain text for this application. */
 
 function uid(prefix){
   const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -952,11 +1049,9 @@ async function init(){
   }catch(e){
     console.error('Initial orders migration failed',e);
   }
-  // Orders are now stored as individual documents under cafes/{cafeId}/orders/{orderId};
-  // default/no-cafe fallback uses cafeData/orderItems/items/{orderId}.
-  const ordersResult = await loadOrdersV2();
-  // A temporary order-path permission/network problem must not blank the entire
-  // application or prevent login. Realtime sync will retry after login.
+  // Only active orders are needed for the live operational screens at startup.
+  // Historical paid orders are loaded lazily by report/salary/client-history screens.
+  const ordersResult = await loadActiveOrdersV2();
   const orders = ordersResult.ok ? ordersResult.value : [];
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
@@ -1010,9 +1105,6 @@ async function init(){
     await saveAccounts(state.accounts);
   }
 
-  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
-  await migrateAccountPasswordsIfNeeded();
-
   const session = loadSession();
   if(session){
     // Session бо username санҷида мешавад — парол дар localStorage нест
@@ -1042,7 +1134,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveReservations(state.reservations);
   state.oshStock = {date:'', kg:0};
   await saveOshStock(state.oshStock);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:String(adminPass), role:'admin'};
+  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -1066,6 +1158,10 @@ let __resubscribeTimer = null;
 function teardownRealtimeSync(){
   __realtimeUnsubs.forEach(unsub=>{ try{ unsub(); }catch(e){} });
   __realtimeUnsubs = [];
+  if(state.__paidOrdersUnsub){ try{state.__paidOrdersUnsub();}catch(e){} state.__paidOrdersUnsub=null; }
+  if(state.__scheduledOrdersUnsub){ try{state.__scheduledOrdersUnsub();}catch(e){} state.__scheduledOrdersUnsub=null; }
+  state.__paidOrdersLoadedSince=null;
+  state.__scheduledOrdersLoaded=false;
 }
 // Only defer a redraw while the person's cursor is literally inside a text field / select
 // right now — far more precise than a blanket "form is open" timer, and it means every OTHER
@@ -1080,13 +1176,11 @@ function setupRealtimeSync(){
   teardownRealtimeSync();
   // Migration runs once in init() — no need to repeat it here.
   try{
-    const unsub=ordersCollectionRef().onSnapshot(snap=>{
+    const unsub=ordersCollectionRef().where('status','==','active').onSnapshot(snap=>{
       if(!state.role)return;
       const parsed=[];
       snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
-      parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-      state.orders=parsed;
-      state.__lastKnownOrderIds=new Set(parsed.map(o=>o.id));
+      mergeActiveOrdersIntoState(parsed);
       if(state.activeTable===null && !isActivelyEditingFormField())render();
     },err=>{
       console.error('Orders realtime error',err);
@@ -1120,28 +1214,8 @@ function startSyncWatchdog(){
 
 let __ordersPollInFlight = false;
 async function pollOrdersFast(){
-  if(__ordersPollInFlight || !state.role || !state.loaded) return;
-  __ordersPollInFlight = true;
-  try{
-    const snap = await ordersCollectionRef().get({source:'server'});
-    const parsed = [];
-    snap.forEach(d=>{
-      const x = d.data() || {};
-      delete x._migratedAt;
-      parsed.push({...x, id:x.id || d.id});
-    });
-    parsed.sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-    state.orders = parsed;
-    state.__lastKnownOrderIds = new Set(parsed.map(o=>o.id));
-    state.__lastKnownOrderSnapshots = new Map(parsed.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
-    state.__lastOrdersServerStamp = Date.now();
-    state.__lastOrdersServerAt = Date.now();
-    if(state.activeTable===null && !isActivelyEditingFormField()) render();
-  }catch(e){
-    console.warn('Fast orders sync failed; realtime listener remains active', e);
-  }finally{
-    __ordersPollInFlight = false;
-  }
+  // Deprecated: live order synchronization is handled by the filtered active-order listener.
+  return false;
 }
 
 // Full fallback is intentionally less frequent because it reads many documents. It is still
@@ -1153,27 +1227,7 @@ function startFullSyncWatchdog(){
   if(__fullWatchdogInterval) clearInterval(__fullWatchdogInterval);
 }
 
-async function pollRefresh(){
-  if(!state.role || !state.loaded) return;
-  if(state.activeTable!==null) return;
-  if(isActivelyEditingFormField()) return;
-  const all = await loadAll();
-  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures} = all;
-  const ordersResult = await loadOrdersV2();
-  const orders = ordersResult.ok ? ordersResult.value : null;
-  if(menu) state.menu = menu;
-  if(orders){ state.orders = orders; state.__lastKnownOrderIds = new Set(orders.map(o=>o.id)); state.__lastKnownOrderSnapshots = new Map(orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))])); }
-  if(settings) state.settings = settings;
-  if(reservations) state.reservations = reservations;
-  if(tables) state.tables = tables;
-  if(oshStock) state.oshStock = oshStock;
-  if(accounts) state.accounts = accounts;
-  if(inventory) state.inventory = inventory;
-  if(activityLog) state.activityLog = activityLog;
-  if(bonuses) state.bonuses = bonuses;
-  if(dailyClosures) state.dailyClosures = dailyClosures;
-  render();
-}
+async function pollRefresh(){ return false; }
 
 /* ============ ORDER HELPERS ============ */
 function activeOrderForTable(t){
@@ -1744,8 +1798,7 @@ async function addAccount(username, password, role){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   const id = uid('acc');
-  const plainPass = String(password);
-  state.accounts.push({id, username, password: plainPass, role, wageType:'daily', wageAmount:0});
+  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1754,16 +1807,15 @@ async function addAccount(username, password, role){
 async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
-  if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
-  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
+  if(!username){ showToast('Логинро пур кунед'); return false; }
+  if(password && password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  const plainPass = String(password);
-  acc.username=username; acc.password=plainPass; acc.role=role;
+  acc.username=username; if(password) acc.password=password; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -1952,7 +2004,11 @@ function render(){
   if(state.role==='waiter') attachWaiterEvents();
   if(state.role==='cashier'){
     document.querySelectorAll('[data-cashiertab]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.cashierTab = el.dataset.cashiertab; render(); });
+      el.addEventListener('click', async ()=>{
+        const tab=el.dataset.cashiertab;
+        if(tab==='orders') await ensureScheduledOrdersLoaded();
+        state.cashierTab = tab; render();
+      });
     });
     if((state.cashierTab||'main')==='orders'){
       attachAdminOrdersEvents();
@@ -2080,8 +2136,7 @@ function attachLoginEvents(){
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
     if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
-    const legacyHashInput = await legacyPasswordHash(p);
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && (String(a.password ?? '')===p || String(a.password ?? '')===legacyHashInput));
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && String(a.password ?? '')===p);
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
@@ -3834,7 +3889,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(isLegacyPasswordHash(editTarget.password)?'':editTarget.password)}" placeholder="${isLegacyPasswordHash(editTarget.password)?'Пароли кӯҳна — пароли нав гузоред':'Парол'}"></div>
+      <div class="field small"><label>Пароли нав <span style="color:#9c5f00;font-size:11px;">(холӣ = нигоҳ доштан)</span></label><input type="password" id="editAccPassword" value="" placeholder="Пароли нав" autocomplete="new-password"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
@@ -4497,8 +4552,12 @@ function attachAdminEvents(){
     state.formOpenAt = Date.now();
   }
   document.querySelectorAll('.admin-tab').forEach(el=>{
-    el.addEventListener('click', ()=>{
-      state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
+    el.addEventListener('click', async ()=>{
+      const nextTab=el.dataset.atab;
+      if(nextTab==='report'){ await ensurePaidOrdersLoaded('report'); }
+      else if(nextTab==='salary'){ await ensurePaidOrdersLoaded('month'); }
+      else if(nextTab==='orders'){ await ensureScheduledOrdersLoaded(); }
+      state.adminTab = nextTab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
       state.confirmClearReport=false;
