@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-17-V63-OSH-TOTAL';
+const APP_VERSION = '2026-09-18-V65-DELETE-OLD-ORDERS';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -429,6 +429,33 @@ async function deleteOrderV2(orderId){
   }catch(e){
     console.error('deleteOrderV2 failed',e);
     return false;
+  }
+}
+async function deleteOldOrders(){
+  if(!db) return {ok:false, deleted:0};
+  try{
+    const snap = await ordersCollectionRef().get();
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const cutoff = todayStart.getTime();
+    const toDeleteRefs = [];
+    snap.forEach(d=>{
+      const data = d.data()||{};
+      const createdAt = Number(data.createdAt)||0;
+      // Имрӯзаро ва фармоишҳои ҳанӯз фаъол (пардохтнашуда)-ро ҳеҷ гоҳ нест намекунем — танҳо
+      // чекҳои рӯзҳои гузашта, ки аллакай пӯшида шудаанд.
+      if(createdAt < cutoff && data.status !== 'active'){
+        toDeleteRefs.push(d.ref);
+      }
+    });
+    for(let i=0;i<toDeleteRefs.length;i+=400){
+      const batch = db.batch();
+      toDeleteRefs.slice(i,i+400).forEach(ref=>batch.delete(ref));
+      await batch.commit();
+    }
+    return {ok:true, deleted:toDeleteRefs.length};
+  }catch(e){
+    console.error('deleteOldOrders failed', e);
+    return {ok:false, deleted:0};
   }
 }
 async function reconcileOrdersV2(orders){
@@ -704,7 +731,7 @@ const DEFAULT_MENU = [
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
   checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
-  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}'};
+  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}', oshTotalResetAt:0};
 
 /* ============ STATE ============ */
 let state = {
@@ -749,6 +776,7 @@ let state = {
   editingId:null,
   confirmDeleteId:null,
   confirmResetMenu:false,
+  confirmDeleteOldOrders:false,
   confirmClearReport:false,
   showCloseDayConfirm:false,
   confirmDeleteClosureId:null,
@@ -853,9 +881,12 @@ function oshTotalOrderedToday(){
   // Вазни умумии ошест, ки имрӯз фармоиш дода шудааст — ин рақам ҳеҷ гоҳ кам намешавад
   // (на ҳангоми ба миз гузоштани фармоиши вактдор, на ҳангоми пӯшидани чек) — танҳо бекоршавии
   // фармоиш метавонад онро кам кунад. Барои ин мақсад қасдан ҳамаи намуди фармоиш ҳисоб мешавад.
+  // Тугмаи «Пок кардан» вақти пок карданро (oshTotalResetAt) пеш мебарад — фармоишҳои пеш аз он
+  // дигар ба ҳисоб дохил намешаванд, аммо худи фармоишҳо (ва ҳисоботи молиявӣ) тағйир намеёбанд.
+  const resetAt = Number(state.settings.oshTotalResetAt) || 0;
   const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
   let kgOrdered = 0;
-  state.orders.filter(o=>isToday(o.createdAt) && o.status!=='cancelled').forEach(o=>{
+  state.orders.filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && o.createdAt>=resetAt).forEach(o=>{
     o.items.forEach(it=>{
       if(getItemCategory(it)==='Ош'){
         if(it.unit==='kg') kgOrdered += it.qty/1000;
@@ -2076,7 +2107,7 @@ function attachCommonEvents(){
   if(logoutBtn) logoutBtn.addEventListener('click', ()=>{
     clearSession();
     state.role=null; state.currentUser=null; state.activeTable=null; state.formOpen=false;
-    state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
+    state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
     state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
     state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
     state.loginError=null;
@@ -3478,7 +3509,9 @@ function renderAdminOrders(){
     <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
-      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
+        <button class="icon-btn" id="clearOshTotalBtn" style="margin-top:6px;font-size:11px;padding:4px 10px;">↺ Пок кардан</button>
+      </div>
       <div class="stat-card"><div class="label">Вазни оши имрӯза (бо худ бурдан+вақтдор)</div><div class="value">${oshWeightForOrdersTab().toFixed(2)} кг</div></div>
       <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
     </div>
@@ -4317,6 +4350,18 @@ function renderAdminSettings(){
     <button class="btn-ghost" style="flex:none;padding:10px 20px;align-self:flex-start;" id="downloadBackupBtn">📤 Захира гирифтан (JSON)</button>
   </div>
 
+  <div class="section-title" style="margin-top:32px;">Нест кардани чекҳои кӯҳна</div>
+  <div class="form-box" style="max-width:460px;flex-direction:column;align-items:flex-start;">
+    <p style="font-size:13px;color:#6b5f4d;margin:0 0 6px;">Ҳамаи чекҳои рӯзҳои гузашта (пардохтшуда/бекоршуда)-ро аз база пурра нест мекунад — барои коҳиш додани хароҷоти Firestore. Чекҳои имрӯза ва фармоишҳои ҳанӯз фаъол ҳеҷ гоҳ нест намешаванд. <b>Ин амал бебозгашт аст</b> — пеш аз он захира гиред (тугмаи боло).</p>
+    ${state.confirmDeleteOldOrders ? `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <span style="font-size:13px;color:var(--brick);font-weight:600;">Мутмаин ҳастед? Бебозгашт аст!</span>
+        <button class="btn-pay" style="flex:none;padding:8px 16px;background:var(--brick);" id="confirmDeleteOldOrdersBtn">Ҳа, нест кун</button>
+        <button class="btn-ghost" id="cancelDeleteOldOrdersBtn">Не</button>
+      </div>
+    ` : `<button class="btn-ghost" style="border-color:var(--brick);color:var(--brick);" id="deleteOldOrdersBtn">🗑 Нест кардани чекҳои кӯҳна</button>`}
+  </div>
+
   <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза</div>
   <div class="settings-form">
     <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Миқдори кг оше, ки имрӯз пухта шуд — ба ҳама (официант, кассир, ошпаз) нишон дода мешавад.</p>
@@ -4406,6 +4451,14 @@ function renderAdminSettings(){
 }
 
 function attachAdminOrdersEvents(){
+  const clearOshTotalBtn = document.getElementById('clearOshTotalBtn');
+  if(clearOshTotalBtn) clearOshTotalBtn.addEventListener('click', async ()=>{
+    if(!confirm('Вазни умумии фармоишҳои имрӯзаро ба 0 баргардонем? Худи фармоишҳо тағйир намеёбанд, танҳо ин ҳисоб аз нав сар мешавад.')) return;
+    state.settings = {...state.settings, oshTotalResetAt: Date.now()};
+    await saveSettings(state.settings);
+    showToast('Ҳисоб пок шуд');
+    render();
+  });
   const saveOshBtn = document.getElementById('saveOshStockBtn');
   if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
     const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
@@ -4445,7 +4498,7 @@ function attachAdminEvents(){
   }
   document.querySelectorAll('.admin-tab').forEach(el=>{
     el.addEventListener('click', ()=>{
-      state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false;
+      state.adminTab = el.dataset.atab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
       state.confirmClearReport=false;
@@ -4858,6 +4911,24 @@ function attachAdminEvents(){
     if(resetBtn) resetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = true; render(); });
     const cancelResetBtn = document.getElementById('cancelResetBtn');
     if(cancelResetBtn) cancelResetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = false; render(); });
+    const deleteOldOrdersBtn = document.getElementById('deleteOldOrdersBtn');
+    if(deleteOldOrdersBtn) deleteOldOrdersBtn.addEventListener('click', ()=>{ state.confirmDeleteOldOrders = true; render(); });
+    const cancelDeleteOldOrdersBtn = document.getElementById('cancelDeleteOldOrdersBtn');
+    if(cancelDeleteOldOrdersBtn) cancelDeleteOldOrdersBtn.addEventListener('click', ()=>{ state.confirmDeleteOldOrders = false; render(); });
+    const confirmDeleteOldOrdersBtn = document.getElementById('confirmDeleteOldOrdersBtn');
+    if(confirmDeleteOldOrdersBtn) confirmDeleteOldOrdersBtn.addEventListener('click', async ()=>{
+      confirmDeleteOldOrdersBtn.disabled = true;
+      confirmDeleteOldOrdersBtn.textContent = 'Дар ҳоли нест кардан...';
+      const result = await deleteOldOrders();
+      state.confirmDeleteOldOrders = false;
+      if(result.ok){
+        showToast(result.deleted+' чек нест карда шуд');
+        await logActivity('Чекҳои кӯҳнаро нест кард: '+result.deleted+' дона');
+      } else {
+        showToast('Хатогӣ ҳангоми нест кардан');
+      }
+      render();
+    });
     const downloadBackupBtn = document.getElementById('downloadBackupBtn');
     if(downloadBackupBtn) downloadBackupBtn.addEventListener('click', downloadBackup);
     const saveOshBtn = document.getElementById('saveOshStockBtn');
@@ -4940,7 +5011,7 @@ function attachAdminEvents(){
     if(confirmResetBtn) confirmResetBtn.addEventListener('click', async ()=>{
       state.menu = DEFAULT_MENU.map(m=>({...m}));
       await saveMenu(state.menu);
-      state.confirmResetMenu = false;
+      state.confirmResetMenu = false; state.confirmDeleteOldOrders = false;
       showToast('Менюи пешфарз барқарор шуд');
       render();
     });
