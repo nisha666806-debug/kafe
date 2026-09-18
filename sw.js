@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-18-V66-PROFESSIONAL';
+const CACHE_NAME = 'kafe-shell-2026-09-18-V67-PROFESSIONAL';
 
 const APP_SHELL = [
   './',
@@ -48,6 +48,21 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // Always get the latest version-control files from the server.
+  if (
+    url.pathname.endsWith('/index.html') ||
+    url.pathname.endsWith('/version.json') ||
+    url.pathname.endsWith('/sw.js')
+  ) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // Network first for the rest of the application.
+  // If there is no internet, use the cached copy.
   event.respondWith(
     fetch(event.request)
       .then(response => {
