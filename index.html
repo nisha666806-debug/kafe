@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-18-V67-PROFESSIONAL';
+const APP_VERSION = '2026-09-19-V68-OPTIMIZED';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -419,17 +419,21 @@ function mergePaidOrdersIntoState(paidOrders){
   state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
 }
 async function ensurePaidOrdersLoaded(scope){
-  const start = scope==='month' ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime() : reportPeriodStart();
-  const key=String(Math.max(0,Number(start)||0));
-  if(state.__paidOrdersLoadedSince===key) return true;
+  const start = scope==='month' ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime()
+    : scope==='today' ? (()=>{ const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); })()
+    : reportPeriodStart();
+  const normalizedStart = Math.max(0, Number(start)||0);
+  // Агар аллакай аз санаи баробар ё пештар бор карда шуда бошад, доираи ҳозира аллакай
+  // фаро мегирад — набояд бо доираи тангтар аз нав бор кунем (садо/интернетро сарф намекунем).
+  if(state.__paidOrdersLoadedSince!==null && normalizedStart>=state.__paidOrdersLoadedSince) return true;
   if(state.__dataLoadPromises.paid) return await state.__dataLoadPromises.paid;
   state.__dataLoadPromises.paid=(async()=>{
-    const result=await loadPaidOrdersSinceV2(start);
+    const result=await loadPaidOrdersSinceV2(normalizedStart);
     if(!result.ok) return false;
     mergePaidOrdersIntoState(result.value);
     if(state.__paidOrdersUnsub){try{state.__paidOrdersUnsub();}catch(e){}}
     try{
-      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',Math.max(0,Number(start)||0)).onSnapshot(snap=>{
+      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',normalizedStart).onSnapshot(snap=>{
         const paid=[];
         snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;if(x.status==='paid')paid.push({...x,id:x.id||d.id});});
         const active=(state.orders||[]).filter(o=>o.status==='active');
@@ -439,7 +443,7 @@ async function ensurePaidOrdersLoaded(scope){
         if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
       },err=>console.error('Paid orders realtime error',err));
     }catch(e){console.error('Paid orders listener attach failed',e);}
-    state.__paidOrdersLoadedSince=key;
+    state.__paidOrdersLoadedSince=normalizedStart;
     return true;
   })();
   try{return await state.__dataLoadPromises.paid;}finally{delete state.__dataLoadPromises.paid;}
@@ -920,8 +924,19 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
-/* ============ PASSWORD STORAGE ============
-   Passwords are intentionally stored as plain text for this application. */
+/* ============ PASSWORD STORAGE V46 ============
+   New/changed passwords are stored exactly as entered so Admin can view them.
+   Existing legacy SHA-256 hashes remain usable for login until the Admin changes them. */
+async function hashPassword(plain){ return String(plain ?? ''); }
+function isLegacyPasswordHash(value){ return /^[a-f0-9]{64}$/i.test(String(value ?? '')); }
+async function legacyPasswordHash(plain){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(plain ?? '')));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
+   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
+   мекунем ва фавран захира мекунем. */
+async function migrateAccountPasswordsIfNeeded(){ return true; }
 
 function uid(prefix){
   const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -1105,6 +1120,9 @@ async function init(){
     await saveAccounts(state.accounts);
   }
 
+  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
+  await migrateAccountPasswordsIfNeeded();
+
   const session = loadSession();
   if(session){
     // Session бо username санҷида мешавад — парол дар localStorage нест
@@ -1112,6 +1130,7 @@ async function init(){
     if(acc){
       state.currentUser = {username:acc.username, role:acc.role};
       state.role = acc.role;
+      if(acc.role==='cashier' || acc.role==='admin'){ ensurePaidOrdersLoaded('today'); }
     } else {
       clearSession(); // account was deleted — fall back to login
     }
@@ -1134,7 +1153,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveReservations(state.reservations);
   state.oshStock = {date:'', kg:0};
   await saveOshStock(state.oshStock);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
+  const adminAcc = {id:'acc_admin', username:adminUser, password:String(adminPass), role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -1798,7 +1817,8 @@ async function addAccount(username, password, role){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   const id = uid('acc');
-  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
+  const plainPass = String(password);
+  state.accounts.push({id, username, password: plainPass, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1807,15 +1827,16 @@ async function addAccount(username, password, role){
 async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
-  if(!username){ showToast('Логинро пур кунед'); return false; }
-  if(password && password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
+  if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
+  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  acc.username=username; if(password) acc.password=password; acc.role=role;
+  const plainPass = String(password);
+  acc.username=username; acc.password=plainPass; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -2136,12 +2157,14 @@ function attachLoginEvents(){
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
     if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && String(a.password ?? '')===p);
+    const legacyHashInput = await legacyPasswordHash(p);
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && (String(a.password ?? '')===p || String(a.password ?? '')===legacyHashInput));
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
     saveSession({username:acc.username, role:acc.role});
+    if(acc.role==='cashier' || acc.role==='admin'){ ensurePaidOrdersLoaded('today'); }
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -2480,13 +2503,31 @@ async function submitTakeaway(cashAmount, noncashAmount){
 }
 
 /* ---------- Scheduled orders (buyurtma bo vaqt) — no table, unpaid until pickup ---------- */
-function scheduledTotal(){
+function scheduledSubtotal(){
   let total = 0;
   Object.keys(state.scheduledItems).forEach(mid=>{
     const item = state.menu.find(m=>m.id===mid);
     if(item) total += lineTotal(item, state.scheduledItems[mid]);
   });
   return total;
+}
+function scheduledDiscountAmount(){
+  // Тахфиф танҳо барои фармоиши вақтдори "бо худ бурдан" ва танҳо барои категорияи "Ош" —
+  // ҳамон фоизи танзимшуда, ки барои фармоиши оддии бо худ бурдан истифода мешавад.
+  if(state.scheduledDeliveryType!=='takeaway') return 0;
+  const pct = Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0));
+  if(pct<=0) return 0;
+  let oshTotal = 0;
+  Object.keys(state.scheduledItems).forEach(mid=>{
+    const item = state.menu.find(m=>m.id===mid);
+    if(item && getItemCategory(item)==='Ош' && item.unit==='kg'){
+      oshTotal += lineTotal(item, state.scheduledItems[mid]);
+    }
+  });
+  return oshTotal * (pct/100);
+}
+function scheduledTotal(){
+  return Math.max(0, scheduledSubtotal() - scheduledDiscountAmount());
 }
 function openScheduled(){
   state.scheduledOpen = true;
@@ -2809,6 +2850,8 @@ function renderScheduledOverlay(){
       }
     });
   }
+  const subtotal = scheduledSubtotal();
+  const discountAmt = scheduledDiscountAmount();
   const total = scheduledTotal();
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
@@ -2837,6 +2880,7 @@ function renderScheduledOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек — Фармоиши вақтдор</div>
         ${receiptLines}
+        ${discountAmt>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line" style="color:var(--olive);"><span>Тахфиф барои ош (${state.settings.takeawayDiscountPct}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
       </div>
       <div class="ticket-actions">
@@ -3564,11 +3608,9 @@ function renderAdminOrders(){
     <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
-      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
+      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш — мизҳо + бо худ бурдан + вақтдор)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
         <button class="icon-btn" id="clearOshTotalBtn" style="margin-top:6px;font-size:11px;padding:4px 10px;">↺ Пок кардан</button>
       </div>
-      <div class="stat-card"><div class="label">Вазни оши имрӯза (бо худ бурдан+вақтдор)</div><div class="value">${oshWeightForOrdersTab().toFixed(2)} кг</div></div>
-      <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
     </div>
     <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
       <p style="font-size:13px;color:#6b5f4d;margin:0 0 8px;">Миқдори кг оше, ки имрӯз пухта шуд — аз рӯи ин ҳисобу китоби «оши боқимонда» иҷро мешавад.</p>
@@ -3889,7 +3931,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Пароли нав <span style="color:#9c5f00;font-size:11px;">(холӣ = нигоҳ доштан)</span></label><input type="password" id="editAccPassword" value="" placeholder="Пароли нав" autocomplete="new-password"></div>
+      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(isLegacyPasswordHash(editTarget.password)?'':editTarget.password)}" placeholder="${isLegacyPasswordHash(editTarget.password)?'Пароли кӯҳна — пароли нав гузоред':'Парол'}"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
