@@ -849,7 +849,7 @@ let state = {
   settings:{...DEFAULT_SETTINGS},
   reservations:{},          // tableNumber -> {note, bookedAt} (legacy; table-reservation feature removed from the UI)
   tables:[],                // [{id, name, seats}]
-  oshStock:{date:'', kg:0}, // admin-entered total osh cooked today
+  oshStock:{date:'', lunch:0, evening:0}, // admin-entered osh cooked today (lunch + evening shifts)
   accounts:[],              // [{id, username, password, role}]
   currentUser:null,         // {username, role}
   loginError:null,
@@ -1013,15 +1013,37 @@ function oshRemainingBadge(){
   const hasStock = state.oshStock && state.oshStock.date === todayKey();
   if(!hasStock) return '';
   const kgOrdered = oshTotalOrderedToday();
-  const cookedKg = Number(state.oshStock.kg)||0;
+  const lunchKg = Number(state.oshStock.lunch)||0;
+  const eveningKg = Number(state.oshStock.evening)||0;
+  const cookedKg = lunchKg + eveningKg;
   const remaining = cookedKg - kgOrdered;
   const color = remaining <= 0 ? 'var(--brick)' : remaining < 3 ? '#c07f00' : 'var(--olive)';
   const msg = remaining <= 0 ? 'Ош тамом шуд!' : remaining.toFixed(1)+' кг боқӣ';
   return `<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--card);border:1.5px solid ${color};border-radius:10px;margin:0 0 10px;font-size:13px;">
     <span style="font-size:16px;">🍚</span>
     <span style="color:${color};font-weight:700;">${msg}</span>
-    <span style="color:#9c8f78;font-size:11px;">аз ${cookedKg} кг пухта</span>
+    <span style="color:#9c8f78;font-size:11px;">аз ${cookedKg} кг пухта (нисфирӯзӣ: ${lunchKg}кг + шом: ${eveningKg}кг)</span>
   </div>`;
+}
+function oshByClients(){
+  // Вазни ош аз заказҳои мизоҷон (takeaway + scheduled)
+  const resetAt = Number(state.settings.oshTotalResetAt)||0;
+  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
+  let kg = 0;
+  state.orders.filter(o=>isToday(o.createdAt)&&o.status!=='cancelled'&&o.createdAt>=resetAt&&(o.type==='takeaway'||o.type==='scheduled')).forEach(o=>{
+    (o.items||[]).forEach(it=>{ if(getItemCategory(it)==='Ош'){ if(it.unit==='kg') kg+=it.qty/1000; else kg+=it.qty*porsiyaKg; } });
+  });
+  return kg;
+}
+function oshByWaiters(){
+  // Вазни ош аз заказҳои дар миз (dine-in) — офитсиантон
+  const resetAt = Number(state.settings.oshTotalResetAt)||0;
+  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
+  let kg = 0;
+  state.orders.filter(o=>isToday(o.createdAt)&&o.status!=='cancelled'&&o.createdAt>=resetAt&&o.type==='dine-in').forEach(o=>{
+    (o.items||[]).forEach(it=>{ if(getItemCategory(it)==='Ош'){ if(it.unit==='kg') kg+=it.qty/1000; else kg+=it.qty*porsiyaKg; } });
+  });
+  return kg;
 }
 function oshWeightForOrdersTab(){
   let kgTotal = 0;
@@ -2034,6 +2056,9 @@ function render(){
     if((state.cashierTab||'main')==='orders'){
       attachAdminOrdersEvents();
     }
+    if((state.cashierTab||'main')==='salary'){
+      attachAdminSalaryEvents();
+    }
     attachTableGridEvents();
     const openBtn = document.getElementById('openTakeawayBtn');
     if(openBtn) openBtn.addEventListener('click', openTakeaway);
@@ -2389,10 +2414,14 @@ function renderCashier(){
   const tabBar = `<div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;">
     <button class="cat-tab ${cashierTab==='main'?'active':''}" data-cashiertab="main">🏠 Асосӣ</button>
     <button class="cat-tab ${cashierTab==='orders'?'active':''}" data-cashiertab="orders">📋 Фармоишҳо</button>
+    <button class="cat-tab ${cashierTab==='salary'?'active':''}" data-cashiertab="salary">💰 Маош</button>
   </div>`;
 
   if(cashierTab==='orders'){
     return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
+  }
+  if(cashierTab==='salary'){
+    return `<div class="container">${tabBar}${renderAdminSalary()}</div>`;
   }
 
   return `
@@ -3608,21 +3637,34 @@ function renderAdminOrders(){
     <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
-      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш — мизҳо + бо худ бурдан + вақтдор)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
+      <div class="stat-card" style="border-color:var(--olive);"><div class="label">🍚 Ҷамъи ош имрӯз</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
         <button class="icon-btn" id="clearOshTotalBtn" style="margin-top:6px;font-size:11px;padding:4px 10px;">↺ Пок кардан</button>
       </div>
+      <div class="stat-card"><div class="label">📋 Ош аз мизоҷон (takeaway+вақтдор)</div><div class="value">${oshByClients().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">🧑‍🍳 Ош аз офитсиантон (дар миз)</div><div class="value">${oshByWaiters().toFixed(2)} кг</div></div>
     </div>
-    <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
-      <p style="font-size:13px;color:#6b5f4d;margin:0 0 8px;">Миқдори кг оше, ки имрӯз пухта шуд — аз рӯи ин ҳисобу китоби «оши боқимонда» иҷро мешавад.</p>
-      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
-        <div class="field">
-          <label>Ош пухта шуд (кг)</label>
-          <input type="number" id="oshStockInput" value="${state.oshStock && state.oshStock.date===todayKey() ? state.oshStock.kg : ''}" min="0" step="0.5" placeholder="масалан: 20">
+    ${(()=>{
+      const s = state.oshStock && state.oshStock.date===todayKey() ? state.oshStock : {lunch:0,evening:0};
+      const total = (Number(s.lunch)||0)+(Number(s.evening)||0);
+      const remaining = Math.max(0, total - oshTotalOrderedToday());
+      return `<div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
+        <p style="font-size:13px;color:#6b5f4d;margin:0 0 10px;">Миқдори оши пухта — ду навбат алоҳида ворид кунед.</p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+          <div class="field">
+            <label>☀️ Нисфирӯзӣ (кг)</label>
+            <input type="number" id="oshLunchInput" min="0" step="0.5" value="${s.lunch||''}" placeholder="0">
+          </div>
+          <div class="field">
+            <label>🌙 Шом (кг)</label>
+            <input type="number" id="oshEveningInput" min="0" step="0.5" value="${s.evening||''}" placeholder="0">
+          </div>
+          <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
         </div>
-        <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
-      </div>
-      ${oshRemainingBadge() ? `<div style="margin-top:12px;">${oshRemainingBadge()}</div>` : ''}
-    </div>
+        ${total>0 ? `<div style="margin-top:10px;font-size:13px;color:var(--olive);font-weight:700;">
+          ✅ Ҷамъ: ${total} кг · Боқимонда: <b>${remaining.toFixed(2)} кг</b>
+        </div>` : '<div style="margin-top:8px;font-size:12px;color:#9c8f78;">Ҳоло ворид нашудааст</div>'}
+      </div>`;
+    })()}
     ${rowsHtml}
   `;
 }
@@ -4459,15 +4501,24 @@ function renderAdminSettings(){
     ` : `<button class="btn-ghost" style="border-color:var(--brick);color:var(--brick);" id="deleteOldOrdersBtn">🗑 Нест кардани чекҳои кӯҳна</button>`}
   </div>
 
-  <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза</div>
-  <div class="settings-form">
-    <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Миқдори кг оше, ки имрӯз пухта шуд — ба ҳама (официант, кассир, ошпаз) нишон дода мешавад.</p>
-    <div class="field">
-      <label>Ош пухта шуд (кг)</label>
-      <input type="number" id="oshStockInput" value="${state.oshStock && state.oshStock.date===todayKey() ? state.oshStock.kg : ''}" min="0" step="0.5" placeholder="масалан: 20">
-    </div>
-    <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
-  </div>
+  <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза — 2 навбат</div>
+  ${(()=>{
+    const s = state.oshStock && state.oshStock.date===todayKey() ? state.oshStock : {lunch:0,evening:0};
+    return `<div class="settings-form">
+      <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Ду навбат алоҳида ворид кунед — нисфирӯзӣ ва шом.</p>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;">
+        <div class="field">
+          <label>☀️ Нисфирӯзӣ (кг)</label>
+          <input type="number" id="oshLunchInput" value="${s.lunch||''}" min="0" step="0.5" placeholder="0">
+        </div>
+        <div class="field">
+          <label>🌙 Шом (кг)</label>
+          <input type="number" id="oshEveningInput" value="${s.evening||''}" min="0" step="0.5" placeholder="0">
+        </div>
+      </div>
+      <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
+    </div>`;
+  })()}
   ${oshRemainingBadge()}
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
@@ -4558,10 +4609,12 @@ function attachAdminOrdersEvents(){
   });
   const saveOshBtn = document.getElementById('saveOshStockBtn');
   if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
-    const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
-    state.oshStock = {date: todayKey(), kg};
+    const lunch = Math.max(0, parseFloat(document.getElementById('oshLunchInput')?.value)||0);
+    const evening = Math.max(0, parseFloat(document.getElementById('oshEveningInput')?.value)||0);
+    state.oshStock = {date: todayKey(), lunch, evening};
     await saveOshStock(state.oshStock);
-    showToast('Миқдори ош сабт шуд');
+    await logActivity('Оши пухта: нисфирӯзӣ '+lunch+' кг, шом '+evening+' кг');
+    showToast('Сабт шуд: нисфирӯзӣ '+lunch+' кг · шом '+evening+' кг');
     render();
   });
   const clientSearchInput = document.getElementById('clientSearchInput');
@@ -4834,6 +4887,10 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='salary'){
+    attachAdminSalaryEvents();
+  }
+}
+function attachAdminSalaryEvents(){
     document.querySelectorAll('.salary-select').forEach(sel=>{
       sel.addEventListener('change', ()=>{
         const id = sel.id.replace('wtype-','');
@@ -4901,7 +4958,7 @@ function attachAdminEvents(){
       showToast('Сабт шуд');
       render();
     });
-  }
+}
 
   if(state.adminTab==='orders'){
     attachAdminOrdersEvents();
@@ -5034,10 +5091,12 @@ function attachAdminEvents(){
     if(downloadBackupBtn) downloadBackupBtn.addEventListener('click', downloadBackup);
     const saveOshBtn = document.getElementById('saveOshStockBtn');
     if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
-      const kg = Math.max(0, Number(document.getElementById('oshStockInput').value) || 0);
-      state.oshStock = {date: todayKey(), kg};
+      const lunch = Math.max(0, parseFloat(document.getElementById('oshLunchInput')?.value)||0);
+      const evening = Math.max(0, parseFloat(document.getElementById('oshEveningInput')?.value)||0);
+      state.oshStock = {date: todayKey(), lunch, evening};
       await saveOshStock(state.oshStock);
-      showToast('Миқдори ош сабт шуд');
+      await logActivity('Оши пухта: нисфирӯзӣ '+lunch+' кг, шом '+evening+' кг');
+      showToast('Сабт шуд: нисфирӯзӣ '+lunch+' кг · шом '+evening+' кг');
       render();
     });
     const savePorsiyaBtn = document.getElementById('savePorsiyaGramsBtn');
