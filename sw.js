@@ -1,4 +1,5 @@
-const CACHE_NAME = 'kafe-shell-2026-09-21-V57-THREE-FIXES';
+const CACHE_NAME = 'kafe-shell-2026-09-22-V68-OSH-SHIFTS-CASHIER-SALARY';
+
 const APP_SHELL = [
   './',
   './index.html',
@@ -7,6 +8,7 @@ const APP_SHELL = [
   './icon-192.png',
   './icon-512.png'
 ];
+
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
@@ -14,6 +16,7 @@ self.addEventListener('install', event => {
       .then(() => self.skipWaiting())
   );
 });
+
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
@@ -27,12 +30,15 @@ self.addEventListener('activate', event => {
       .then(() => self.clients.claim())
   );
 });
+
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') {
     return;
   }
+
   const url = new URL(event.request.url);
-  // Firebase / Firestore never goes through the cache.
+
+  // Firebase / Firestore ҳеҷ гоҳ cache карда нашавад.
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -41,15 +47,32 @@ self.addEventListener('fetch', event => {
   ) {
     return;
   }
+
+  // Файлҳои версия ҳамеша аз сервер гирифта шаванд.
+  if (
+    url.pathname.endsWith('/index.html') ||
+    url.pathname.endsWith('/version.json') ||
+    url.pathname.endsWith('/sw.js')
+  ) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // Аввал Network, агар интернет набошад — Cache.
   event.respondWith(
     fetch(event.request)
       .then(response => {
         if (response && response.ok) {
           const copy = response.clone();
+
           caches.open(CACHE_NAME)
             .then(cache => cache.put(event.request, copy))
             .catch(() => {});
         }
+
         return response;
       })
       .catch(() => {
