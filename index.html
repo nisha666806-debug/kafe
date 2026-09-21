@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-22-V68-OSH-SHIFTS-CASHIER-SALARY';
+const APP_VERSION = '2026-09-22-V69-MONTHLY-REPORT-ARCHIVE-DAY-NIGHT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -619,7 +619,7 @@ async function fsSet(key, value){
 async function loadAll(){
   // Orders are intentionally excluded here. They live in the V2 subcollection
   // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
-  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, dailyClosures:null, failed:{}};
+  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, expenses:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -635,7 +635,7 @@ async function loadAll(){
   await parseField('inventory', 'inventory');
   await parseField('activityLog', 'activityLog');
   await parseField('bonuses', 'bonuses');
-  await parseField('dailyClosures', 'dailyClosures');
+  await parseField('expenses', 'expenses');
   return out;
 }
 async function saveMenu(menu){
@@ -772,6 +772,29 @@ async function saveDailyClosures(closures){
   const ok = await fsSet('dailyClosures', JSON.stringify(closures));
   if(!ok) showToast('Хатогӣ: ҳисоботи рӯзона сабт нашуд');
 }
+async function saveExpenses(expenses){
+  const ok = await fsSet('expenses', JSON.stringify(expenses||[]));
+  if(!ok) showToast('Хатогӣ: хароҷот сабт нашуд');
+}
+async function loadReportArchive(){
+  const r = await fsGet('reportArchive');
+  if(!r.ok) return false;
+  try{ state.reportArchive = r.value ? JSON.parse(r.value) : {days:[],months:{}}; }catch(e){ state.reportArchive={days:[],months:{}}; }
+  if(!state.reportArchive || typeof state.reportArchive!=='object') state.reportArchive={days:[],months:{}};
+  state.reportArchive.days=Array.isArray(state.reportArchive.days)?state.reportArchive.days:[];
+  state.reportArchive.months=state.reportArchive.months&&typeof state.reportArchive.months==='object'?state.reportArchive.months:{};
+  return true;
+}
+async function ensureReportArchiveLoaded(){
+  if(state.reportArchive!==null) return true;
+  if(state.__dataLoadPromises.reportArchive) return await state.__dataLoadPromises.reportArchive;
+  state.__dataLoadPromises.reportArchive=loadReportArchive();
+  try{return await state.__dataLoadPromises.reportArchive;}finally{delete state.__dataLoadPromises.reportArchive;}
+}
+async function saveReportArchive(){
+  if(!state.reportArchive) return false;
+  return await fsSet('reportArchive', JSON.stringify(state.reportArchive));
+}
 async function giveBonus(username, amount, reason){
   const amt = Math.max(0, Number(amount)||0);
   if(!username || amt<=0){ showToast('Кормандро ва маблағро дуруст ворид кунед'); return; }
@@ -803,7 +826,7 @@ async function downloadBackup(){
     cafeName: state.settings.cafeName,
     menu: state.menu, orders: backupOrders, settings: state.settings,
     reservations: state.reservations, tables: state.tables, oshStock: state.oshStock,
-    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses, dailyClosures: state.dailyClosures
+    accounts: safeAccounts, inventory: state.inventory, activityLog: state.activityLog, bonuses: state.bonuses, dailyClosures: state.dailyClosures, expenses: state.expenses
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -854,6 +877,8 @@ let state = {
   activityLog:[],
   bonuses:[],
   dailyClosures:[],
+  reportArchive:null,
+  expenses:[],
   __lastKnownOrderIds:new Set(),
   __lastKnownOrderSnapshots:new Map(),
   showBonusForm:true,
@@ -1029,6 +1054,47 @@ function oshWeightForDirectOrdersToday(){
   return (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && (o.type==='takeaway' || o.type==='scheduled'))
     .reduce((sum,o)=>sum+oshWeightFromItems(o.items),0);
 }
+function reportShiftForTimestamp(ts){
+  const d=new Date(Number(ts)||0);
+  const mins=d.getHours()*60+d.getMinutes();
+  if(mins>=9*60 && mins<17*60+30) return 'day';
+  if(mins>=17*60+30 && mins<24*60) return 'night';
+  return null;
+}
+function splitReportOrders(orders){
+  const out={day:[],night:[]};
+  (orders||[]).forEach(o=>{ const sh=reportShiftForTimestamp(o.paidAt||o.updatedAt||o.createdAt); if(sh) out[sh].push(o); });
+  return out;
+}
+function splitExpenses(expenses){
+  const out={day:[],night:[]};
+  (expenses||[]).forEach(e=>{ const sh=reportShiftForTimestamp(e.ts||e.createdAt); if(sh) out[sh].push(e); });
+  return out;
+}
+function sumExpenses(list){ return (list||[]).reduce((s,e)=>s+(Number(e.amount)||0),0); }
+function makeDailySummary(date, paidOrders, expenses, closedAt, closedBy){
+  const shifts=splitReportOrders(paidOrders), ex=splitExpenses(expenses);
+  const make=(orders,exps)=>{
+    const cash=orders.reduce((s,o)=>s+paymentSplit(o).cash,0);
+    const noncash=orders.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+    const revenue=orders.reduce((s,o)=>s+(Number(o.total)||0),0);
+    const expense=sumExpenses(exps);
+    return {revenue,cash,noncash,expenses:expense,net:revenue-expense,checks:orders.length};
+  };
+  return {id:uid('day'),date,closedAt,closedBy,day:make(shifts.day,ex.day),night:make(shifts.night,ex.night),total:make([...shifts.day,...shifts.night],[...ex.day,...ex.night])};
+}
+function upsertMonthlySummary(archive, summary){
+  const month=summary.date.slice(0,7);
+  const base=archive.months[month]||{month,days:0,revenue:0,expenses:0,net:0,checks:0,day:{revenue:0,expenses:0,net:0,checks:0},night:{revenue:0,expenses:0,net:0,checks:0}};
+  const prev=archive.days.find(x=>x.date===summary.date);
+  if(prev){
+    base.days=Math.max(0,base.days-1);
+    ['revenue','expenses','net','checks'].forEach(k=>{base[k]-=Number(prev.total[k])||0; base.day[k]-=Number(prev.day[k])||0; base.night[k]-=Number(prev.night[k])||0;});
+  }
+  base.days+=1;
+  ['revenue','expenses','net','checks'].forEach(k=>{base[k]+=Number(summary.total[k])||0; base.day[k]+=Number(summary.day[k])||0; base.night[k]+=Number(summary.night[k])||0;});
+  archive.months[month]=base;
+}
 function renderOshShiftReport(orders){
   const stock = normalizeOshStock(state.oshStock);
   const lunchSold = oshWeightForShift(orders,'lunch');
@@ -1085,7 +1151,7 @@ function oshWeightScheduledOnly(){
 async function init(){
   render(); // loading state
   const all = await loadAll();
-  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, dailyClosures, failed} = all;
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, expenses, failed} = all;
   // Complete the one-time, non-destructive migration before the first V2 read.
   // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
   try{
@@ -1130,7 +1196,9 @@ async function init(){
   state.inventory = inventory || [];
   state.activityLog = activityLog || [];
   state.bonuses = bonuses || [];
-  state.dailyClosures = dailyClosures || [];
+  state.dailyClosures = [];
+  state.reportArchive = null;
+  state.expenses = expenses || [];
 
   if(tables && tables.length){
     state.tables = tables;
@@ -3738,23 +3806,24 @@ function renderAdminTables(){
 }
 
 function renderCashierSalary(){
-  const username = state.currentUser && state.currentUser.username;
-  const acc = state.accounts.find(a=>a.username===username && a.role==='cashier');
-  if(!acc) return `<div class="empty-state">Маълумоти маош ёфт нашуд</div>`;
-  const w = computeWages(acc);
-  const b = staffCommissionBreakdown(username,'cashier','today');
-  const month = staffCommissionBreakdown(username,'cashier','month');
-  return `<div class="section-title">💰 Маоши ман</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;">Корманд: <b>${escapeHtml(username||'')}</b></p>
-    <div class="stat-row">
-      <div class="stat-card"><div class="label">Имрӯз</div><div class="value">${w.daily.toFixed(1)} смн</div></div>
-      <div class="stat-card"><div class="label">Ин моҳ</div><div class="value">${w.monthly.toFixed(1)} смн</div></div>
-      <div class="stat-card"><div class="label">Комиссияи имрӯз</div><div class="value">${b.total.toFixed(1)} смн</div></div>
-      <div class="stat-card"><div class="label">Комиссияи моҳ</div><div class="value">${month.total.toFixed(1)} смн</div></div>
-    </div>
-    <div class="section-title" style="margin-top:24px;">Тафсилоти имрӯз</div>
-    <table class="xls-table"><thead><tr><th>Чекҳо</th><th>Ош ≥500г</th><th>Ош &lt;500г</th><th>Бе ош</th><th>Комиссия</th></tr></thead>
-    <tbody><tr><td>${b.orderCount}</td><td>${b.countHigh}</td><td>${b.countLow}</td><td>${b.countNoOsh}</td><td class="total-cell">${b.total.toFixed(1)} смн</td></tr></tbody></table>`;
+  const currentUsername = state.currentUser && state.currentUser.username;
+  const currentCashier = state.accounts.find(a=>a.username===currentUsername && a.role==='cashier');
+  const waiters = state.accounts.filter(a=>a.role==='waiter');
+  const cashierRows = waiters.map(acc=>{
+    const w=computeWages(acc);
+    const b=staffCommissionBreakdown(acc.username,'waiter','today');
+    const month=staffCommissionBreakdown(acc.username,'waiter','month');
+    return `<div class="salary-row"><div class="salary-name"><div class="nm">${escapeHtml(acc.username)}</div><div class="cat">Официант</div></div><div class="salary-computed" style="margin-left:0;"><span>Имрӯз: <b class="mono">${w.daily.toFixed(1)} смн</b></span><span>Ин моҳ: <b class="mono">${w.monthly.toFixed(1)} смн</b></span><span>Чекҳои имрӯз: <b>${b.orderCount}</b> · Комиссия: <b>${b.total.toFixed(1)} смн</b></span><span>Комиссия моҳ: <b>${month.total.toFixed(1)} смн</b></span></div></div>`;
+  }).join('');
+  const my = currentCashier ? computeWages(currentCashier) : {daily:0,monthly:0};
+  const myB = currentCashier ? staffCommissionBreakdown(currentUsername,'cashier','today') : {total:0,orderCount:0};
+  const myM = currentCashier ? staffCommissionBreakdown(currentUsername,'cashier','month') : {total:0,orderCount:0};
+  return `<div class="section-title">💰 Маош</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;">Дар ин бахш кассир метавонад маоши ҳар як официантро бо ном бинад — бо ҳамон ҳисобе, ки Admin истифода мебарад.</p>
+    <div class="section-title" style="margin-top:20px;">👤 Маоши официантҳо</div>
+    ${cashierRows || '<div class="empty-state" style="padding:24px;">Ҳоло официантҳо илова нашудаанд</div>'}
+    <div class="section-title" style="margin-top:28px;">💵 Маоши кассир</div>
+    <div class="stat-row"><div class="stat-card"><div class="label">Имрӯз</div><div class="value">${my.daily.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Ин моҳ</div><div class="value">${my.monthly.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Комиссияи имрӯз</div><div class="value">${myB.total.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Комиссияи моҳ</div><div class="value">${myM.total.toFixed(1)} смн</div></div></div>`;
 }
 function renderAdminSalary(){
   const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
@@ -4127,7 +4196,8 @@ async function clearAllReportHistory(){
   await saveBonuses([]);
 
   state.dailyClosures=[];
-  await saveDailyClosures([]);
+  state.reportArchive={days:[],months:{}};
+  await saveReportArchive();
   state.dailyReportRows=[];
   state.confirmClearReport=false;
   render();
@@ -4177,10 +4247,16 @@ async function closeDailyReport(){
     orders:paidToday.map(o=>JSON.parse(JSON.stringify(o)))
   };
 
-  state.dailyClosures=state.dailyClosures||[];
-  state.dailyClosures.unshift(closure);
-  if(state.dailyClosures.length>365) state.dailyClosures=state.dailyClosures.slice(0,365);
-  await saveDailyClosures(state.dailyClosures);
+  // The historical archive is stored separately and is NOT loaded during normal startup.
+  await ensureReportArchiveLoaded();
+  state.reportArchive=state.reportArchive||{days:[],months:{}};
+  const summary=makeDailySummary(todayKey(),paidToday,state.expenses||[],closedAt,actingUsername());
+  state.reportArchive.days=(state.reportArchive.days||[]).filter(x=>x.date!==summary.date);
+  state.reportArchive.days.unshift(summary);
+  upsertMonthlySummary(state.reportArchive,summary);
+  if(state.reportArchive.days.length>366) state.reportArchive.days=state.reportArchive.days.slice(0,366);
+  if(!await saveReportArchive()){ showToast('Хатогӣ: архиви ҳисобот сабт нашуд'); return; }
+  state.dailyClosures=[summary,...(state.dailyClosures||[])];
 
   // Mark the exact paid orders as archived instead of deleting them.
   // This survives realtime sync because the accounting record itself carries the flag.
@@ -4269,16 +4345,16 @@ function renderAdminReport(){
       </div>
     </div>` : `<button class="btn-ghost" style="margin-bottom:18px;color:var(--olive);border-color:var(--olive);" id="closeDayBtn">📋 Пӯшидани рӯз</button>`;
 
-  const closuresHtml = (state.dailyClosures||[]).slice(0,14).map(c=>`
+  const closuresHtml = (state.reportArchive?.days||[]).slice(0,14).map(c=>`
     <div class="receipt-item-row">
       <div>
         <div class="l1">${new Date(c.closedAt).toLocaleDateString('tg-TJ',{day:'2-digit',month:'2-digit',year:'numeric'})} · ${escapeHtml(c.closedBy||'')}</div>
-        <div class="l2">${c.checkCount} чек ${c.lowStock&&c.lowStock.length?' · ⚠️ '+c.lowStock.length+' маҳсулоти кам':''}${c.activeCount?' · ⚠️ '+c.activeCount+' фаъол монда буд':''}</div>
+        <div class="l2">${c.total.checks} чек · ☀️ ${fmtMoney(c.day.revenue)} · 🌙 ${fmtMoney(c.night.revenue)}</div>
       </div>
       <div style="text-align:right;display:flex;align-items:center;gap:10px;">
         <div>
-          <div>${fmtMoney(c.revenue)}</div>
-          <div class="l2">💵${fmtMoney(c.cashToday)} 💳${fmtMoney(c.noncashToday)}</div>
+          <div>${fmtMoney(c.total.revenue)}</div>
+          <div class="l2">Хароҷот: ${fmtMoney(c.total.expenses)} · Холис: ${fmtMoney(c.total.net)}</div>
         </div>
         ${state.confirmDeleteClosureId===c.id ? `
           <div style="display:flex;flex-direction:column;gap:4px;">
@@ -4299,20 +4375,36 @@ function renderAdminReport(){
       <div class="stat-card"><div class="label">Шумораи чекҳо</div><div class="value">${paidToday.length}</div></div>
     </div>
 
-    ${renderOshShiftReport(paidToday)}
 
     <div class="section-title" style="margin-top:24px;">Даромад аз рӯи маҳсулот (имрӯз)</div>
     ${renderProductBreakdownTable(paidToday)}
 
-    <div class="section-title" style="margin-top:24px;">Ҳисоботи ҳарруза (нақд/ғайринақд)</div>
-    ${renderDailyPaymentTable()}
+    <div class="section-title" style="margin-top:24px;">➖ Хароҷоти имрӯз</div>
+    <div class="form-box"><div class="field"><label>Номи хароҷот</label><input id="expenseName" placeholder="масалан: маҳсулот"></div><div class="field small"><label>Маблағ</label><input id="expenseAmount" type="number" min="0" step="0.01" placeholder="0"></div><button class="btn-primary" style="flex:none;padding:9px 18px;" id="addExpenseBtn">+ Илова</button></div>
+    <div style="margin:-8px 0 12px;font-size:12px;color:#6b5f4d;">Вақти ҳозира барои ҷудокунии рӯзона/шабона истифода мешавад.</div>
+    ${(state.expenses||[]).filter(e=>isToday(e.ts)).slice().reverse().map(e=>`<div class="receipt-item-row"><div><div class="l1">${escapeHtml(e.name||'Хароҷот')}</div><div class="l2">${fmtTime(e.ts)}</div></div><div>${fmtMoney(e.amount)}</div></div>`).join('')}
+    <div class="section-title" style="margin-top:24px;">Ҳисоботи ҳаррӯза</div>
+    ${renderDailyShiftReportTable(paidToday)}
 
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
     <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
     ${receiptsHtml}
 
-    ${(state.dailyClosures&&state.dailyClosures.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}
+    ${(state.reportArchive&&state.reportArchive.days&&state.reportArchive.days.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}<div class="section-title" style="margin-top:24px;">📊 Ҷамъбасти моҳона</div>${renderMonthlyArchive()}
   `;
+}
+function renderDailyShiftReportTable(paidOrders){
+  const shifts=splitReportOrders(paidOrders), ex=splitExpenses(state.expenses||[]);
+  const make=(orders,expenses)=>{const revenue=orders.reduce((s,o)=>s+(Number(o.total)||0),0), expense=sumExpenses(expenses), cash=orders.reduce((s,o)=>s+paymentSplit(o).cash,0), noncash=orders.reduce((s,o)=>s+paymentSplit(o).noncash,0); return {revenue,expense,net:revenue-expense,cash,noncash,checks:orders.length};};
+  const d=make(shifts.day,ex.day), n=make(shifts.night,ex.night), t=make([...shifts.day,...shifts.night],[...ex.day,...ex.night]);
+  const row=(name,x)=>`<tr><td>${name}</td><td>${fmtMoney(x.revenue)}</td><td>${fmtMoney(x.expense)}</td><td>${fmtMoney(x.net)}</td><td>${x.checks}</td><td>${fmtMoney(x.cash)}</td><td>${fmtMoney(x.noncash)}</td></tr>`;
+  return `<table class="xls-table"><thead><tr><th>Баст</th><th>Даромад</th><th>Хароҷот</th><th>Холис</th><th>Чекҳо</th><th>Нақд</th><th>Ғайринақд</th></tr></thead><tbody>${row('☀️ Рӯзона 09:00–17:30',d)}${row('🌙 Шабона 17:30–00:00',n)}${row('Ҳамагӣ',t)}</tbody></table>`;
+}
+function renderMonthlyArchive(){
+  const a=state.reportArchive||{days:[],months:{}};
+  const months=Object.values(a.months||{}).sort((x,y)=>y.month.localeCompare(x.month));
+  if(!months.length) return `<div class="empty-state" style="padding:24px;">Ҳоло архиви моҳона вуҷуд надорад.</div>`;
+  return months.map(m=>`<div class="receipt-item-row"><div><div class="l1">📅 ${m.month}</div><div class="l2">Рӯзона: ${fmtMoney(m.day.revenue)} / ${fmtMoney(m.day.expenses)} · Шабона: ${fmtMoney(m.night.revenue)} / ${fmtMoney(m.night.expenses)}</div></div><div style="text-align:right"><div>${fmtMoney(m.revenue)}</div><div class="l2">Хароҷот: ${fmtMoney(m.expenses)} · Холис: ${fmtMoney(m.net)} · ${m.checks} чек</div></div></div>`).join('');
 }
 function renderDailyPaymentTable(){
   // The daily payment history is a report view. Archived orders belong to the
@@ -4466,6 +4558,10 @@ function renderAdminSettings(){
     <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveSettingsBtn">Нигоҳ доштан</button>
   </div>
   <p style="font-size:12px;color:#9c8f78;max-width:340px;">Барои иловаи миз, тағйири ном ё ҷои нишаст — ба варақаи «Мизҳо» гузаред.</p>
+  <div class="section-title" style="margin-top:32px;">📚 Архиви ҳисоботҳои моҳона</div>
+  <p style="font-size:12px;color:#9c8f78;max-width:520px;">Архив танҳо барои Admin аст ва танҳо ҳангоми кушодани ин қисм аз Firebase хонда мешавад. Дар кори ҳаррӯза он хонда намешавад.</p>
+  <button class="btn-ghost" id="loadReportArchiveBtn">📥 Гирифтани архив аз сервер</button>
+  <div id="reportArchiveSettingsBox" style="margin-top:12px;">${state.reportArchive ? renderMonthlyArchive() : ''}</div>
 
   <div class="section-title" style="margin-top:32px;">Захираи эҳтиётӣ</div>
   <div class="settings-form">
@@ -4623,8 +4719,9 @@ function attachAdminEvents(){
   document.querySelectorAll('.admin-tab').forEach(el=>{
     el.addEventListener('click', async ()=>{
       const nextTab=el.dataset.atab;
-      if(nextTab==='report'){ await ensurePaidOrdersLoaded('report'); }
+      if(nextTab==='report'){ await ensurePaidOrdersLoaded('report'); await ensureReportArchiveLoaded(); }
       else if(nextTab==='salary'){ await ensurePaidOrdersLoaded('month'); }
+      else if(nextTab==='settings'){ /* archive remains lazy; it is loaded only by the Admin button */ }
       else if(nextTab==='orders'){ await ensureScheduledOrdersLoaded(); }
       state.adminTab = nextTab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
@@ -4821,6 +4918,8 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='report'){
+    const addExpenseBtn=document.getElementById('addExpenseBtn');
+    if(addExpenseBtn) addExpenseBtn.addEventListener('click', async()=>{const name=(document.getElementById('expenseName')?.value||'').trim(); const amount=Number(document.getElementById('expenseAmount')?.value)||0; if(!name||amount<=0){showToast('Ном ва маблағи хароҷотро ворид кунед');return;} state.expenses=state.expenses||[]; state.expenses.push({id:uid('exp'),name,amount,ts:Date.now(),createdBy:actingUsername()}); await saveExpenses(state.expenses); render();});
     document.querySelectorAll('[data-vieworder]').forEach(el=>{
       el.addEventListener('click', ()=> openOrderView(el.dataset.vieworder, el.dataset.viewmode||'pay'));
     });
@@ -4860,6 +4959,10 @@ function attachAdminEvents(){
     });
   }
 
+  if(state.adminTab==='settings'){
+    const loadArchiveBtn=document.getElementById('loadReportArchiveBtn');
+    if(loadArchiveBtn) loadArchiveBtn.addEventListener('click', async()=>{loadArchiveBtn.disabled=true; const ok=await ensureReportArchiveLoaded(); if(!ok) showToast('Архивро гирифтан натавонист'); render();});
+  }
   if(state.adminTab==='salary'){
     document.querySelectorAll('.salary-select').forEach(sel=>{
       sel.addEventListener('change', ()=>{
