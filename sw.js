@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-19-V68-OPTIMIZED';
+const CACHE_NAME = 'kafe-shell-2026-09-21-V57-THREE-FIXES';
 const APP_SHELL = [
   './',
   './index.html',
