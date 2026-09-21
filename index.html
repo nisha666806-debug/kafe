@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-19-V68-OPTIMIZED';
+const APP_VERSION = '2026-09-22-V68-OSH-SHIFTS-CASHIER-SALARY';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -419,21 +419,17 @@ function mergePaidOrdersIntoState(paidOrders){
   state.__lastKnownOrderIds=new Set(state.orders.map(o=>o.id));
 }
 async function ensurePaidOrdersLoaded(scope){
-  const start = scope==='month' ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime()
-    : scope==='today' ? (()=>{ const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); })()
-    : reportPeriodStart();
-  const normalizedStart = Math.max(0, Number(start)||0);
-  // Агар аллакай аз санаи баробар ё пештар бор карда шуда бошад, доираи ҳозира аллакай
-  // фаро мегирад — набояд бо доираи тангтар аз нав бор кунем (садо/интернетро сарф намекунем).
-  if(state.__paidOrdersLoadedSince!==null && normalizedStart>=state.__paidOrdersLoadedSince) return true;
+  const start = scope==='month' ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime() : reportPeriodStart();
+  const key=String(Math.max(0,Number(start)||0));
+  if(state.__paidOrdersLoadedSince===key) return true;
   if(state.__dataLoadPromises.paid) return await state.__dataLoadPromises.paid;
   state.__dataLoadPromises.paid=(async()=>{
-    const result=await loadPaidOrdersSinceV2(normalizedStart);
+    const result=await loadPaidOrdersSinceV2(start);
     if(!result.ok) return false;
     mergePaidOrdersIntoState(result.value);
     if(state.__paidOrdersUnsub){try{state.__paidOrdersUnsub();}catch(e){}}
     try{
-      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',normalizedStart).onSnapshot(snap=>{
+      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',Math.max(0,Number(start)||0)).onSnapshot(snap=>{
         const paid=[];
         snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;if(x.status==='paid')paid.push({...x,id:x.id||d.id});});
         const active=(state.orders||[]).filter(o=>o.status==='active');
@@ -443,7 +439,7 @@ async function ensurePaidOrdersLoaded(scope){
         if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
       },err=>console.error('Paid orders realtime error',err));
     }catch(e){console.error('Paid orders listener attach failed',e);}
-    state.__paidOrdersLoadedSince=normalizedStart;
+    state.__paidOrdersLoadedSince=key;
     return true;
   })();
   try{return await state.__dataLoadPromises.paid;}finally{delete state.__dataLoadPromises.paid;}
@@ -849,7 +845,7 @@ let state = {
   settings:{...DEFAULT_SETTINGS},
   reservations:{},          // tableNumber -> {note, bookedAt} (legacy; table-reservation feature removed from the UI)
   tables:[],                // [{id, name, seats}]
-  oshStock:{date:'', lunch:0, evening:0}, // admin-entered osh cooked today (lunch + evening shifts)
+  oshStock:{date:'', kg:0, lunchKg:0, eveningKg:0}, // separate lunch/evening osh batches
   accounts:[],              // [{id, username, password, role}]
   currentUser:null,         // {username, role}
   loginError:null,
@@ -924,19 +920,8 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
-/* ============ PASSWORD STORAGE V46 ============
-   New/changed passwords are stored exactly as entered so Admin can view them.
-   Existing legacy SHA-256 hashes remain usable for login until the Admin changes them. */
-async function hashPassword(plain){ return String(plain ?? ''); }
-function isLegacyPasswordHash(value){ return /^[a-f0-9]{64}$/i.test(String(value ?? '')); }
-async function legacyPasswordHash(plain){
-  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(plain ?? '')));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
-/* Барои мутобиқати насли гузашта: агар аккаунт ҳанӯз паролро
-   дар матни оддӣ нигоҳ дошта бошад (дарозии < 64), онро ҳаш
-   мекунем ва фавран захира мекунем. */
-async function migrateAccountPasswordsIfNeeded(){ return true; }
+/* ============ PASSWORD STORAGE ============
+   Passwords are intentionally stored as plain text for this application. */
 
 function uid(prefix){
   const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -1008,42 +993,64 @@ function oshTotalOrderedToday(){
   });
   return kgOrdered;
 }
+function normalizeOshStock(stock){
+  const x = stock && typeof stock==='object' ? stock : {};
+  const legacyKg = Number(x.kg)||0;
+  const lunchKg = Number(x.lunchKg);
+  const eveningKg = Number(x.eveningKg);
+  const hasShiftFields = Object.prototype.hasOwnProperty.call(x,'lunchKg') || Object.prototype.hasOwnProperty.call(x,'eveningKg');
+  return {
+    date: x.date || '',
+    kg: hasShiftFields ? Math.max(0, (Number.isFinite(lunchKg)?lunchKg:0) + (Number.isFinite(eveningKg)?eveningKg:0)) : legacyKg,
+    lunchKg: hasShiftFields ? Math.max(0, Number.isFinite(lunchKg)?lunchKg:0) : legacyKg,
+    eveningKg: hasShiftFields ? Math.max(0, Number.isFinite(eveningKg)?eveningKg:0) : 0
+  };
+}
+function oshShiftForTimestamp(ts){
+  const d = new Date(ts);
+  return d.getHours() < 17 ? 'lunch' : 'evening';
+}
+function oshWeightFromItems(items){
+  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
+  return (items||[]).reduce((sum,it)=>{
+    if(getItemCategory(it)!=='Ош') return sum;
+    return sum + (it.unit==='kg' ? Number(it.qty||0)/1000 : Number(it.qty||0)*porsiyaKg);
+  },0);
+}
+function oshWeightForShift(orders, shift){
+  return (orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && oshShiftForTimestamp(o.createdAt)===shift)
+    .reduce((sum,o)=>sum+oshWeightFromItems(o.items),0);
+}
+function oshWeightForWaiterOrdersToday(){
+  return (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && o.type!=='takeaway' && o.type!=='scheduled' && !!o.createdBy)
+    .reduce((sum,o)=>sum+oshWeightFromItems(o.items),0);
+}
+function oshWeightForDirectOrdersToday(){
+  return (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && (o.type==='takeaway' || o.type==='scheduled'))
+    .reduce((sum,o)=>sum+oshWeightFromItems(o.items),0);
+}
+function renderOshShiftReport(orders){
+  const stock = normalizeOshStock(state.oshStock);
+  const lunchSold = oshWeightForShift(orders,'lunch');
+  const eveningSold = oshWeightForShift(orders,'evening');
+  const lunchRemaining = stock.lunchKg - lunchSold;
+  const eveningRemaining = stock.eveningKg - eveningSold;
+  const cell = (label,cooked,sold,remaining)=>`<div class="stat-card"><div class="label">${label}</div><div class="value">Пухта: ${cooked.toFixed(2)} кг</div><div style="font-size:12px;color:#6b5f4d;margin-top:4px;">Фурӯхта: ${sold.toFixed(2)} кг · Боқӣ: <b style="color:${remaining<0?'var(--brick)':'var(--olive)'};">${remaining.toFixed(2)} кг</b></div></div>`;
+  return `<div class="section-title" style="margin-top:24px;">🍚 Ҳисоботи ош — алоҳида аз рӯи навбат</div>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 10px;">Фармоишҳои пеш аз 17:00 ҳамчун нисфирӯзӣ ва аз 17:00 ҳамчун шом ҳисоб мешаванд.</p>
+    <div class="stat-row">${cell('☀️ Нисфирӯзӣ',stock.lunchKg,lunchSold,lunchRemaining)}${cell('🌙 Шом',stock.eveningKg,eveningSold,eveningRemaining)}</div>`;
+}
 function oshRemainingBadge(){
-  // Нишондиҳандаи оши боқимонда барои форми заказ
   const hasStock = state.oshStock && state.oshStock.date === todayKey();
   if(!hasStock) return '';
-  const kgOrdered = oshTotalOrderedToday();
-  const lunchKg = Number(state.oshStock.lunch)||0;
-  const eveningKg = Number(state.oshStock.evening)||0;
-  const cookedKg = lunchKg + eveningKg;
-  const remaining = cookedKg - kgOrdered;
-  const color = remaining <= 0 ? 'var(--brick)' : remaining < 3 ? '#c07f00' : 'var(--olive)';
-  const msg = remaining <= 0 ? 'Ош тамом шуд!' : remaining.toFixed(1)+' кг боқӣ';
-  return `<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--card);border:1.5px solid ${color};border-radius:10px;margin:0 0 10px;font-size:13px;">
-    <span style="font-size:16px;">🍚</span>
-    <span style="color:${color};font-weight:700;">${msg}</span>
-    <span style="color:#9c8f78;font-size:11px;">аз ${cookedKg} кг пухта (нисфирӯзӣ: ${lunchKg}кг + шом: ${eveningKg}кг)</span>
+  const stock = normalizeOshStock(state.oshStock);
+  const lunch = oshWeightForShift(state.orders,'lunch');
+  const evening = oshWeightForShift(state.orders,'evening');
+  const lr = stock.lunchKg-lunch, er = stock.eveningKg-evening;
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;padding:8px 14px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;margin:0 0 10px;font-size:12px;">
+    <span>🍚 <b>Нисфирӯзӣ:</b> ${lr.toFixed(2)} кг боқӣ</span>
+    <span>🌙 <b>Шом:</b> ${er.toFixed(2)} кг боқӣ</span>
   </div>`;
-}
-function oshByClients(){
-  // Вазни ош аз заказҳои мизоҷон (takeaway + scheduled)
-  const resetAt = Number(state.settings.oshTotalResetAt)||0;
-  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
-  let kg = 0;
-  state.orders.filter(o=>isToday(o.createdAt)&&o.status!=='cancelled'&&o.createdAt>=resetAt&&(o.type==='takeaway'||o.type==='scheduled')).forEach(o=>{
-    (o.items||[]).forEach(it=>{ if(getItemCategory(it)==='Ош'){ if(it.unit==='kg') kg+=it.qty/1000; else kg+=it.qty*porsiyaKg; } });
-  });
-  return kg;
-}
-function oshByWaiters(){
-  // Вазни ош аз заказҳои дар миз (dine-in) — офитсиантон
-  const resetAt = Number(state.settings.oshTotalResetAt)||0;
-  const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
-  let kg = 0;
-  state.orders.filter(o=>isToday(o.createdAt)&&o.status!=='cancelled'&&o.createdAt>=resetAt&&o.type==='dine-in').forEach(o=>{
-    (o.items||[]).forEach(it=>{ if(getItemCategory(it)==='Ош'){ if(it.unit==='kg') kg+=it.qty/1000; else kg+=it.qty*porsiyaKg; } });
-  });
-  return kg;
 }
 function oshWeightForOrdersTab(){
   let kgTotal = 0;
@@ -1119,7 +1126,7 @@ async function init(){
   state.__lastKnownOrderSnapshots = new Map(state.orders.map(o=>[o.id, JSON.parse(JSON.stringify(o))]));
   state.settings = settings || {...DEFAULT_SETTINGS};
   state.reservations = reservations || {};
-  state.oshStock = oshStock || {date:'', kg:0};
+  state.oshStock = normalizeOshStock(oshStock || {date:'', kg:0});
   state.inventory = inventory || [];
   state.activityLog = activityLog || [];
   state.bonuses = bonuses || [];
@@ -1142,9 +1149,6 @@ async function init(){
     await saveAccounts(state.accounts);
   }
 
-  // Паролҳои кӯҳнаро (матни оддӣ) ба SHA-256 табдил медиҳем
-  await migrateAccountPasswordsIfNeeded();
-
   const session = loadSession();
   if(session){
     // Session бо username санҷида мешавад — парол дар localStorage нест
@@ -1152,7 +1156,6 @@ async function init(){
     if(acc){
       state.currentUser = {username:acc.username, role:acc.role};
       state.role = acc.role;
-      if(acc.role==='cashier' || acc.role==='admin'){ ensurePaidOrdersLoaded('today'); }
     } else {
       clearSession(); // account was deleted — fall back to login
     }
@@ -1173,9 +1176,9 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveTables(state.tables);
   state.reservations = {};
   await saveReservations(state.reservations);
-  state.oshStock = {date:'', kg:0};
+  state.oshStock = {date:'', kg:0, lunchKg:0, eveningKg:0};
   await saveOshStock(state.oshStock);
-  const adminAcc = {id:'acc_admin', username:adminUser, password:String(adminPass), role:'admin'};
+  const adminAcc = {id:'acc_admin', username:adminUser, password:adminPass, role:'admin'};
   state.accounts = [adminAcc];
   await saveAccounts(state.accounts);
   state.orders = [];
@@ -1235,7 +1238,7 @@ function setupRealtimeSync(){
     try{
       const unsub=docRef(key).onSnapshot(snap=>{
         if(!state.role||!snap.exists)return;
-        try{state[stateKey]=JSON.parse(snap.data().value);if(state.activeTable===null && !isActivelyEditingFormField())render();}catch(e){}
+        try{state[stateKey]=stateKey==='oshStock' ? normalizeOshStock(JSON.parse(snap.data().value)) : JSON.parse(snap.data().value);if(state.activeTable===null && !isActivelyEditingFormField())render();}catch(e){}
       },err=>{
         console.error('Realtime listener error for',key,err);
         clearTimeout(__resubscribeTimer);
@@ -1839,8 +1842,7 @@ async function addAccount(username, password, role){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   const id = uid('acc');
-  const plainPass = String(password);
-  state.accounts.push({id, username, password: plainPass, role, wageType:'daily', wageAmount:0});
+  state.accounts.push({id, username, password, role, wageType:'daily', wageAmount:0});
   await saveAccounts(state.accounts);
   await logActivity('Корманди нав илова кард: '+username+' ('+role+')');
   showToast('Корманд илова шуд');
@@ -1849,16 +1851,15 @@ async function addAccount(username, password, role){
 async function updateAccountFn(id, username, password, role){
   const acc = state.accounts.find(a=>a.id===id);
   if(!acc) return false;
-  if(!username || !password){ showToast('Логин ва паролро пур кунед'); return false; }
-  if(password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
+  if(!username){ showToast('Логинро пур кунед'); return false; }
+  if(password && password.length < 4){ showToast('Парол бояд камаш 4 аломат бошад'); return false; }
   if(state.accounts.some(a=>a.id!==id && a.username.toLowerCase()===username.toLowerCase())){
     showToast('Ин логин аллакай истифода шудааст'); return false;
   }
   if(acc.role==='admin' && role!=='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
     showToast('Ин ягона ҳисоби админ аст — нақшашро иваз карда намешавад'); return false;
   }
-  const plainPass = String(password);
-  acc.username=username; acc.password=plainPass; acc.role=role;
+  acc.username=username; if(password) acc.password=password; acc.role=role;
   await saveAccounts(state.accounts);
   await logActivity('Кормандро тағйир дод: '+username);
   showToast('Тағйирот сабт шуд');
@@ -2056,9 +2057,6 @@ function render(){
     if((state.cashierTab||'main')==='orders'){
       attachAdminOrdersEvents();
     }
-    if((state.cashierTab||'main')==='salary'){
-      attachAdminSalaryEvents();
-    }
     attachTableGridEvents();
     const openBtn = document.getElementById('openTakeawayBtn');
     if(openBtn) openBtn.addEventListener('click', openTakeaway);
@@ -2182,14 +2180,12 @@ function attachLoginEvents(){
     const u = (document.getElementById('loginUsername').value||'').trim();
     const p = document.getElementById('loginPassword').value||'';
     if(!u || !p){ state.loginError='Логин ва паролро ворид кунед'; render(); return; }
-    const legacyHashInput = await legacyPasswordHash(p);
-    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && (String(a.password ?? '')===p || String(a.password ?? '')===legacyHashInput));
+    const acc = state.accounts.find(a=>a.username.toLowerCase()===u.toLowerCase() && String(a.password ?? '')===p);
     if(!acc){ state.loginError='Логин ё парол нодуруст'; render(); return; }
     state.currentUser = {username:acc.username, role:acc.role};
     state.role = acc.role;
     state.loginError = null;
     saveSession({username:acc.username, role:acc.role});
-    if(acc.role==='cashier' || acc.role==='admin'){ ensurePaidOrdersLoaded('today'); }
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -2421,7 +2417,7 @@ function renderCashier(){
     return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
   }
   if(cashierTab==='salary'){
-    return `<div class="container">${tabBar}${renderAdminSalary()}</div>`;
+    return `<div class="container">${tabBar}${renderCashierSalary()}</div>`;
   }
 
   return `
@@ -2532,31 +2528,13 @@ async function submitTakeaway(cashAmount, noncashAmount){
 }
 
 /* ---------- Scheduled orders (buyurtma bo vaqt) — no table, unpaid until pickup ---------- */
-function scheduledSubtotal(){
+function scheduledTotal(){
   let total = 0;
   Object.keys(state.scheduledItems).forEach(mid=>{
     const item = state.menu.find(m=>m.id===mid);
     if(item) total += lineTotal(item, state.scheduledItems[mid]);
   });
   return total;
-}
-function scheduledDiscountAmount(){
-  // Тахфиф танҳо барои фармоиши вақтдори "бо худ бурдан" ва танҳо барои категорияи "Ош" —
-  // ҳамон фоизи танзимшуда, ки барои фармоиши оддии бо худ бурдан истифода мешавад.
-  if(state.scheduledDeliveryType!=='takeaway') return 0;
-  const pct = Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0));
-  if(pct<=0) return 0;
-  let oshTotal = 0;
-  Object.keys(state.scheduledItems).forEach(mid=>{
-    const item = state.menu.find(m=>m.id===mid);
-    if(item && getItemCategory(item)==='Ош' && item.unit==='kg'){
-      oshTotal += lineTotal(item, state.scheduledItems[mid]);
-    }
-  });
-  return oshTotal * (pct/100);
-}
-function scheduledTotal(){
-  return Math.max(0, scheduledSubtotal() - scheduledDiscountAmount());
 }
 function openScheduled(){
   state.scheduledOpen = true;
@@ -2879,8 +2857,6 @@ function renderScheduledOverlay(){
       }
     });
   }
-  const subtotal = scheduledSubtotal();
-  const discountAmt = scheduledDiscountAmount();
   const total = scheduledTotal();
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
@@ -2909,7 +2885,6 @@ function renderScheduledOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек — Фармоиши вақтдор</div>
         ${receiptLines}
-        ${discountAmt>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line" style="color:var(--olive);"><span>Тахфиф барои ош (${state.settings.takeawayDiscountPct}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
       </div>
       <div class="ticket-actions">
@@ -3637,34 +3612,22 @@ function renderAdminOrders(){
     <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
-      <div class="stat-card" style="border-color:var(--olive);"><div class="label">🍚 Ҷамъи ош имрӯз</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
+      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
         <button class="icon-btn" id="clearOshTotalBtn" style="margin-top:6px;font-size:11px;padding:4px 10px;">↺ Пок кардан</button>
       </div>
-      <div class="stat-card"><div class="label">📋 Ош аз мизоҷон (takeaway+вақтдор)</div><div class="value">${oshByClients().toFixed(2)} кг</div></div>
-      <div class="stat-card"><div class="label">🧑‍🍳 Ош аз офитсиантон (дар миз)</div><div class="value">${oshByWaiters().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">🍚 Ош — фармоишҳои мустақим (бо худ бурдан/вақтдор)</div><div class="value">${oshWeightForDirectOrdersToday().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">👤 Ош — фармоишҳои официантҳо</div><div class="value">${oshWeightForWaiterOrdersToday().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
     </div>
-    ${(()=>{
-      const s = state.oshStock && state.oshStock.date===todayKey() ? state.oshStock : {lunch:0,evening:0};
-      const total = (Number(s.lunch)||0)+(Number(s.evening)||0);
-      const remaining = Math.max(0, total - oshTotalOrderedToday());
-      return `<div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
-        <p style="font-size:13px;color:#6b5f4d;margin:0 0 10px;">Миқдори оши пухта — ду навбат алоҳида ворид кунед.</p>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
-          <div class="field">
-            <label>☀️ Нисфирӯзӣ (кг)</label>
-            <input type="number" id="oshLunchInput" min="0" step="0.5" value="${s.lunch||''}" placeholder="0">
-          </div>
-          <div class="field">
-            <label>🌙 Шом (кг)</label>
-            <input type="number" id="oshEveningInput" min="0" step="0.5" value="${s.evening||''}" placeholder="0">
-          </div>
-          <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
-        </div>
-        ${total>0 ? `<div style="margin-top:10px;font-size:13px;color:var(--olive);font-weight:700;">
-          ✅ Ҷамъ: ${total} кг · Боқимонда: <b>${remaining.toFixed(2)} кг</b>
-        </div>` : '<div style="margin-top:8px;font-size:12px;color:#9c8f78;">Ҳоло ворид нашудааст</div>'}
-      </div>`;
-    })()}
+    <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
+      <p style="font-size:13px;color:#6b5f4d;margin:0 0 8px;">Ошро барои ҳисобот ва бақияи ош алоҳида сабт кунед: нисфирӯзӣ ва шом якҷоя намешаванд.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
+        <div class="field"><label>☀️ Ош — нисфирӯзӣ (кг)</label><input type="number" id="oshLunchInput" value="${state.oshStock && state.oshStock.date===todayKey() ? normalizeOshStock(state.oshStock).lunchKg : ''}" min="0" step="0.5" placeholder="масалан: 20"></div>
+        <div class="field"><label>🌙 Ош — шом (кг)</label><input type="number" id="oshEveningInput" value="${state.oshStock && state.oshStock.date===todayKey() ? normalizeOshStock(state.oshStock).eveningKg : ''}" min="0" step="0.5" placeholder="масалан: 15"></div>
+        <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
+      </div>
+      ${oshRemainingBadge() ? `<div style="margin-top:12px;">${oshRemainingBadge()}</div>` : ''}
+    </div>
     ${rowsHtml}
   `;
 }
@@ -3774,6 +3737,25 @@ function renderAdminTables(){
   `;
 }
 
+function renderCashierSalary(){
+  const username = state.currentUser && state.currentUser.username;
+  const acc = state.accounts.find(a=>a.username===username && a.role==='cashier');
+  if(!acc) return `<div class="empty-state">Маълумоти маош ёфт нашуд</div>`;
+  const w = computeWages(acc);
+  const b = staffCommissionBreakdown(username,'cashier','today');
+  const month = staffCommissionBreakdown(username,'cashier','month');
+  return `<div class="section-title">💰 Маоши ман</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;">Корманд: <b>${escapeHtml(username||'')}</b></p>
+    <div class="stat-row">
+      <div class="stat-card"><div class="label">Имрӯз</div><div class="value">${w.daily.toFixed(1)} смн</div></div>
+      <div class="stat-card"><div class="label">Ин моҳ</div><div class="value">${w.monthly.toFixed(1)} смн</div></div>
+      <div class="stat-card"><div class="label">Комиссияи имрӯз</div><div class="value">${b.total.toFixed(1)} смн</div></div>
+      <div class="stat-card"><div class="label">Комиссияи моҳ</div><div class="value">${month.total.toFixed(1)} смн</div></div>
+    </div>
+    <div class="section-title" style="margin-top:24px;">Тафсилоти имрӯз</div>
+    <table class="xls-table"><thead><tr><th>Чекҳо</th><th>Ош ≥500г</th><th>Ош &lt;500г</th><th>Бе ош</th><th>Комиссия</th></tr></thead>
+    <tbody><tr><td>${b.orderCount}</td><td>${b.countHigh}</td><td>${b.countLow}</td><td>${b.countNoOsh}</td><td class="total-cell">${b.total.toFixed(1)} смн</td></tr></tbody></table>`;
+}
 function renderAdminSalary(){
   const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
   const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
@@ -3973,7 +3955,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Парол</label><input type="text" id="editAccPassword" value="${escapeHtml(isLegacyPasswordHash(editTarget.password)?'':editTarget.password)}" placeholder="${isLegacyPasswordHash(editTarget.password)?'Пароли кӯҳна — пароли нав гузоред':'Парол'}"></div>
+      <div class="field small"><label>Пароли нав <span style="color:#9c5f00;font-size:11px;">(холӣ = нигоҳ доштан)</span></label><input type="password" id="editAccPassword" value="" placeholder="Пароли нав" autocomplete="new-password"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
@@ -4317,6 +4299,8 @@ function renderAdminReport(){
       <div class="stat-card"><div class="label">Шумораи чекҳо</div><div class="value">${paidToday.length}</div></div>
     </div>
 
+    ${renderOshShiftReport(paidToday)}
+
     <div class="section-title" style="margin-top:24px;">Даромад аз рӯи маҳсулот (имрӯз)</div>
     ${renderProductBreakdownTable(paidToday)}
 
@@ -4501,24 +4485,15 @@ function renderAdminSettings(){
     ` : `<button class="btn-ghost" style="border-color:var(--brick);color:var(--brick);" id="deleteOldOrdersBtn">🗑 Нест кардани чекҳои кӯҳна</button>`}
   </div>
 
-  <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза — 2 навбат</div>
-  ${(()=>{
-    const s = state.oshStock && state.oshStock.date===todayKey() ? state.oshStock : {lunch:0,evening:0};
-    return `<div class="settings-form">
-      <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Ду навбат алоҳида ворид кунед — нисфирӯзӣ ва шом.</p>
-      <div style="display:flex;gap:14px;flex-wrap:wrap;">
-        <div class="field">
-          <label>☀️ Нисфирӯзӣ (кг)</label>
-          <input type="number" id="oshLunchInput" value="${s.lunch||''}" min="0" step="0.5" placeholder="0">
-        </div>
-        <div class="field">
-          <label>🌙 Шом (кг)</label>
-          <input type="number" id="oshEveningInput" value="${s.evening||''}" min="0" step="0.5" placeholder="0">
-        </div>
-      </div>
+  <div class="section-title" style="margin-top:32px;">Ошпазии имрӯза</div>
+  <div class="settings-form">
+    <p style="font-size:13px;color:#6b5f4d;margin:-8px 0 0;">Ош дигар якҷоя ҳисоб намешавад: пухтани нисфирӯзӣ ва шом алоҳида сабт мешавад.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+      <div class="field"><label>☀️ Ош — нисфирӯзӣ (кг)</label><input type="number" id="oshLunchInput" value="${state.oshStock && state.oshStock.date===todayKey() ? normalizeOshStock(state.oshStock).lunchKg : ''}" min="0" step="0.5" placeholder="масалан: 20"></div>
+      <div class="field"><label>🌙 Ош — шом (кг)</label><input type="number" id="oshEveningInput" value="${state.oshStock && state.oshStock.date===todayKey() ? normalizeOshStock(state.oshStock).eveningKg : ''}" min="0" step="0.5" placeholder="масалан: 15"></div>
       <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveOshStockBtn">Сабт кардан</button>
-    </div>`;
-  })()}
+    </div>
+  </div>
   ${oshRemainingBadge()}
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
@@ -4609,12 +4584,11 @@ function attachAdminOrdersEvents(){
   });
   const saveOshBtn = document.getElementById('saveOshStockBtn');
   if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
-    const lunch = Math.max(0, parseFloat(document.getElementById('oshLunchInput')?.value)||0);
-    const evening = Math.max(0, parseFloat(document.getElementById('oshEveningInput')?.value)||0);
-    state.oshStock = {date: todayKey(), lunch, evening};
+    const lunchKg = Math.max(0, Number(document.getElementById('oshLunchInput')?.value) || 0);
+    const eveningKg = Math.max(0, Number(document.getElementById('oshEveningInput')?.value) || 0);
+    state.oshStock = {date: todayKey(), kg:lunchKg+eveningKg, lunchKg, eveningKg};
     await saveOshStock(state.oshStock);
-    await logActivity('Оши пухта: нисфирӯзӣ '+lunch+' кг, шом '+evening+' кг');
-    showToast('Сабт шуд: нисфирӯзӣ '+lunch+' кг · шом '+evening+' кг');
+    showToast('Миқдори ош сабт шуд');
     render();
   });
   const clientSearchInput = document.getElementById('clientSearchInput');
@@ -4887,10 +4861,6 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='salary'){
-    attachAdminSalaryEvents();
-  }
-}
-function attachAdminSalaryEvents(){
     document.querySelectorAll('.salary-select').forEach(sel=>{
       sel.addEventListener('change', ()=>{
         const id = sel.id.replace('wtype-','');
@@ -4958,6 +4928,7 @@ function attachAdminSalaryEvents(){
       showToast('Сабт шуд');
       render();
     });
+  }
 
   if(state.adminTab==='orders'){
     attachAdminOrdersEvents();
@@ -5090,12 +5061,11 @@ function attachAdminSalaryEvents(){
     if(downloadBackupBtn) downloadBackupBtn.addEventListener('click', downloadBackup);
     const saveOshBtn = document.getElementById('saveOshStockBtn');
     if(saveOshBtn) saveOshBtn.addEventListener('click', async ()=>{
-      const lunch = Math.max(0, parseFloat(document.getElementById('oshLunchInput')?.value)||0);
-      const evening = Math.max(0, parseFloat(document.getElementById('oshEveningInput')?.value)||0);
-      state.oshStock = {date: todayKey(), lunch, evening};
+      const lunchKg = Math.max(0, Number(document.getElementById('oshLunchInput')?.value) || 0);
+      const eveningKg = Math.max(0, Number(document.getElementById('oshEveningInput')?.value) || 0);
+      state.oshStock = {date: todayKey(), kg:lunchKg+eveningKg, lunchKg, eveningKg};
       await saveOshStock(state.oshStock);
-      await logActivity('Оши пухта: нисфирӯзӣ '+lunch+' кг, шом '+evening+' кг');
-      showToast('Сабт шуд: нисфирӯзӣ '+lunch+' кг · шом '+evening+' кг');
+      showToast('Миқдори оши нисфирӯзӣ ва шом сабт шуд');
       render();
     });
     const savePorsiyaBtn = document.getElementById('savePorsiyaGramsBtn');
