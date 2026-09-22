@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-09-23-V58-ALL-FIXES';
+const CACHE_NAME = 'kafe-shell-2026-09-23-V59-NO-RERENDER';
 const APP_SHELL = [
   './',
   './index.html',
