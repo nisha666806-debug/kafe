@@ -2169,9 +2169,9 @@ function render(){
       el.addEventListener('click', ()=>{
         const tab=el.dataset.cashiertab;
         state.cashierTab = tab; render();
-        // Load data in background without blocking UI
-        if(tab==='orders') ensureScheduledOrdersLoaded().then(()=>render()).catch(console.error);
-        if(tab==='salary') ensurePaidOrdersLoaded('month').then(()=>render()).catch(console.error);
+        // Load data in background — onSnapshot triggers render() automatically
+        if(tab==='orders') ensureScheduledOrdersLoaded().catch(console.error);
+        if(tab==='salary') ensurePaidOrdersLoaded('month').catch(console.error);
       });
     });
     if((state.cashierTab||'main')==='orders'){
@@ -4766,10 +4766,10 @@ function attachAdminEvents(){
     el.addEventListener('click', ()=>{
       const nextTab=el.dataset.atab;
       // Switch immediately, load data in background
-      if(nextTab==='report'){ ensurePaidOrdersLoaded('report').then(()=>render()).catch(console.error); ensureReportArchiveLoaded().then(()=>render()).catch(console.error); }
-      else if(nextTab==='salary'){ ensurePaidOrdersLoaded('month').then(()=>render()).catch(console.error); }
+      if(nextTab==='report'){ ensurePaidOrdersLoaded('report').catch(console.error); ensureReportArchiveLoaded().catch(console.error); }
+      else if(nextTab==='salary'){ ensurePaidOrdersLoaded('month').catch(console.error); }
       else if(nextTab==='settings'){ /* archive remains lazy; it is loaded only by the Admin button */ }
-      else if(nextTab==='orders'){ ensureScheduledOrdersLoaded().then(()=>render()).catch(console.error); }
+      else if(nextTab==='orders'){ ensureScheduledOrdersLoaded().catch(console.error); }
       state.adminTab = nextTab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
