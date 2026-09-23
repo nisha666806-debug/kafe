@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-22-V70-CASHIER-SALARY-FIX';
+const APP_VERSION = '2026-09-23-V72-ORDERS-OSH-SHIFTS';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -999,56 +999,6 @@ function oshOrderedKgToday(){
 // A scheduled order that's already been seated (type becomes 'dine-in') no longer counts here —
 // at that point it's ordinary table demand, tracked by oshOrderedKgToday() instead.
 
-
-function currentShift(){
-  const h = new Date().getHours(), m = new Date().getMinutes(), mins = h*60+m;
-  if(mins >= 9*60 && mins < 17*60+30) return 1;
-  if(mins >= 18*60) return 2;
-  return 0;
-}
-function isShift1(ts){ const d=new Date(ts),mins=d.getHours()*60+d.getMinutes(); return mins>=9*60&&mins<17*60+30; }
-function isShift2(ts){ const d=new Date(ts),mins=d.getHours()*60+d.getMinutes(); return mins>=18*60; }
-function oshKgFromOrders(filterFn){
-  const porsiyaKg=(Number(state.settings.porsiyaGrams)||120)/1000;
-  let kg=0;
-  state.orders.filter(o=>isToday(o.createdAt)&&o.status!=='cancelled'&&filterFn(o)).forEach(o=>{
-    (o.items||[]).forEach(it=>{ if(getItemCategory(it)==='Ош'){ if(it.unit==='kg') kg+=it.qty/1000; else kg+=it.qty*porsiyaKg; } });
-  });
-  return kg;
-}
-function oshShiftStats(shift){
-  const shiftFn=shift===1?isShift1:isShift2;
-  const scheduled=oshKgFromOrders(o=>shiftFn(o.createdAt)&&(o.type==='scheduled'||o.type==='takeaway'));
-  const waiters=oshKgFromOrders(o=>shiftFn(o.createdAt)&&o.type==='dine-in');
-  const total=scheduled+waiters;
-  const osh=state.oshStock&&state.oshStock.date===todayKey()?state.oshStock:{lunch:0,evening:0};
-  const cooked=shift===1?(Number(osh.lunch)||0):(Number(osh.evening)||0);
-  const remaining=Math.max(0,cooked-total);
-  return {cooked,scheduled,waiters,total,remaining};
-}
-function renderOshShiftTable(){
-  const s1=oshShiftStats(1),s2=oshShiftStats(2);
-  const fmtKg=v=>v.toFixed(2)+' кг';
-  const rc=r=>r<=0?'var(--brick)':r<2?'#c07f00':'var(--olive)';
-  return `<div style="margin-bottom:18px;">
-    <div class="section-title" style="margin-bottom:10px;">🍚 Ҳисоби ош — 2 смена</div>
-    <div style="overflow-x:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:13px;">
-        <thead><tr style="background:var(--card);">
-          <th style="padding:8px 10px;text-align:left;border-bottom:2px solid var(--ink);"></th>
-          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">☀️ Смена 1<br><span style="font-weight:400;color:#9c8f78;">09:00–17:30</span></th>
-          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">🌙 Смена 2<br><span style="font-weight:400;color:#9c8f78;">18:00–00:00</span></th>
-        </tr></thead>
-        <tbody>
-          <tr><td style="padding:8px 10px;color:#6b5f4d;">🍳 Пухта</td><td style="padding:8px 10px;text-align:center;font-weight:700;">${fmtKg(s1.cooked)}</td><td style="padding:8px 10px;text-align:center;font-weight:700;">${fmtKg(s2.cooked)}</td></tr>
-          <tr style="background:var(--card);"><td style="padding:8px 10px;color:#6b5f4d;">📋 Вақтдор+takeaway</td><td style="padding:8px 10px;text-align:center;">${fmtKg(s1.scheduled)}</td><td style="padding:8px 10px;text-align:center;">${fmtKg(s2.scheduled)}</td></tr>
-          <tr><td style="padding:8px 10px;color:#6b5f4d;">🧑‍🍳 Офитсиантон</td><td style="padding:8px 10px;text-align:center;">${fmtKg(s1.waiters)}</td><td style="padding:8px 10px;text-align:center;">${fmtKg(s2.waiters)}</td></tr>
-          <tr style="border-top:2px solid var(--ink);"><td style="padding:8px 10px;font-weight:700;">✅ Боқӣ</td><td style="padding:8px 10px;text-align:center;font-weight:700;color:${rc(s1.remaining)};">${fmtKg(s1.remaining)}</td><td style="padding:8px 10px;text-align:center;font-weight:700;color:${rc(s2.remaining)};">${fmtKg(s2.remaining)}</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>`;
-}
 function oshTotalOrderedToday(){
   // Вазни умумии ошест, ки имрӯз фармоиш дода шудааст — ин рақам ҳеҷ гоҳ кам намешавад
   // (на ҳангоми ба миз гузоштани фармоиши вактдор, на ҳангоми пӯшидани чек) — танҳо бекоршавии
@@ -1083,7 +1033,8 @@ function normalizeOshStock(stock){
 }
 function oshShiftForTimestamp(ts){
   const d = new Date(ts);
-  return d.getHours() < 17 ? 'lunch' : 'evening';
+  const mins = d.getHours()*60 + d.getMinutes();
+  return mins < (17*60+30) ? 'lunch' : 'evening';
 }
 function oshWeightFromItems(items){
   const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
@@ -1181,6 +1132,32 @@ function oshWeightForOrdersTab(){
   };
   state.orders.filter(o=>isToday(o.createdAt) && (o.type==='takeaway' || o.type==='scheduled') && o.status!=='cancelled').forEach(o=>addItems(o.items));
   return kgTotal;
+}
+function renderOrdersOshShiftFields(){
+  const todayOrders = (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled');
+  const dayKg = oshWeightForShift(todayOrders,'lunch');
+  const nightKg = oshWeightForShift(todayOrders,'evening');
+  const totalKg = dayKg + nightKg;
+  return `<div style="margin-bottom:16px;">
+    <div class="section-title">🍚 Вазни оши фармоишшуда — имрӯз</div>
+    <div class="stat-row" style="margin-top:8px;">
+      <div class="stat-card">
+        <div class="label">☀️ Сменаи рӯзона</div>
+        <div class="value">${dayKg.toFixed(2)} кг</div>
+        <div style="font-size:12px;color:#6b5f4d;margin-top:4px;">09:00–17:30</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">🌙 Сменаи шабона</div>
+        <div class="value">${nightKg.toFixed(2)} кг</div>
+        <div style="font-size:12px;color:#6b5f4d;margin-top:4px;">17:30–00:00</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">🍚 Ҳамагӣ</div>
+        <div class="value">${totalKg.toFixed(2)} кг</div>
+        <div style="font-size:12px;color:#6b5f4d;margin-top:4px;">Ҳамаи фармоишҳои имрӯз</div>
+      </div>
+    </div>
+  </div>`;
 }
 function oshWeightScheduledOnly(){
   let kgTotal = 0;
@@ -2166,12 +2143,11 @@ function render(){
   if(state.role==='waiter') attachWaiterEvents();
   if(state.role==='cashier'){
     document.querySelectorAll('[data-cashiertab]').forEach(el=>{
-      el.addEventListener('click', ()=>{
+      el.addEventListener('click', async ()=>{
         const tab=el.dataset.cashiertab;
+        if(tab==='orders') await ensureScheduledOrdersLoaded();
+        if(tab==='salary') await ensurePaidOrdersLoaded('month');
         state.cashierTab = tab; render();
-        // Load data in background — onSnapshot triggers render() automatically
-        if(tab==='orders') ensureScheduledOrdersLoaded().catch(console.error);
-        if(tab==='salary') ensurePaidOrdersLoaded('month').catch(console.error);
       });
     });
     if((state.cashierTab||'main')==='orders'){
@@ -2534,7 +2510,7 @@ function renderCashier(){
   </div>`;
 
   if(cashierTab==='orders'){
-    return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
+    return `<div class="container">${tabBar}${renderOrdersOshShiftFields()}${renderAdminOrders()}</div>`;
   }
   if(cashierTab==='salary'){
     return `<div class="container">${tabBar}${renderCashierSalary()}</div>`;
@@ -2544,6 +2520,7 @@ function renderCashier(){
   <div class="container">
     ${tabBar}
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;">
+      <button class="btn-primary" id="openTakeawayBtn" style="padding:11px 18px;">🥡 + Фармоиши бо худ бурдан</button>
       <button class="btn-primary" id="openScheduledBtn" style="padding:11px 18px;background:var(--olive);">🕐 + Фармоиши вақтдор</button>
     </div>
     ${oshRemainingBadge()}
@@ -3728,11 +3705,16 @@ function renderAdminOrders(){
     ${oshRemainingBadge()}
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳамаи мизоҷоне, ки фармоиши вақтдор додаанд. Бо ном ё рақами телефон ҷустуҷӯ кунед.</p>
     <input type="text" id="clientSearchInput" value="${escapeHtml(state.clientSearchQuery)}" placeholder="Ном ё рақами телефон..." style="width:100%;max-width:420px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:16px;">
-    <div class="stat-row" style="margin-bottom:14px;">
+    <div class="stat-row" style="margin-bottom:18px;">
       <div class="stat-card"><div class="label">Ҳамагӣ сабтҳо</div><div class="value">${allClients.length}</div></div>
       <div class="stat-card"><div class="label">Натиҷаи ҷустуҷӯ</div><div class="value">${matchedClients.length}</div></div>
+      <div class="stat-card"><div class="label">Вазни умумии фармоишҳои имрӯза (ҳама фармоиш)</div><div class="value">${oshTotalOrderedToday().toFixed(2)} кг</div>
+        <button class="icon-btn" id="clearOshTotalBtn" style="margin-top:6px;font-size:11px;padding:4px 10px;">↺ Пок кардан</button>
+      </div>
+      <div class="stat-card"><div class="label">🍚 Ош — фармоишҳои мустақим (бо худ бурдан/вақтдор)</div><div class="value">${oshWeightForDirectOrdersToday().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">👤 Ош — фармоишҳои официантҳо</div><div class="value">${oshWeightForWaiterOrdersToday().toFixed(2)} кг</div></div>
+      <div class="stat-card"><div class="label">Вазни фармоишҳои вақтдор (танҳо)</div><div class="value">${oshWeightScheduledOnly().toFixed(2)} кг</div></div>
     </div>
-    ${renderOshShiftTable()}
     <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;">
       <p style="font-size:13px;color:#6b5f4d;margin:0 0 8px;">Ошро барои ҳисобот ва бақияи ош алоҳида сабт кунед: нисфирӯзӣ ва шом якҷоя намешаванд.</p>
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
@@ -3887,7 +3869,7 @@ function renderAdminSalary(){
     <div class="salary-row">
       <div class="salary-name">
         <div class="nm">${escapeHtml(acc.username)}</div>
-        <div class="cat">${roleLabel[acc.role]||acc.role} · 🔑 ${escapeHtml(acc.password||'')}</div>
+        <div class="cat">${roleLabel[acc.role]||acc.role}</div>
       </div>
       <select class="salary-select" id="wtype-${acc.id}">
         <option value="daily" ${acc.wageType!=='monthly'&&acc.wageType!=='commission'?'selected':''}>Рӯзона (собит)</option>
@@ -4763,13 +4745,12 @@ function attachAdminEvents(){
     state.formOpenAt = Date.now();
   }
   document.querySelectorAll('.admin-tab').forEach(el=>{
-    el.addEventListener('click', ()=>{
+    el.addEventListener('click', async ()=>{
       const nextTab=el.dataset.atab;
-      // Switch immediately, load data in background
-      if(nextTab==='report'){ ensurePaidOrdersLoaded('report').catch(console.error); ensureReportArchiveLoaded().catch(console.error); }
-      else if(nextTab==='salary'){ ensurePaidOrdersLoaded('month').catch(console.error); }
+      if(nextTab==='report'){ await ensurePaidOrdersLoaded('report'); await ensureReportArchiveLoaded(); }
+      else if(nextTab==='salary'){ await ensurePaidOrdersLoaded('month'); }
       else if(nextTab==='settings'){ /* archive remains lazy; it is loaded only by the Admin button */ }
-      else if(nextTab==='orders'){ ensureScheduledOrdersLoaded().catch(console.error); }
+      else if(nextTab==='orders'){ await ensureScheduledOrdersLoaded(); }
       state.adminTab = nextTab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
@@ -5353,43 +5334,58 @@ async function hardRefreshApp(){
       await Promise.all(keys.map(k=>caches.delete(k)));
     }
   }catch(e){ console.error('hardRefreshApp cleanup failed', e); }
-  // A plain reload() can still be answered by the browser's (or a CDN's) HTTP cache with the
-  // very same stale index.html — the service worker and Cache Storage are clean, but that
-  // doesn't touch this layer, so the banner would just reappear forever. Force a truly fresh
-  // fetch by navigating to a cache-busted URL instead of calling reload().
+
+  // Preserve all existing URL parameters (including ?cafe=...).
   const url = new URL(window.location.href);
   url.searchParams.set('_v', String(Date.now()));
   window.location.replace(url.toString());
 }
 function showUpdateBanner(){
-  if(__updateBannerShown) return;
+  if(__updateBannerShown || document.getElementById('appUpdateBanner')) return;
   __updateBannerShown = true;
   const bar = document.createElement('div');
-  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999;background:var(--ink);color:var(--paper);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;box-shadow:0 -2px 10px rgba(0,0,0,.2);';
-  bar.innerHTML = `<span>🔄 Нусхаи нави барнома дастрас аст</span><button style="background:var(--brick);color:#fff;border:none;padding:8px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;">Навсозӣ</button>`;
-  bar.querySelector('button').addEventListener('click', hardRefreshApp);
+  bar.id = 'appUpdateBanner';
+  bar.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:99999;background:var(--ink);color:var(--paper);padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.25);';
+  bar.innerHTML = '<span style="font-weight:700">🔄 Нусхаи нави барнома дастрас аст</span><button type="button" style="background:var(--brick);color:#fff;border:none;padding:9px 16px;border-radius:20px;font-weight:700;font-family:inherit;font-size:13px;cursor:pointer">Навсозӣ</button>';
+  bar.querySelector('button').addEventListener('click', async ()=>{
+    const btn = bar.querySelector('button');
+    if(btn){ btn.disabled=true; btn.textContent='Навсозӣ...'; }
+    await hardRefreshApp();
+  });
   document.body.appendChild(bar);
 }
 async function checkForUpdate(){
   try{
-    const res = await fetch('./version.json?t=' + Date.now(), {cache:'no-store'});
-    if(!res.ok) return;
+    const res = await fetch('./version.json?update_check=' + Date.now(), {
+      cache:'no-store',
+      headers:{'Cache-Control':'no-cache'}
+    });
+    if(!res.ok) return false;
     const data = await res.json();
-    if(data && data.version && data.version !== APP_VERSION) showUpdateBanner();
+    const remoteVersion = String(data && data.version || '').trim();
+    if(remoteVersion && remoteVersion !== APP_VERSION){
+      showUpdateBanner();
+      return true;
+    }
   }catch(e){}
+  return false;
 }
-setInterval(checkForUpdate, 3*60*1000); // every 3 minutes
+setTimeout(checkForUpdate, 3000);
+setInterval(checkForUpdate, 5 * 60 * 1000);
 document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState==='visible') checkForUpdate();
+  if(document.visibilityState === 'visible') checkForUpdate();
 });
 window.addEventListener('online', checkForUpdate);
-setTimeout(checkForUpdate, 5000); // one soon after launch too, not just on the long timer
 
 init();
 
 if('serviceWorker' in navigator){
-  window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  window.addEventListener('load', async ()=>{
+    try{
+      const registration = await navigator.serviceWorker.register('./sw.js', {updateViaCache:'none'});
+      // Ask the browser to check the worker once; do not reload automatically.
+      await registration.update();
+    }catch(e){}
   });
 }
 </script>
