@@ -21,7 +21,9 @@ self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
+        keys
+          .filter(key => key !== CACHE_NAME)
+          .map(key => caches.delete(key))
       ))
       .then(() => self.clients.claim())
   );
@@ -32,7 +34,7 @@ self.addEventListener('fetch', event => {
 
   const url = new URL(event.request.url);
 
-  // Firebase / Firestore data is never cached.
+  // Firebase / Firestore data NEVER cached
   if (
     url.hostname.includes('googleapis.com') ||
     url.hostname.includes('firebaseio.com') ||
@@ -42,17 +44,20 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Never serve the update marker or the service worker from Cache Storage.
+  // version.json ва sw.js ҳамеша аз сервер гирифта мешаванд
   if (
     url.pathname.endsWith('/version.json') ||
     url.pathname.endsWith('/sw.js')
   ) {
     event.respondWith(
-      fetch(event.request, { cache: 'no-store' })
+      fetch(event.request, {
+        cache: 'no-store'
+      })
     );
     return;
   }
 
+  // Network first + cache fallback
   event.respondWith(
     fetch(event.request)
       .then(response => {
@@ -60,12 +65,16 @@ self.addEventListener('fetch', event => {
           const copy = response.clone();
 
           caches.open(CACHE_NAME)
-            .then(cache => cache.put(event.request, copy))
+            .then(cache => {
+              cache.put(event.request, copy);
+            })
             .catch(() => {});
         }
 
         return response;
       })
-      .catch(() => caches.match(event.request))
+      .catch(() => {
+        return caches.match(event.request);
+      })
   );
 });
