@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-26-V77-RESTORE-TABLE-GRID';
+const APP_VERSION = '2026-09-26-V78-RESTORE-ORIGINAL-TABLE-ORDER';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -894,7 +894,6 @@ let state = {
   expenses:[],
   technicalStaff:[],          // [{id,name,role,dailyWage,active}]
   dailySalaryLedger:[],       // [{date,total,waiterCashier,technical}]
-  tableLayoutEditMode:false,
   __lastKnownOrderIds:new Set(),
   __lastKnownOrderSnapshots:new Map(),
   showBonusForm:true,
@@ -2368,10 +2367,9 @@ function attachCommonEvents(){
 }
 
 function sortedTables(){
-  const list=[...(state.tables||[])], mode=(state.settings||{}).tableSort||'name';
-  if(mode==='manual') return list;
-  list.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'tg',{numeric:true,sensitivity:'base'}));
-  return mode==='nameDesc'?list.reverse():list;
+  // Original table order: keep exactly the order stored in state.tables.
+  // No visual/manual drag layout and no automatic alphabetical sorting.
+  return [...(state.tables||[])];
 }
 
 /* ---------- Shared table grid ---------- */
