@@ -132,11 +132,6 @@
   .table-grid{
     display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;
   }
-  .table-grid.manual-layout{position:relative;display:block;min-height:620px;background:linear-gradient(180deg,#fff,#fbfaf7);border:1px dashed var(--line);border-radius:16px;padding:10px;overflow:hidden;}
-  .table-grid.manual-layout .table-card{position:absolute;width:150px;min-height:120px;cursor:grab;touch-action:none;transition:box-shadow .15s ease,transform .1s ease;}
-  .table-grid.manual-layout .table-card:active{cursor:grabbing;}
-  .table-grid.manual-layout.editing .table-card{cursor:grab;border-color:var(--gold);}
-  .layout-help{font-size:12px;color:#6b5f4d;background:#fff8df;border:1px solid #ead99a;border-radius:10px;padding:10px 12px;margin:0 0 12px;}
   .table-card{
     border:1px solid var(--line);border-radius:14px;padding:16px 14px;background:var(--card);
     display:flex;flex-direction:column;gap:8px;text-align:left;font-family:inherit;
@@ -342,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-25-V76-SALARY-TECH-AND-TABLE-LAYOUT';
+const APP_VERSION = '2026-09-26-V77-RESTORE-TABLE-GRID';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -2401,10 +2396,7 @@ function buildTableCards(){
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen) extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
     }
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
-    const px = Number.isFinite(Number(tbl.x)) ? Number(tbl.x) : ((i%5)*19)+2;
-    const py = Number.isFinite(Number(tbl.y)) ? Number(tbl.y) : (Math.floor(i/5)*25)+3;
-    const pos = `style="left:${Math.max(0,Math.min(90,px))}%;top:${Math.max(0,Math.min(85,py))}%;"`;
-    cards += `<button class="table-card ${lockedForMe?'locked-table':''}" data-table="${t}" ${pos}>
+    cards += `<button class="table-card ${lockedForMe?'locked-table':''}" data-table="${t}">
       ${arrivalBadge}<div class="row1"><span class="tnum">${escapeHtml(tbl.name)}</span><span class="dot ${dotClass}"></span></div>
       <span class="status">${statusText} · ${tbl.seats} ҷой</span>${extra}${assignBadge}
       ${lockedForMe ? `<span class="reserve-detail" style="color:var(--brick);">🔒 танҳо ${escapeHtml(tbl.assignedTo)}</span>` : ''}
@@ -2413,34 +2405,12 @@ function buildTableCards(){
   return cards;
 }
 function attachTableGridEvents(){
-  const grid=document.getElementById('tableLayoutGrid');
   document.querySelectorAll('.table-card').forEach(el=>{
-    let dragging=false,startX=0,startY=0,origX=0,origY=0;
     const id=Number(el.dataset.table);
-    const begin=(ev)=>{
-      if(!state.tableLayoutEditMode) return;
-      dragging=true; ev.preventDefault();
-      const pt=ev.touches?ev.touches[0]:ev;
-      startX=pt.clientX; startY=pt.clientY;
-      origX=parseFloat(el.style.left)||0; origY=parseFloat(el.style.top)||0;
-      el.style.zIndex='20';
-    };
-    const move=(ev)=>{
-      if(!dragging||!grid) return;
-      const pt=ev.touches?ev.touches[0]:ev;
-      const r=grid.getBoundingClientRect();
-      const nx=Math.max(0,Math.min(90,origX+((pt.clientX-startX)/r.width)*100));
-      const ny=Math.max(0,Math.min(85,origY+((pt.clientY-startY)/r.height)*100));
-      el.style.left=nx+'%'; el.style.top=ny+'%';
-      const t=state.tables.find(x=>x.id===id); if(t){t.x=nx;t.y=ny;}
-    };
-    const end=async()=>{if(!dragging)return;dragging=false;el.style.zIndex='';const t=state.tables.find(x=>x.id===id);if(t) await saveTables(state.tables);};
-    el.addEventListener('pointerdown',begin); el.addEventListener('pointermove',move); el.addEventListener('pointerup',end); el.addEventListener('pointercancel',end);
-    el.addEventListener('click',()=>{if(!state.tableLayoutEditMode) openTable(id);});
+    el.addEventListener('click',()=>openTable(id));
   });
-  const btn=document.getElementById('toggleTableLayoutBtn');
-  if(btn) btn.addEventListener('click',()=>{state.tableLayoutEditMode=!state.tableLayoutEditMode;render();});
 }
+
 
 /* ---------- Waiter view ---------- */
 function renderWaiter(){
@@ -2469,7 +2439,7 @@ function renderWaiter(){
   return `
   <div class="container">
     <div class="section-title">Мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
-    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
+    <div class="table-grid" id="tableLayoutGrid">${buildTableCards()}</div>
     ${pendingScheduledAll.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор</div><p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳангоми омадани мизожон, мизи озодро интихоб карда «Ба миз гузоштан»-ро занед</p>
     <input type="tel" id="waiterSchedPhoneInput" value="${escapeHtml(state.waiterSchedPhoneQuery||'')}" placeholder="Ҷустуҷӯ бо рақами телефон..." style="width:100%;max-width:320px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:12px;">
     ${scheduledHtml}` : ''}
@@ -2592,7 +2562,7 @@ function renderCashier(){
     ${oshRemainingBadge()}
     <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
-    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
+    <div class="table-grid" id="tableLayoutGrid">${buildTableCards()}</div>
     ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои вақтдор — бо худ бурдан (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
     ${pendingScheduledDinein.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledDineinHtml}` : ''}
     ${myTakeaway.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои бо худ бурдани имрӯза</div>${takeawayHtml}` : ''}
@@ -3888,11 +3858,9 @@ function renderAdminTables(){
       </div>
     </div>
     <div class="section-title">Ҳолати мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;"><button class="btn-ghost" id="toggleTableLayoutBtn">${state.tableLayoutEditMode?'✅ Анҷоми ҷойгиркунӣ':'↔️ Танзими ҷойгиршавии мизҳо'}</button></div>
-    ${state.tableLayoutEditMode?'<div class="layout-help">Мизро бо муш ё ангушт гирифта ба ҳар ҷой кашед. Рақами/номи миз тағйир намеёбад — танҳо ҷойи он дар экран иваз мешавад. Пас аз ҷойгиркунӣ «Анҷоми ҷойгиркунӣ»-ро пахш кунед.</div>':''}
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед (пардохт танҳо аз ҷониби кассир)</p>
     ${orphanHtml}
-    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
+    <div class="table-grid" id="tableLayoutGrid">${buildTableCards()}</div>
 
     <div class="section-title" style="margin-top:28px;">Номгузорӣ ва ҷои нишасти мизҳо</div>
     ${addTableFormHtml}
