@@ -132,6 +132,11 @@
   .table-grid{
     display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;
   }
+  .table-grid.manual-layout{position:relative;display:block;min-height:620px;background:linear-gradient(180deg,#fff,#fbfaf7);border:1px dashed var(--line);border-radius:16px;padding:10px;overflow:hidden;}
+  .table-grid.manual-layout .table-card{position:absolute;width:150px;min-height:120px;cursor:grab;touch-action:none;transition:box-shadow .15s ease,transform .1s ease;}
+  .table-grid.manual-layout .table-card:active{cursor:grabbing;}
+  .table-grid.manual-layout.editing .table-card{cursor:grab;border-color:var(--gold);}
+  .layout-help{font-size:12px;color:#6b5f4d;background:#fff8df;border:1px solid #ead99a;border-radius:10px;padding:10px 12px;margin:0 0 12px;}
   .table-card{
     border:1px solid var(--line);border-radius:14px;padding:16px 14px;background:var(--card);
     display:flex;flex-direction:column;gap:8px;text-align:left;font-family:inherit;
@@ -337,7 +342,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-25-V75-DAILY-WAGES-IN-REPORTS';
+const APP_VERSION = '2026-09-25-V76-SALARY-TECH-AND-TABLE-LAYOUT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -619,7 +624,7 @@ async function fsSet(key, value){
 async function loadAll(){
   // Orders are intentionally excluded here. They live in the V2 subcollection
   // cafes/{cafeId}/orders/{orderId} and are loaded by loadOrdersV2().
-  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, expenses:null, failed:{}};
+  const out = {menu:null, settings:null, reservations:null, tables:null, oshStock:null, accounts:null, inventory:null, activityLog:null, bonuses:null, expenses:null, technicalStaff:null, dailySalaryLedger:null, failed:{}};
   const parseField = async (key, outKey)=>{
     const r = await fsGet(key);
     if(!r.ok){ out.failed[outKey] = true; return; }
@@ -636,6 +641,8 @@ async function loadAll(){
   await parseField('activityLog', 'activityLog');
   await parseField('bonuses', 'bonuses');
   await parseField('expenses', 'expenses');
+  await parseField('technicalStaff', 'technicalStaff');
+  await parseField('dailySalaryLedger', 'dailySalaryLedger');
   return out;
 }
 async function saveMenu(menu){
@@ -709,6 +716,16 @@ async function saveOshStock(data){
 async function saveAccounts(accounts){
   const ok = await fsSet('accounts', JSON.stringify(accounts));
   if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+}
+async function saveTechnicalStaff(list){
+  const ok=await fsSet('technicalStaff',JSON.stringify(list||[]));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+  return ok;
+}
+async function saveDailySalaryLedger(list){
+  const ok=await fsSet('dailySalaryLedger',JSON.stringify(list||[]));
+  if(!ok) showToast('Хатогӣ дар нигоҳдорӣ');
+  return ok;
 }
 // Inventory quantities are touched by nearly every order (auto-deducted on send, restored on
 // cancel) plus manual admin adjustments — the single most frequent source of two staff writing
@@ -880,6 +897,9 @@ let state = {
   dailyClosures:[],
   reportArchive:null,
   expenses:[],
+  technicalStaff:[],          // [{id,name,role,dailyWage,active}]
+  dailySalaryLedger:[],       // [{date,total,waiterCashier,technical}]
+  tableLayoutEditMode:false,
   __lastKnownOrderIds:new Set(),
   __lastKnownOrderSnapshots:new Map(),
   showBonusForm:true,
@@ -1134,26 +1154,25 @@ function splitExpenses(expenses){
 function sumExpenses(list){ return (list||[]).reduce((s,e)=>s+(Number(e.amount)||0),0); }
 function makeDailySummary(date, paidOrders, expenses, closedAt, closedBy){
   const shifts=splitReportOrders(paidOrders), ex=splitExpenses(expenses);
-  const make=(orders,exps,shift)=>{
+  const make=(orders,exps)=>{
     const cash=orders.reduce((s,o)=>s+paymentSplit(o).cash,0);
     const noncash=orders.reduce((s,o)=>s+paymentSplit(o).noncash,0);
     const revenue=orders.reduce((s,o)=>s+(Number(o.total)||0),0);
     const expense=sumExpenses(exps);
-    const wages=wageReportForOrders(orders,shift).total;
-    return {revenue,cash,noncash,expenses:expense,wages,net:revenue-expense-wages,checks:orders.length};
+    return {revenue,cash,noncash,expenses:expense,net:revenue-expense,checks:orders.length};
   };
-  return {id:uid('day'),date,closedAt,closedBy,day:make(shifts.day,ex.day,1),night:make(shifts.night,ex.night,2),total:make([...shifts.day,...shifts.night],[...ex.day,...ex.night],0)};
+  return {id:uid('day'),date,closedAt,closedBy,day:make(shifts.day,ex.day),night:make(shifts.night,ex.night),total:make([...shifts.day,...shifts.night],[...ex.day,...ex.night])};
 }
 function upsertMonthlySummary(archive, summary){
   const month=summary.date.slice(0,7);
-  const base=archive.months[month]||{month,days:0,revenue:0,expenses:0,wages:0,net:0,checks:0,day:{revenue:0,expenses:0,wages:0,net:0,checks:0},night:{revenue:0,expenses:0,wages:0,net:0,checks:0}};
+  const base=archive.months[month]||{month,days:0,revenue:0,expenses:0,net:0,checks:0,day:{revenue:0,expenses:0,net:0,checks:0},night:{revenue:0,expenses:0,net:0,checks:0}};
   const prev=archive.days.find(x=>x.date===summary.date);
   if(prev){
     base.days=Math.max(0,base.days-1);
-    ['revenue','expenses','wages','net','checks'].forEach(k=>{base[k]-=Number(prev.total[k])||0; base.day[k]-=Number(prev.day[k])||0; base.night[k]-=Number(prev.night[k])||0;});
+    ['revenue','expenses','net','checks'].forEach(k=>{base[k]-=Number(prev.total[k])||0; base.day[k]-=Number(prev.day[k])||0; base.night[k]-=Number(prev.night[k])||0;});
   }
   base.days+=1;
-  ['revenue','expenses','wages','net','checks'].forEach(k=>{base[k]+=Number(summary.total[k])||0; base.day[k]+=Number(summary.day[k])||0; base.night[k]+=Number(summary.night[k])||0;});
+  ['revenue','expenses','net','checks'].forEach(k=>{base[k]+=Number(summary.total[k])||0; base.day[k]+=Number(summary.day[k])||0; base.night[k]+=Number(summary.night[k])||0;});
   archive.months[month]=base;
 }
 function renderOshShiftReport(orders){
@@ -1212,15 +1231,14 @@ function oshWeightScheduledOnly(){
 async function init(){
   render(); // loading state
   const all = await loadAll();
-  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, expenses, failed} = all;
-  // IMPORTANT: never read legacy/history orders during normal startup.
-  // Migration is intentionally NOT automatic here because fsGet('orders') may read
-  // the old full order archive and create unnecessary Firestore traffic.
-  // The live app starts from the V2 active-orders query only.
-  // Historical paid/archive data is loaded lazily by reports/salary when requested.
-  //
-  // If a one-time legacy migration is ever needed, run it as an explicit maintenance
-  // action on an admin device — never as part of daily startup.
+  const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, expenses, technicalStaff, dailySalaryLedger, failed} = all;
+  // Complete the one-time, non-destructive migration before the first V2 read.
+  // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
+  try{
+    await migrateOrdersToV2();
+  }catch(e){
+    console.error('Initial orders migration failed',e);
+  }
   // Only active orders are needed for the live operational screens at startup.
   // Historical paid orders are loaded lazily by report/salary/client-history screens.
   const ordersResult = await loadActiveOrdersV2();
@@ -1261,12 +1279,14 @@ async function init(){
   state.dailyClosures = [];
   state.reportArchive = null;
   state.expenses = expenses || [];
+  state.technicalStaff = Array.isArray(technicalStaff) ? technicalStaff : [];
+  state.dailySalaryLedger = Array.isArray(dailySalaryLedger) ? dailySalaryLedger : [];
 
   if(tables && tables.length){
     state.tables = tables;
   } else {
     const tc = (settings && settings.tableCount) || 8;
-    state.tables = Array.from({length:tc}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
+    state.tables = Array.from({length:tc}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4, x:((i%5)*19)+2, y:(Math.floor(i/5)*25)+3}));
     await saveTables(state.tables);
   }
 
@@ -1302,7 +1322,7 @@ async function submitCafeSetup(cafeName, adminUser, adminPass){
   await saveMenu(state.menu);
   state.settings = {...DEFAULT_SETTINGS, cafeName};
   await saveSettings(state.settings);
-  state.tables = Array.from({length:8}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4}));
+  state.tables = Array.from({length:8}, (_,i)=>({id:i+1, name:'Мизи '+(i+1), seats:4, x:((i%4)*24)+2, y:(Math.floor(i/4)*38)+3}));
   await saveTables(state.tables);
   state.reservations = {};
   await saveReservations(state.reservations);
@@ -1809,14 +1829,14 @@ function orderLabel(o){
 async function addTableConfig(name, seats, assignedTo){
   const newId = state.tables.length ? Math.max(...state.tables.map(t=>t.id))+1 : 1;
   const finalName = name || ('Мизи '+newId);
-  state.tables.push({id:newId, name: finalName, seats: Math.max(1, Number(seats)||4), assignedTo: assignedTo||null});
+  state.tables.push({id:newId, name: finalName, seats: Math.max(1, Number(seats)||4), assignedTo: assignedTo||null, x:((state.tables.length%5)*19)+2, y:(Math.floor(state.tables.length/5)*25)+3});
   await saveTables(state.tables);
   await logActivity('Мизи нав илова кард: '+finalName);
   showToast('Миз илова шуд');
 }
 async function updateTableConfig(id, name, seats, assignedTo){
   const t = state.tables.find(x=>x.id===id);
-  if(t){ t.name = name || t.name; t.seats = Math.max(1, Number(seats)||4); t.assignedTo = assignedTo||null; }
+  if(t){ t.name = name || t.name; t.seats = Math.max(1, Number(seats)||4); t.assignedTo = assignedTo||null; if(!Number.isFinite(Number(t.x))) t.x=2; if(!Number.isFinite(Number(t.y))) t.y=3; }
   await saveTables(state.tables);
   await logActivity('Мизро тағйир дод: '+(t?t.name:id));
   showToast('Тағйирот сабт шуд');
@@ -2362,7 +2382,7 @@ function sortedTables(){
 /* ---------- Shared table grid ---------- */
 function buildTableCards(){
   let cards = '';
-  sortedTables().forEach(tbl=>{
+  sortedTables().forEach((tbl,i)=>{
     const t = tbl.id;
     const order = activeOrderForTable(t);
     const occ = !!order;
@@ -2372,50 +2392,54 @@ function buildTableCards(){
     let dotClass = 'free', statusText = 'Озод', extra = '', arrivalBadge = '';
     if(occ){
       dotClass = 'occupied'; statusText = 'Банд';
-
-      // Show full 9-digit phone number prominently above the table card.
-      // Never show "Бо заказ", "Беззаказ", or masked/truncated phone.
       const _cardPhone = String(order.customerPhone || '').replace(/\D/g,'').slice(0,9);
-      if(_cardPhone.length===9){
-        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
-      } else if(_cardPhone.length>0){
-        arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
-      }
-
+      if(_cardPhone.length) arrivalBadge = `<span class="arrival-badge with-order">📞 ${escapeHtml(_cardPhone)}</span>`;
       extra = `<span class="total mono">${fmtMoney(order.total)}</span>`;
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
-      const elapsedLabel = mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ';
-      extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${elapsedLabel}</span>`;
-      if(order.createdBy){
-        extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
-      }
-      // Phone is already shown in arrivalBadge — don't duplicate it in extra
-      if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen){
-        extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
-      }
+      extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ'}</span>`;
+      if(order.createdBy) extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
+      if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen) extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
     }
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
-    cards += `
-    <button class="table-card ${lockedForMe?'locked-table':''}" data-table="${t}">
-      ${arrivalBadge}
-      <div class="row1">
-        <span class="tnum">${escapeHtml(tbl.name)}</span>
-        <span class="dot ${dotClass}"></span>
-      </div>
-      <span class="status">${statusText} · ${tbl.seats} ҷой</span>
-      ${extra}
-      ${assignBadge}
+    const px = Number.isFinite(Number(tbl.x)) ? Number(tbl.x) : ((i%5)*19)+2;
+    const py = Number.isFinite(Number(tbl.y)) ? Number(tbl.y) : (Math.floor(i/5)*25)+3;
+    const pos = `style="left:${Math.max(0,Math.min(90,px))}%;top:${Math.max(0,Math.min(85,py))}%;"`;
+    cards += `<button class="table-card ${lockedForMe?'locked-table':''}" data-table="${t}" ${pos}>
+      ${arrivalBadge}<div class="row1"><span class="tnum">${escapeHtml(tbl.name)}</span><span class="dot ${dotClass}"></span></div>
+      <span class="status">${statusText} · ${tbl.seats} ҷой</span>${extra}${assignBadge}
       ${lockedForMe ? `<span class="reserve-detail" style="color:var(--brick);">🔒 танҳо ${escapeHtml(tbl.assignedTo)}</span>` : ''}
     </button>`;
   });
   return cards;
 }
 function attachTableGridEvents(){
+  const grid=document.getElementById('tableLayoutGrid');
   document.querySelectorAll('.table-card').forEach(el=>{
-    el.addEventListener('click', ()=>{
-      openTable(Number(el.dataset.table));
-    });
+    let dragging=false,startX=0,startY=0,origX=0,origY=0;
+    const id=Number(el.dataset.table);
+    const begin=(ev)=>{
+      if(!state.tableLayoutEditMode) return;
+      dragging=true; ev.preventDefault();
+      const pt=ev.touches?ev.touches[0]:ev;
+      startX=pt.clientX; startY=pt.clientY;
+      origX=parseFloat(el.style.left)||0; origY=parseFloat(el.style.top)||0;
+      el.style.zIndex='20';
+    };
+    const move=(ev)=>{
+      if(!dragging||!grid) return;
+      const pt=ev.touches?ev.touches[0]:ev;
+      const r=grid.getBoundingClientRect();
+      const nx=Math.max(0,Math.min(90,origX+((pt.clientX-startX)/r.width)*100));
+      const ny=Math.max(0,Math.min(85,origY+((pt.clientY-startY)/r.height)*100));
+      el.style.left=nx+'%'; el.style.top=ny+'%';
+      const t=state.tables.find(x=>x.id===id); if(t){t.x=nx;t.y=ny;}
+    };
+    const end=async()=>{if(!dragging)return;dragging=false;el.style.zIndex='';const t=state.tables.find(x=>x.id===id);if(t) await saveTables(state.tables);};
+    el.addEventListener('pointerdown',begin); el.addEventListener('pointermove',move); el.addEventListener('pointerup',end); el.addEventListener('pointercancel',end);
+    el.addEventListener('click',()=>{if(!state.tableLayoutEditMode) openTable(id);});
   });
+  const btn=document.getElementById('toggleTableLayoutBtn');
+  if(btn) btn.addEventListener('click',()=>{state.tableLayoutEditMode=!state.tableLayoutEditMode;render();});
 }
 
 /* ---------- Waiter view ---------- */
@@ -2445,7 +2469,7 @@ function renderWaiter(){
   return `
   <div class="container">
     <div class="section-title">Мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
-    <div class="table-grid">${buildTableCards()}</div>
+    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
     ${pendingScheduledAll.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор</div><p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:12px;">Ҳангоми омадани мизожон, мизи озодро интихоб карда «Ба миз гузоштан»-ро занед</p>
     <input type="tel" id="waiterSchedPhoneInput" value="${escapeHtml(state.waiterSchedPhoneQuery||'')}" placeholder="Ҷустуҷӯ бо рақами телефон..." style="width:100%;max-width:320px;padding:10px 14px;border:1.5px solid var(--ink);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:12px;">
     ${scheduledHtml}` : ''}
@@ -2568,7 +2592,7 @@ function renderCashier(){
     ${oshRemainingBadge()}
     <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
-    <div class="table-grid">${buildTableCards()}</div>
+    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
     ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои вақтдор — бо худ бурдан (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
     ${pendingScheduledDinein.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledDineinHtml}` : ''}
     ${myTakeaway.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои бо худ бурдани имрӯза</div>${takeawayHtml}` : ''}
@@ -3864,9 +3888,11 @@ function renderAdminTables(){
       </div>
     </div>
     <div class="section-title">Ҳолати мизҳо <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;"><button class="btn-ghost" id="toggleTableLayoutBtn">${state.tableLayoutEditMode?'✅ Анҷоми ҷойгиркунӣ':'↔️ Танзими ҷойгиршавии мизҳо'}</button></div>
+    ${state.tableLayoutEditMode?'<div class="layout-help">Мизро бо муш ё ангушт гирифта ба ҳар ҷой кашед. Рақами/номи миз тағйир намеёбад — танҳо ҷойи он дар экран иваз мешавад. Пас аз ҷойгиркунӣ «Анҷоми ҷойгиркунӣ»-ро пахш кунед.</div>':''}
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед (пардохт танҳо аз ҷониби кассир)</p>
     ${orphanHtml}
-    <div class="table-grid">${buildTableCards()}</div>
+    <div class="table-grid manual-layout ${state.tableLayoutEditMode?'editing':''}" id="tableLayoutGrid">${buildTableCards()}</div>
 
     <div class="section-title" style="margin-top:28px;">Номгузорӣ ва ҷои нишасти мизҳо</div>
     ${addTableFormHtml}
@@ -3896,103 +3922,31 @@ function renderCashierSalary(){
     <div class="stat-row"><div class="stat-card"><div class="label">Имрӯз</div><div class="value">${my.daily.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Ин моҳ</div><div class="value">${my.monthly.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Комиссияи имрӯз</div><div class="value">${myB.total.toFixed(1)} смн</div></div><div class="stat-card"><div class="label">Комиссияи моҳ</div><div class="value">${myM.total.toFixed(1)} смн</div></div></div>`;
 }
 function renderAdminSalary(){
-  const roleLabel = {admin:'Админ', waiter:'Официант', cashier:'Кассир', chef:'Ошпаз'};
-  const days = Math.max(1, Number(state.settings.workDaysPerMonth) || 30);
-  let totalMonthly = 0;
-  let totalBonusToday = 0;
-  const rows = state.accounts.map(acc=>{
-    const w = computeWages(acc);
-    totalMonthly += w.monthly;
-    totalBonusToday += w.bonusToday;
-    const isCommission = acc.wageType==='commission';
-    const canCommission = acc.role==='waiter' || acc.role==='cashier';
-    const bonusNote = w.bonusToday>0 ? `<span style="color:var(--olive);font-weight:700;">+${w.bonusToday.toFixed(1)} смн бонуси имрӯза</span>` : '';
-    return `
-    <div class="salary-row">
-      <div class="salary-name">
-        <div class="nm">${escapeHtml(acc.username)}</div>
-        <div class="cat">${roleLabel[acc.role]||acc.role} · 🔑 ${escapeHtml(acc.password||'')}</div>
-      </div>
-      <select class="salary-select" id="wtype-${acc.id}">
-        <option value="daily" ${acc.wageType!=='monthly'&&acc.wageType!=='commission'?'selected':''}>Рӯзона (собит)</option>
-        <option value="monthly" ${acc.wageType==='monthly'?'selected':''}>Моҳона (собит)</option>
-        ${canCommission ? `<option value="commission" ${isCommission?'selected':''}>Комиссия аз чек</option>` : ''}
-      </select>
-      <input type="number" class="salary-input" id="wamt-${acc.id}" value="${acc.wageAmount||0}" min="0" step="1" placeholder="маблағ (смн)" style="${isCommission?'display:none;':''}">
+  const roleLabel={waiter:'Официант',cashier:'Кассир',chef:'Ошпаз'};
+  const totalToday=dailySalaryTotalFromAllPaid();
+  const monthKey=todayKey().slice(0,7), monthTotal=monthlySalaryTotal(monthKey);
+  const rows=(state.accounts||[]).filter(a=>a.role==='waiter'||a.role==='cashier').map(acc=>{
+    const w=computeWages(acc);
+    const isCommission=acc.wageType==='commission';
+    return `<div class="salary-row"><div class="salary-name"><div class="nm">${escapeHtml(acc.username)}</div><div class="cat">${roleLabel[acc.role]||acc.role}</div></div>
+      <select class="salary-select" id="wtype-${acc.id}"><option value="daily" ${acc.wageType!=='monthly'&&acc.wageType!=='commission'?'selected':''}>Рӯзона (собит)</option><option value="monthly" ${acc.wageType==='monthly'?'selected':''}>Моҳона (собит)</option><option value="commission" ${isCommission?'selected':''}>Комиссия аз чек</option></select>
+      <input type="number" class="salary-input" id="wamt-${acc.id}" value="${acc.wageAmount||0}" min="0" step="1" placeholder="смн" style="${isCommission?'display:none;':''}">
       <span id="wnote-${acc.id}" style="font-size:11px;color:#9c8f78;width:100px;${isCommission?'':'display:none;'}">аз чекҳо ҳисоб мешавад</span>
-      <div class="salary-computed">
-        <span>Имрӯз: <b class="mono">${w.daily.toFixed(1)} смн</b></span>
-        <span>${isCommission?'Ин моҳ':'Моҳона'}: <b class="mono">${w.monthly.toFixed(1)} смн</b></span>
-        ${bonusNote}
-      </div>
-      <button class="btn-primary" data-savewage="${acc.id}" style="padding:7px 14px;font-size:12px;flex:none;">Сабт</button>
-    </div>`;
+      <div class="salary-computed"><span>Имрӯз: <b class="mono">${fmtMoney(w.daily)}</b></span><span>Ин моҳ: <b class="mono">${fmtMoney(w.monthly)}</b></span></div>
+      <button class="btn-primary" data-savewage="${acc.id}" style="padding:7px 14px;font-size:12px;flex:none;">Сабт</button></div>`;
   }).join('');
-
-  const staffOptions = state.accounts.map(a=>`<option value="${escapeHtml(a.username)}">${escapeHtml(a.username)} (${roleLabel[a.role]||a.role})</option>`).join('');
-  const bonusHistory = (state.bonuses||[]).slice(0,20);
-  const bonusHistoryHtml = bonusHistory.length ? bonusHistory.map(b=>{
-    const confirming = state.confirmDeleteBonusId===b.id;
-    return `
-    <div class="item-row">
-      <div class="info">
-        <div class="nm">${escapeHtml(b.username)} — ${fmtMoney(b.amount)}</div>
-        <div class="cat">${b.reason?escapeHtml(b.reason)+' · ':''}${new Date(b.ts).toLocaleString('tg-TJ',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})} · аз ${escapeHtml(b.awardedBy||'?')}</div>
-      </div>
-      ${confirming ? `
-        <span style="font-size:12px;color:var(--brick);font-weight:600;">Нест кунам?</span>
-        <button class="icon-btn danger" data-confirmdelbonus="${b.id}">Ҳа</button>
-        <button class="icon-btn" data-canceldelbonus="${b.id}">Не</button>
-      ` : `<button class="icon-btn danger" data-delbonus="${b.id}">🗑</button>`}
-    </div>`;
-  }).join('') : `<p style="font-size:13px;color:#9c8f78;">Ҳанӯз бонус дода нашудааст</p>`;
-
-  return `
-    <div class="section-title">Ҳисоби маоши кормандон</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:4px;">Барои ҳар корманд навъи маошро таъин кунед: маблағи собити рӯзона/моҳона, ё «Комиссия аз чек» (танҳо официант/кассир) — ин худкор аз чекҳои воқеӣ ҳисоб мешавад.</p>
-    <p style="color:#9c8f78;font-size:12px;margin-top:0;margin-bottom:8px;">Қоидаи комиссия: агар ҳар гуна ош дар чек ≥500г бошад — 12 смн; агар ош <500г бошад — 5% аз арзиши ош; ҳар маҳсулоти дигари чек — 5%. Ба официант аз чекҳое, ки ГИРИФТААСТ; ба кассир аз чекҳое, ки ПАРДОХТАСТ.</p>
-    <div class="stat-row" style="margin-bottom:14px;">
-      <div class="stat-card"><div class="label">Ҳамагӣ (моҳона/ин моҳ, ҳамаи кормандон)</div><div class="value">${totalMonthly.toFixed(0)} смн</div></div>
-      <div class="stat-card"><div class="label">Ҷамъи бонуси имрӯза (ҳама)</div><div class="value" style="color:${totalBonusToday>0?'var(--olive)':'inherit'};">${totalBonusToday.toFixed(1)} смн</div></div>
-    </div>
-    <div class="field small" style="margin-bottom:18px;">
-      <label>Рӯзҳои корӣ дар як моҳ (барои маоши собит)</label>
-      <input type="number" id="workDaysInput" value="${days}" min="1" max="31" style="width:90px;">
-      <button class="btn-ghost" id="saveWorkDaysBtn" style="margin-left:8px;padding:8px 14px;">Сабт</button>
-    </div>
-    ${rows || '<div class="empty-state">Ҳанӯз кормандон нест</div>'}
-
-    <div class="section-title" style="margin-top:32px;">🎁 Бонуси дастӣ</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Ба ҳар корманд, дар вақти дилхоҳ, маблағи иловагӣ (бонус) диҳед — масалан «беҳтарини ҳафта».</p>
-    <div class="form-box">
-      <div class="field"><label>Корманд</label><select id="bonusUserSelect">${staffOptions}</select></div>
-      <div class="field small"><label>Маблағ (смн)</label><input type="number" id="bonusAmountInput" min="1" step="1" placeholder="масалан 50"></div>
-      <div class="field"><label>Сабаб (ихтиёрӣ)</label><input type="text" id="bonusReasonInput" placeholder="масалан: беҳтарини ҳафта"></div>
-      <button class="btn-primary" style="flex:none;padding:9px 18px;" id="giveBonusBtn">Додани бонус</button>
-    </div>
-    ${bonusHistoryHtml}
-
-    <div class="section-title" style="margin-top:32px;">⚡ Бонуси худкор — танзимот</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Барои официант/кассир, агар шарт имрӯз иҷро шавад, бонус худкор ба маоши имрӯза илова мешавад. Ҳадди 0 — хомӯш.</p>
-    <div class="form-box">
-      <div class="field small"><label>Ҳадди шумораи чек (дар рӯз)</label><input type="number" id="checkCountThreshInput" value="${state.settings.checkCountBonusThreshold||0}" min="0" step="1"></div>
-      <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="checkCountAmountInput" value="${state.settings.checkCountBonusAmount||0}" min="0" step="1"></div>
-      <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveCheckCountBonusBtn">Сабт</button>
-    </div>
-    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 12px;">Мисол: агар ҳадд 15 бошад — официант/кассире, ки имрӯз >15 чек хизмат кунад, бонусро мегирад.</p>
-    <div class="form-box">
-      <div class="field small"><label>Ҳадди даромад/комиссия (смн, дар рӯз)</label><input type="number" id="revenueThreshInput" value="${state.settings.revenueBonusThreshold||0}" min="0" step="1"></div>
-      <div class="field small"><label>Маблағи бонус (смн)</label><input type="number" id="revenueAmountInput" value="${state.settings.revenueBonusAmount||0}" min="0" step="1"></div>
-      <button class="btn-ghost" style="flex:none;padding:9px 16px;" id="saveRevenueBonusBtn">Сабт</button>
-    </div>
-    <p style="color:#9c8f78;font-size:12px;margin:-4px 0 0;">Мисол: агар ҳадд 100 бошад — официант/кассире, ки комиссияи имрӯзааш аз 100 смн зиёд шавад, бонусро мегирад.</p>
-
-    <div class="section-title" style="margin-top:32px;">Ҷадвали тафсилоти имрӯза (комиссионӣ)</div>
-    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:10px;">Мисли Умед: чанд чек имрӯз гирифт/пардохт, аз онҳо чанд то ≥500г буд, чанд то камтар — ва маоши имрӯза.</p>
-    ${renderSalaryXlsTable()}
-  `;
+  const techRows=(state.technicalStaff||[]).map(x=>`<div class="salary-row"><div class="salary-name"><div class="nm">${escapeHtml(x.name)}</div><div class="cat">${escapeHtml(x.role||'Корманди техникӣ')}</div></div><input type="number" class="salary-input" id="tech-wage-${x.id}" value="${Number(x.dailyWage)||0}" min="0" step="1"><span class="salary-computed"><span>Маоши рӯзона: <b>${fmtMoney(x.dailyWage)}</b></span></span><button class="icon-btn danger" data-deltech="${x.id}">🗑</button></div>`).join('');
+  return `<div class="section-title">💰 Маош</div>
+    <p style="font-size:13px;color:#6b5f4d;margin-top:-8px;">Дар Ҳисобот номи кормандон нишон дода намешавад. Танҳо маоши умумии имрӯз нишон дода мешавад ва ҳар рӯзи маош дар архиви моҳона ҷамъ мешавад.</p>
+    <div class="stat-row"><div class="stat-card"><div class="label">Маоши имрӯз — ҳамаи кормандон</div><div class="value">${fmtMoney(totalToday)}</div></div><div class="stat-card"><div class="label">Маоши ҷамъшудаи ${monthKey}</div><div class="value">${fmtMoney(monthTotal)}</div></div></div>
+    <div class="section-title" style="margin-top:26px;">👤 Официантҳо ва кассирҳо</div>${rows||'<div class="empty-state">Официант ё кассир нест.</div>'}
+    <div class="section-title" style="margin-top:30px;">🧹 Кормандони техникӣ</div>
+    <p style="font-size:12px;color:#6b5f4d;margin-top:-8px;">Админ маоши рӯзонаи ин кормандонро худаш таъин мекунад. Ин маблағ ҳар рӯз ба маоши умумӣ ва ҳисоботи моҳона дохил мешавад.</p>
+    ${techRows||'<div class="empty-state">Ҳоло корманди техникӣ илова нашудааст.</div>'}
+    <div class="form-box" style="margin-top:10px;"><div class="field"><label>Ном</label><input id="newTechName" placeholder="масалан: Саид"></div><div class="field"><label>Вазифа</label><input id="newTechRole" placeholder="масалан: Ошпаз"></div><div class="field small"><label>Маоши рӯзона</label><input id="newTechWage" type="number" min="0" step="1" placeholder="300"></div><button class="btn-primary" id="addTechBtn">+ Илова кардан</button></div>
+    <div class="section-title" style="margin-top:30px;">📅 Маошҳои рӯзона ва моҳона</div>
+    ${renderMonthlySalaryLedger()}`;
 }
-
 function renderSalaryXlsTable(){
   const roleLabel = {waiter:'Официант', cashier:'Кассир'};
   const commissionAccounts = state.accounts.filter(a=>a.wageType==='commission' && (a.role==='waiter'||a.role==='cashier'));
@@ -4365,43 +4319,48 @@ async function deleteDailyClosure(id){
   await logActivity('Сабти пӯшидани рӯзро нест кард'+(c?' ('+new Date(c.closedAt).toLocaleDateString('tg-TJ')+')':''));
   showToast('Сабт нест карда шуд');
 }
+function technicalDailyWageTotal(){
+  return (state.technicalStaff||[]).filter(x=>x.active!==false).reduce((s,x)=>s+(Number(x.dailyWage)||0),0);
+}
 function wageReportForOrders(orders, shift){
   const list=orders||[];
-  const entries=(state.accounts||[]).map(acc=>{
-    const mine=list.filter(o=>o.status==='paid' && (acc.role==='waiter'?o.createdBy===acc.username:acc.role==='cashier'?o.paidBy===acc.username:false));
+  const entries=(state.accounts||[]).filter(acc=>acc.role==='waiter'||acc.role==='cashier').map(acc=>{
+    const mine=list.filter(o=>o.status==='paid' && (acc.role==='waiter'?o.createdBy===acc.username:o.paidBy===acc.username));
     const commission=acc.wageType==='commission'?mine.reduce((v,o)=>v+orderCommission(o),0):0;
     const days=Math.max(1,Number(state.settings.workDaysPerMonth)||30);
     const fixed=acc.wageType==='commission'?0:acc.wageType==='monthly'?(Number(acc.wageAmount)||0)/days:(Number(acc.wageAmount)||0);
-    // Fixed daily wages are split equally between shifts when shown per shift;
-    // the daily report counts each fixed wage once.
     const amount=commission+(shift?fixed/2:fixed);
     return {username:acc.username,role:acc.role,amount};
   });
-  return {entries,total:entries.reduce((n,x)=>n+x.amount,0)};
+  const tech=technicalDailyWageTotal()/(shift?2:1);
+  return {entries,total:entries.reduce((n,x)=>n+x.amount,0)+tech, technical:shift?tech:technicalDailyWageTotal()};
 }
-function wagePaymentsForDate(date){
-  return (state.dailyClosures||[]).filter(x=>x.kind==='wagePayment'&&x.date===date);
+function dailySalaryTotalFromAllPaid(){
+  const paidToday=(state.orders||[]).filter(o=>o.status==='paid'&&o.paidAt&&isToday(o.paidAt));
+  return wageReportForOrders(paidToday).total;
 }
-async function recordWagePayment(){
-  if(state.role!=='admin')return;
-  const username=document.getElementById('wagePaymentStaff')?.value;
-  const amount=Number(document.getElementById('wagePaymentAmount')?.value);
-  if(!username||!Number.isFinite(amount)||amount<=0){showToast('Корманд ва маблағи дурустро интихоб кунед');return;}
-  if(!confirm('Пардохти '+fmtMoney(amount)+' ба '+username+'-ро тасдиқ мекунед?'))return;
-  const entry={id:uid('wagepay'),kind:'wagePayment',date:todayKey(),ts:Date.now(),username,amount,by:actingUsername(),shift:currentShift()};
-  const next=[entry,...(state.dailyClosures||[])];
-  if(!await saveDailyClosures(next))return;
-  state.dailyClosures=next;
-  await logActivity('Пардохти маош: '+username+' — '+fmtMoney(amount));
-  showToast('Пардохти маош сабт шуд');render();
+async function ensureDailySalarySnapshot(){
+  const date=todayKey();
+  const total=dailySalaryTotalFromAllPaid();
+  const waiterCashier=wageReportForOrders((state.orders||[]).filter(o=>o.status==='paid'&&o.paidAt&&isToday(o.paidAt))).total-technicalDailyWageTotal();
+  const technical=technicalDailyWageTotal();
+  const old=(state.dailySalaryLedger||[]).find(x=>x.date===date);
+  if(old && Number(old.total)===Number(total) && Number(old.waiterCashier)===Number(waiterCashier) && Number(old.technical)===Number(technical)) return total;
+  const next=[...(state.dailySalaryLedger||[])].filter(x=>x.date!==date);
+  next.unshift({date,total,waiterCashier,technical,updatedAt:Date.now()});
+  next.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  if(next.length>366) next.length=366;
+  state.dailySalaryLedger=next;
+  await saveDailySalaryLedger(next);
+  return total;
+}
+function monthlySalaryTotal(monthKey){
+  return (state.dailySalaryLedger||[]).filter(x=>String(x.date).slice(0,7)===monthKey).reduce((s,x)=>s+(Number(x.total)||0),0);
 }
 function renderDailyWageReport(orders){
-  const w=wageReportForOrders(orders);
-  return `<div class="section-title" style="margin-top:24px;">💰 Маоши умумии рӯз</div>
-    <p style="font-size:12px;color:#6b5f4d;">Маош аз рӯи кори кормандон автоматӣ ҳисоб мешавад. Ин маблағ ҳамчун қисми ҳисоботи ҳаррӯзаи ошхона ба ҳисоб гирифта мешавад.</p>
-    <table class="xls-table"><thead><tr><th>Корманд</th><th>Вазифа</th><th>Маоши рӯз</th></tr></thead><tbody>
-    ${w.entries.map(x=>`<tr><td>${escapeHtml(x.username)}</td><td>${escapeHtml(x.role)}</td><td>${fmtMoney(x.amount)}</td></tr>`).join('')}
-    <tr><td colspan="2"><b>ҲАМАГӢ МАОШИ РӮЗ</b></td><td><b>${fmtMoney(w.total)}</b></td></tr></tbody></table>`;
+  const total=dailySalaryTotalFromAllPaid();
+  return `<div class="section-title" style="margin-top:24px;">💰 Маоши имрӯз</div>
+    <div class="stat-row"><div class="stat-card"><div class="label">Маоши умумии ҳамаи кормандон</div><div class="value">${fmtMoney(total)}</div></div></div>`;
 }
 function shiftProductSummary(orders){
   const rows={};
@@ -4418,12 +4377,12 @@ function renderClosedShiftReports(){
   if(!today.length)return '<p style="font-size:12px;color:#6b5f4d;">Ҳоло сменаи басташуда нест.</p>';
   return today.map(c=>`<div class="form-box" style="display:block;margin:12px 0;">
     <b>${c.shift===1?'☀️':'🌙'} Смена ${c.shift}: ${escapeHtml(c.shiftLabel||'')} · ${escapeHtml(c.date||'')}</b>
-    <p>Фурӯш: <b>${fmtMoney(c.revenue)}</b> · ${c.checks} чек · Хароҷот: ${fmtMoney(c.expenses)} · Маоши ҳисобшуда: ${fmtMoney(c.wageTotal)}</p>
+    <p>Фурӯш: <b>${fmtMoney(c.revenue)}</b> · ${c.checks} чек · Хароҷот: ${fmtMoney(c.expenses)} · Маоши ҳисобшуда: ${fmtMoney(c.wageTotal)} · Маоши пардохтшуда ҳангоми бастан: ${fmtMoney(c.paidWageTotal||0)}</p>
     <p>Ош фурӯхта шуд: <b>${Number(c.oshKg||0).toFixed(2)} кг</b></p>
     <table class="xls-table"><thead><tr><th>Маҳсулот</th><th>Миқдор</th><th>Маблағ</th></tr></thead><tbody>
     ${(c.products||[]).map(p=>`<tr><td>${escapeHtml(p.name)}</td><td>${p.unit==='kg'?(Number(p.qty)/1000).toFixed(2)+' кг':p.qty+' дона'}</td><td>${fmtMoney(p.revenue)}</td></tr>`).join('')}
     </tbody></table>
-    <p style="font-size:12px;color:#6b5f4d;">Маош: ${(c.wages||[]).map(w=>escapeHtml(w.username)+' — '+fmtMoney(w.amount)).join(' · ')}</p>
+    
     </div>`).join('');
 }
 async function closeWorkShift(shift){
@@ -4441,7 +4400,7 @@ async function closeWorkShift(shift){
   if(!confirm('Ҳисоботи сменаи '+shift+'-ро маҳкам мекунед? Пас аз ин ҳисобот тағйир намеёбад.'))return;
   const expenses=(state.expenses||[]).filter(e=>isToday(e.ts||e.createdAt)&&shiftForTimestamp(e.ts||e.createdAt)===shift);
   const wages=wageReportForOrders(orders,shift),products=shiftProductSummary(orders);
-  const closure={id:uid('shift'),kind:'shift',date,shift,shiftLabel:shiftLabel(shift),closedAt:now,closedBy:actingUsername(),
+    const closure={id:uid('shift'),kind:'shift',date,shift,shiftLabel:shiftLabel(shift),closedAt:now,closedBy:actingUsername(),
     revenue:orders.reduce((n,o)=>n+(Number(o.total)||0),0),cash:orders.reduce((n,o)=>n+paymentSplit(o).cash,0),
     noncash:orders.reduce((n,o)=>n+paymentSplit(o).noncash,0),checks:orders.length,orderIds:orders.map(o=>o.id),
     expenses:sumExpenses(expenses),products,oshKg:orders.reduce((n,o)=>n+oshWeightFromItems(o.items),0),wages:wages.entries,wageTotal:wages.total};
@@ -4559,7 +4518,7 @@ function renderAdminReport(){
     <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
     ${receiptsHtml}
 
-    ${(state.reportArchive&&state.reportArchive.days&&state.reportArchive.days.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}<div class="section-title" style="margin-top:24px;">📊 Ҷамъбасти моҳона</div>${renderMonthlyArchive()}
+    ${(state.reportArchive&&state.reportArchive.days&&state.reportArchive.days.length) ? `<div class="section-title" style="margin-top:24px;">Таърихи пӯшидани рӯзҳо</div>${closuresHtml}` : ''}<div class="section-title" style="margin-top:24px;">📊 Ҷамъбасти моҳона</div>${renderMonthlyArchive()}${renderMonthlySalaryLedger()}
   `;
 }
 function renderDailyShiftReportTable(paidOrders){
@@ -4575,11 +4534,18 @@ function renderDailyShiftReportTable(paidOrders){
   const row=(name,x)=>`<tr><td>${name}</td><td>${fmtMoney(x.revenue)}</td><td>${fmtMoney(x.expense)}</td><td>${fmtMoney(x.wages)}</td><td>${fmtMoney(x.net)}</td><td>${x.checks}</td><td>${fmtMoney(x.cash)}</td><td>${fmtMoney(x.noncash)}</td></tr>`;
   return `<table class="xls-table"><thead><tr><th>Смена</th><th>Даромад</th><th>Хароҷот</th><th>Маоши ҳисобшуда</th><th>Баъд аз хароҷот ва маош</th><th>Чекҳо</th><th>Нақд</th><th>Ғайринақд</th></tr></thead><tbody>${row('☀️ Смена 1 '+shiftLabel(1),d)}${row('🌙 Смена 2 '+shiftLabel(2),n)}${row('Ҳамагӣ',t)}</tbody></table>`;
 }
+function renderMonthlySalaryLedger(){
+  const months={};
+  (state.dailySalaryLedger||[]).forEach(x=>{const m=String(x.date).slice(0,7);months[m]=(months[m]||0)+(Number(x.total)||0);});
+  const keys=Object.keys(months).sort().reverse();
+  if(!keys.length)return '<div class="empty-state" style="padding:20px;">Ҳоло сабти маош вуҷуд надорад.</div>';
+  return `<div class="section-title" style="margin-top:24px;">💰 Маошҳои ҷамъшуда</div>`+keys.map(m=>`<div class="receipt-item-row"><div><div class="l1">📅 ${m}</div><div class="l2">Ҷамъбасти ҳамаи рӯзҳои моҳ</div></div><b>${fmtMoney(months[m])}</b></div>`).join('');
+}
 function renderMonthlyArchive(){
   const a=state.reportArchive||{days:[],months:{}};
   const months=Object.values(a.months||{}).sort((x,y)=>y.month.localeCompare(x.month));
   if(!months.length) return `<div class="empty-state" style="padding:24px;">Ҳоло архиви моҳона вуҷуд надорад.</div>`;
-  return months.map(m=>`<div class="receipt-item-row"><div><div class="l1">📅 ${m.month}</div><div class="l2">Рӯзона: ${fmtMoney(m.day.revenue)} / хароҷот ${fmtMoney(m.day.expenses)} / маош ${fmtMoney(m.day.wages||0)} · Шабона: ${fmtMoney(m.night.revenue)} / хароҷот ${fmtMoney(m.night.expenses)} / маош ${fmtMoney(m.night.wages||0)}</div></div><div style="text-align:right"><div>${fmtMoney(m.revenue)}</div><div class="l2">Хароҷот: ${fmtMoney(m.expenses)} · Маош: ${fmtMoney(m.wages||0)} · Холис: ${fmtMoney(m.net)} · ${m.checks} чек</div></div></div>`).join('');
+  return months.map(m=>`<div class="receipt-item-row"><div><div class="l1">📅 ${m.month}</div><div class="l2">Рӯзона: ${fmtMoney(m.day.revenue)} / ${fmtMoney(m.day.expenses)} · Шабона: ${fmtMoney(m.night.revenue)} / ${fmtMoney(m.night.expenses)}</div></div><div style="text-align:right"><div>${fmtMoney(m.revenue)}</div><div class="l2">Хароҷот: ${fmtMoney(m.expenses)} · Холис: ${fmtMoney(m.net)} · ${m.checks} чек</div></div></div>`).join('');
 }
 function renderDailyPaymentTable(){
   // The daily payment history is a report view. Archived orders belong to the
@@ -4911,7 +4877,7 @@ function attachAdminEvents(){
     el.addEventListener('click', ()=>{
       const nextTab=el.dataset.atab;
       // Switch immediately, load data in background
-      if(nextTab==='report'){ ensurePaidOrdersLoaded('report').catch(console.error); ensureReportArchiveLoaded().catch(console.error); }
+      if(nextTab==='report'){ ensurePaidOrdersLoaded('report').then(()=>ensureDailySalarySnapshot()).catch(console.error); ensureReportArchiveLoaded().catch(console.error); }
       else if(nextTab==='salary'){ ensurePaidOrdersLoaded('month').catch(console.error); }
       else if(nextTab==='settings'){ /* archive remains lazy; it is loaded only by the Admin button */ }
       else if(nextTab==='orders'){ ensureScheduledOrdersLoaded().catch(console.error); }
@@ -5180,6 +5146,23 @@ function attachAdminEvents(){
         render();
       });
     });
+    const addTechBtn=document.getElementById('addTechBtn');
+    if(addTechBtn) addTechBtn.addEventListener('click', async()=>{
+      const name=(document.getElementById('newTechName')?.value||'').trim();
+      const role=(document.getElementById('newTechRole')?.value||'').trim();
+      const dailyWage=Number(document.getElementById('newTechWage')?.value)||0;
+      if(!name||dailyWage<0){showToast('Ном ва маоши рӯзонаро ворид кунед');return;}
+      state.technicalStaff=[{id:uid('tech'),name,role:role||'Корманди техникӣ',dailyWage,active:true},...(state.technicalStaff||[])];
+      await saveTechnicalStaff(state.technicalStaff); render();
+    });
+    document.querySelectorAll('[data-deltech]').forEach(el=>el.addEventListener('click',async()=>{
+      state.technicalStaff=(state.technicalStaff||[]).filter(x=>x.id!==el.dataset.deltech);
+      await saveTechnicalStaff(state.technicalStaff); render();
+    }));
+    document.querySelectorAll('[id^="tech-wage-"]').forEach(input=>input.addEventListener('change',async()=>{
+      const id=input.id.replace('tech-wage-',''); const x=(state.technicalStaff||[]).find(t=>t.id===id); if(!x)return;
+      x.dailyWage=Math.max(0,Number(input.value)||0); await saveTechnicalStaff(state.technicalStaff); await ensureDailySalarySnapshot(); render();
+    }));
     const saveWorkDaysBtn = document.getElementById('saveWorkDaysBtn');
     if(saveWorkDaysBtn) saveWorkDaysBtn.addEventListener('click', async ()=>{
       const days = Math.max(1, Math.min(31, Number(document.getElementById('workDaysInput').value) || 30));
