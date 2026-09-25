@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-23-V72-ORDERS-OSH-SHIFTS';
+const APP_VERSION = '2026-09-25-V74-NO-HISTORY-STARTUP';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -771,6 +771,7 @@ async function saveBonuses(bonuses){
 async function saveDailyClosures(closures){
   const ok = await fsSet('dailyClosures', JSON.stringify(closures));
   if(!ok) showToast('Хатогӣ: ҳисоботи рӯзона сабт нашуд');
+  return !!ok;
 }
 async function saveExpenses(expenses){
   const ok = await fsSet('expenses', JSON.stringify(expenses||[]));
@@ -857,7 +858,7 @@ const DEFAULT_MENU = [
 ];
 const DEFAULT_SETTINGS = {cafeName:'Кафеи ман', workDaysPerMonth:30, porsiyaGrams:120, delayWarnMinutes:15,
   checkCountBonusThreshold:0, checkCountBonusAmount:0, revenueBonusThreshold:0, revenueBonusAmount:0,
-  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}', oshTotalResetAt:0};
+  takeawayDiscountPct:0, cashierAlertText:'Фармоиши нав', chefAlertText:'Фармоиши нав', serviceChargePct:0, paymentVoiceEnabled:true, paymentVoiceText:'Пардохти мизи рақами {TABLE} иҷро шуд.{NAME}', oshTotalResetAt:0, shift1Start:'09:00', shift1End:'17:30', shift2Start:'17:30', shift2End:'00:00', tableSort:'name'};
 
 /* ============ STATE ============ */
 let state = {
@@ -1000,14 +1001,29 @@ function oshOrderedKgToday(){
 // at that point it's ordinary table demand, tracked by oshOrderedKgToday() instead.
 
 
-function currentShift(){
-  const h = new Date().getHours(), m = new Date().getMinutes(), mins = h*60+m;
-  if(mins >= 9*60 && mins < 17*60+30) return 1;
-  if(mins >= 18*60) return 2;
+function shiftTimeMinutes(value){
+  const m=/^(\d{2}):(\d{2})$/.exec(String(value||''));
+  return m ? Number(m[1])*60+Number(m[2]) : 0;
+}
+function shiftConfig(shift){
+  const x=state.settings||{};
+  return shift===1
+    ? {start:x.shift1Start||'09:00',end:x.shift1End||'17:30'}
+    : {start:x.shift2Start||'17:30',end:x.shift2End||'00:00'};
+}
+function shiftLabel(shift){const c=shiftConfig(shift);return c.start+'–'+c.end;}
+function shiftForTimestamp(ts){
+  const d=new Date(ts), mins=d.getHours()*60+d.getMinutes();
+  for(let i=1;i<=2;i++){
+    const c=shiftConfig(i),a=shiftTimeMinutes(c.start),b=shiftTimeMinutes(c.end);
+    if(a===b) continue;
+    if((a<b && mins>=a && mins<b) || (a>b && (mins>=a || mins<b))) return i;
+  }
   return 0;
 }
-function isShift1(ts){ const d=new Date(ts),mins=d.getHours()*60+d.getMinutes(); return mins>=9*60&&mins<17*60+30; }
-function isShift2(ts){ const d=new Date(ts),mins=d.getHours()*60+d.getMinutes(); return mins>=17*60+30 && mins<24*60; }
+function currentShift(){return shiftForTimestamp(Date.now());}
+function isShift1(ts){return shiftForTimestamp(ts)===1;}
+function isShift2(ts){return shiftForTimestamp(ts)===2;}
 function oshKgFromOrders(filterFn){
   const porsiyaKg=(Number(state.settings.porsiyaGrams)||120)/1000;
   let kg=0;
@@ -1036,8 +1052,8 @@ function renderOshShiftTable(){
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead><tr style="background:var(--card);">
           <th style="padding:8px 10px;text-align:left;border-bottom:2px solid var(--ink);"></th>
-          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">☀️ Смена 1<br><span style="font-weight:400;color:#9c8f78;">09:00–17:30</span></th>
-          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">🌙 Смена 2<br><span style="font-weight:400;color:#9c8f78;">17:30–00:00</span></th>
+          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">☀️ Смена 1<br><span style="font-weight:400;color:#9c8f78;">${shiftLabel(1)}</span></th>
+          <th style="padding:8px 10px;text-align:center;border-bottom:2px solid var(--ink);">🌙 Смена 2<br><span style="font-weight:400;color:#9c8f78;">${shiftLabel(2)}</span></th>
         </tr></thead>
         <tbody>
           <tr><td style="padding:8px 10px;color:#6b5f4d;">🍳 Пухта</td><td style="padding:8px 10px;text-align:center;font-weight:700;">${fmtKg(s1.cooked)}</td><td style="padding:8px 10px;text-align:center;font-weight:700;">${fmtKg(s2.cooked)}</td></tr>
@@ -1081,10 +1097,7 @@ function normalizeOshStock(stock){
     eveningKg: hasShiftFields ? Math.max(0, Number.isFinite(eveningKg)?eveningKg:0) : 0
   };
 }
-function oshShiftForTimestamp(ts){
-  const d = new Date(ts);
-  return d.getHours() < 17 ? 'lunch' : 'evening';
-}
+function oshShiftForTimestamp(ts){return shiftForTimestamp(ts)===1?'lunch':'evening';}
 function oshWeightFromItems(items){
   const porsiyaKg = (Number(state.settings.porsiyaGrams)||120)/1000;
   return (items||[]).reduce((sum,it)=>{
@@ -1105,11 +1118,8 @@ function oshWeightForDirectOrdersToday(){
     .reduce((sum,o)=>sum+oshWeightFromItems(o.items),0);
 }
 function reportShiftForTimestamp(ts){
-  const d=new Date(Number(ts)||0);
-  const mins=d.getHours()*60+d.getMinutes();
-  if(mins>=9*60 && mins<17*60+30) return 'day';
-  if(mins>=17*60+30 && mins<24*60) return 'night';
-  return null;
+  const sh=shiftForTimestamp(ts);
+  return sh===1?'day':sh===2?'night':null;
 }
 function splitReportOrders(orders){
   const out={day:[],night:[]};
@@ -1202,13 +1212,14 @@ async function init(){
   render(); // loading state
   const all = await loadAll();
   const {menu, settings, reservations, tables, oshStock, accounts, inventory, activityLog, bonuses, expenses, failed} = all;
-  // Complete the one-time, non-destructive migration before the first V2 read.
-  // This prevents a fresh device from briefly/incorrectly starting with an empty order list.
-  try{
-    await migrateOrdersToV2();
-  }catch(e){
-    console.error('Initial orders migration failed',e);
-  }
+  // IMPORTANT: never read legacy/history orders during normal startup.
+  // Migration is intentionally NOT automatic here because fsGet('orders') may read
+  // the old full order archive and create unnecessary Firestore traffic.
+  // The live app starts from the V2 active-orders query only.
+  // Historical paid/archive data is loaded lazily by reports/salary when requested.
+  //
+  // If a one-time legacy migration is ever needed, run it as an explicit maintenance
+  // action on an admin device — never as part of daily startup.
   // Only active orders are needed for the live operational screens at startup.
   // Historical paid orders are loaded lazily by report/salary/client-history screens.
   const ordersResult = await loadActiveOrdersV2();
@@ -2340,10 +2351,17 @@ function attachCommonEvents(){
   if(backBtn) backBtn.addEventListener('click', ()=>{ state.role='admin'; state.activeTable=null; state.previewUsername=null; render(); });
 }
 
+function sortedTables(){
+  const list=[...(state.tables||[])], mode=(state.settings||{}).tableSort||'name';
+  if(mode==='manual') return list;
+  list.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'tg',{numeric:true,sensitivity:'base'}));
+  return mode==='nameDesc'?list.reverse():list;
+}
+
 /* ---------- Shared table grid ---------- */
 function buildTableCards(){
   let cards = '';
-  state.tables.forEach(tbl=>{
+  sortedTables().forEach(tbl=>{
     const t = tbl.id;
     const order = activeOrderForTable(t);
     const occ = !!order;
@@ -3726,8 +3744,8 @@ function renderAdminOrders(){
   return `
     <div class="section-title">📋 Фармоишҳо</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:16px;">
-      <div class="stat-card" style="min-width:0;"><div class="label">☀️ Сменаи рӯзона · 09:00–17:30</div><div class="value">${oshShiftStats(1).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
-      <div class="stat-card" style="min-width:0;"><div class="label">🌙 Сменаи шабона · 17:30–00:00</div><div class="value">${oshShiftStats(2).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
+      <div class="stat-card" style="min-width:0;"><div class="label">☀️ Сменаи 1 · ${shiftLabel(1)}</div><div class="value">${oshShiftStats(1).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
+      <div class="stat-card" style="min-width:0;"><div class="label">🌙 Сменаи 2 · ${shiftLabel(2)}</div><div class="value">${oshShiftStats(2).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
       <div class="stat-card" style="min-width:0;"><div class="label">🍚 Ҳамагӣ имрӯз</div><div class="value">${(oshShiftStats(1).total + oshShiftStats(2).total).toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
     </div>
     ${oshRemainingBadge()}
@@ -3772,7 +3790,7 @@ function renderAdminTables(){
   /* --- table management (name + seats + assignment) --- */
   const waiterAccounts = state.accounts.filter(a=>a.role==='waiter');
   const assignLabel = (uname)=> uname ? (state.accounts.find(a=>a.username===uname)?.username || uname) : 'Ҳама официант';
-  const tableRows = state.tables.map(tbl=>{
+  const tableRows = sortedTables().map(tbl=>{
     const confirming = state.confirmDeleteTableId === tbl.id;
     return `
     <div class="item-row">
@@ -4246,7 +4264,8 @@ async function clearAllReportHistory(){
   state.bonuses = [];
   await saveBonuses([]);
 
-  state.dailyClosures=[];
+  state.dailyClosures=(state.dailyClosures||[]).filter(x=>x.kind==='wagePayment');
+  await saveDailyClosures(state.dailyClosures);
   state.reportArchive={days:[],months:{}};
   await saveReportArchive();
   state.dailyReportRows=[];
@@ -4302,6 +4321,12 @@ async function closeDailyReport(){
   await ensureReportArchiveLoaded();
   state.reportArchive=state.reportArchive||{days:[],months:{}};
   const summary=makeDailySummary(todayKey(),paidToday,state.expenses||[],closedAt,actingUsername());
+  const dayWages=wageReportForOrders(paidToday);
+  summary.wages=dayWages.entries;
+  summary.wageTotal=dayWages.total;
+  summary.paidWages=wagePaymentsForDate(todayKey()).map(p=>({username:p.username,amount:p.amount,ts:p.ts}));
+  summary.paidWageTotal=summary.paidWages.reduce((n,p)=>n+(Number(p.amount)||0),0);
+  summary.products=shiftProductSummary(paidToday);
   state.reportArchive.days=(state.reportArchive.days||[]).filter(x=>x.date!==summary.date);
   state.reportArchive.days.unshift(summary);
   upsertMonthlySummary(state.reportArchive,summary);
@@ -4338,6 +4363,102 @@ async function deleteDailyClosure(id){
   await saveDailyClosures(state.dailyClosures);
   await logActivity('Сабти пӯшидани рӯзро нест кард'+(c?' ('+new Date(c.closedAt).toLocaleDateString('tg-TJ')+')':''));
   showToast('Сабт нест карда шуд');
+}
+function wageReportForOrders(orders, shift){
+  const list=orders||[];
+  const entries=(state.accounts||[]).map(acc=>{
+    const mine=list.filter(o=>o.status==='paid' && (acc.role==='waiter'?o.createdBy===acc.username:acc.role==='cashier'?o.paidBy===acc.username:false));
+    const commission=acc.wageType==='commission'?mine.reduce((v,o)=>v+orderCommission(o),0):0;
+    const days=Math.max(1,Number(state.settings.workDaysPerMonth)||30);
+    const fixed=acc.wageType==='commission'?0:acc.wageType==='monthly'?(Number(acc.wageAmount)||0)/days:(Number(acc.wageAmount)||0);
+    // Fixed daily wages are split equally between shifts when shown per shift;
+    // the daily report counts each fixed wage once.
+    const amount=commission+(shift?fixed/2:fixed);
+    return {username:acc.username,role:acc.role,amount};
+  });
+  return {entries,total:entries.reduce((n,x)=>n+x.amount,0)};
+}
+function wagePaymentsForDate(date){
+  return (state.dailyClosures||[]).filter(x=>x.kind==='wagePayment'&&x.date===date);
+}
+async function recordWagePayment(){
+  if(state.role!=='admin')return;
+  const username=document.getElementById('wagePaymentStaff')?.value;
+  const amount=Number(document.getElementById('wagePaymentAmount')?.value);
+  if(!username||!Number.isFinite(amount)||amount<=0){showToast('Корманд ва маблағи дурустро интихоб кунед');return;}
+  if(!confirm('Пардохти '+fmtMoney(amount)+' ба '+username+'-ро тасдиқ мекунед?'))return;
+  const entry={id:uid('wagepay'),kind:'wagePayment',date:todayKey(),ts:Date.now(),username,amount,by:actingUsername(),shift:currentShift()};
+  const next=[entry,...(state.dailyClosures||[])];
+  if(!await saveDailyClosures(next))return;
+  state.dailyClosures=next;
+  await logActivity('Пардохти маош: '+username+' — '+fmtMoney(amount));
+  showToast('Пардохти маош сабт шуд');render();
+}
+function renderDailyWageReport(orders){
+  const w=wageReportForOrders(orders), payments=wagePaymentsForDate(todayKey());
+  const paidTotal=payments.reduce((n,p)=>n+(Number(p.amount)||0),0);
+  return `<div class="section-title" style="margin-top:24px;">💰 Ҳисоботи ҳаррӯзаи маош (ҳисобшуда)</div>
+    <p style="font-size:12px;color:#6b5f4d;">Ин маблағи ҳисобшуда аст, на тасдиқи пардохти воқеӣ. Маоши собит барои як рӯзи корӣ ҳисоб мешавад.</p>
+    <table class="xls-table"><thead><tr><th>Корманд</th><th>Вазифа</th><th>Маоши рӯз</th></tr></thead><tbody>
+    ${w.entries.map(x=>`<tr><td>${escapeHtml(x.username)}</td><td>${escapeHtml(x.role)}</td><td>${fmtMoney(x.amount)}</td></tr>`).join('')}
+    <tr><td colspan="2"><b>Ҳамагӣ ҳисобшуда</b></td><td><b>${fmtMoney(w.total)}</b></td></tr></tbody></table>
+    <div class="section-title" style="margin-top:18px;">💵 Маоши воқеан пардохтшуда: ${fmtMoney(paidTotal)}</div>
+    <div class="form-box" style="flex-wrap:wrap;">
+      <div class="field"><label>Корманд</label><select id="wagePaymentStaff">${(state.accounts||[]).map(a=>`<option value="${escapeHtml(a.username)}">${escapeHtml(a.username)}</option>`).join('')}</select></div>
+      <div class="field"><label>Маблағи пардохт (смн)</label><input id="wagePaymentAmount" type="number" min="0.01" step="0.01" placeholder="0"></div>
+      <button class="btn-primary" id="recordWagePaymentBtn">+ Сабти пардохти маош</button>
+    </div>
+    ${payments.map(p=>`<div class="receipt-item-row"><div>${escapeHtml(p.username)} · ${fmtTime(p.ts)} · Смена ${p.shift||'—'}</div><b>${fmtMoney(p.amount)}</b></div>`).join('')}`;
+}
+function shiftProductSummary(orders){
+  const rows={};
+  (orders||[]).forEach(o=>(o.items||[]).forEach(it=>{
+    const key=String(it.name||'Маҳсулот')+'|'+String(it.unit||'dona');
+    if(!rows[key])rows[key]={name:it.name||'Маҳсулот',unit:it.unit||'dona',qty:0,revenue:0,osh:getItemCategory(it)==='Ош'};
+    rows[key].qty+=Number(it.qty)||0;
+    rows[key].revenue+=lineTotal({unit:it.unit,price:it.price},it.qty);
+  }));
+  return Object.values(rows).sort((a,b)=>b.revenue-a.revenue);
+}
+function renderClosedShiftReports(){
+  const today=(state.dailyClosures||[]).filter(x=>x.kind==='shift').slice().sort((a,b)=>b.closedAt-a.closedAt);
+  if(!today.length)return '<p style="font-size:12px;color:#6b5f4d;">Ҳоло сменаи басташуда нест.</p>';
+  return today.map(c=>`<div class="form-box" style="display:block;margin:12px 0;">
+    <b>${c.shift===1?'☀️':'🌙'} Смена ${c.shift}: ${escapeHtml(c.shiftLabel||'')} · ${escapeHtml(c.date||'')}</b>
+    <p>Фурӯш: <b>${fmtMoney(c.revenue)}</b> · ${c.checks} чек · Хароҷот: ${fmtMoney(c.expenses)} · Маоши ҳисобшуда: ${fmtMoney(c.wageTotal)} · Маоши пардохтшуда ҳангоми бастан: ${fmtMoney(c.paidWageTotal||0)}</p>
+    <p>Ош фурӯхта шуд: <b>${Number(c.oshKg||0).toFixed(2)} кг</b></p>
+    <table class="xls-table"><thead><tr><th>Маҳсулот</th><th>Миқдор</th><th>Маблағ</th></tr></thead><tbody>
+    ${(c.products||[]).map(p=>`<tr><td>${escapeHtml(p.name)}</td><td>${p.unit==='kg'?(Number(p.qty)/1000).toFixed(2)+' кг':p.qty+' дона'}</td><td>${fmtMoney(p.revenue)}</td></tr>`).join('')}
+    </tbody></table>
+    <p style="font-size:12px;color:#6b5f4d;">Маош: ${(c.wages||[]).map(w=>escapeHtml(w.username)+' — '+fmtMoney(w.amount)).join(' · ')}</p>
+    </div>`).join('');
+}
+async function closeWorkShift(shift){
+  if(state.role!=='admin')return;
+  const date=todayKey();
+  if((state.dailyClosures||[]).some(x=>x.kind==='shift'&&x.date===date&&x.shift===shift)){
+    showToast('Ин смена аллакай баста шудааст');return;
+  }
+  const now=Date.now(), end=shiftTimeMinutes(shiftConfig(shift).end),current=new Date(),currentMinutes=current.getHours()*60+current.getMinutes();
+  // A shift may only be closed after its configured end, unless the admin explicitly confirms early closure.
+  const unfinished=(state.orders||[]).some(o=>o.status==='active'&&shiftForTimestamp(o.createdAt)===shift&&isToday(o.createdAt));
+  if(unfinished){showToast('Аввал чекҳои фаъоли ин сменаро пӯшед');return;}
+  const orders=(state.orders||[]).filter(o=>o.status==='paid'&&!o.archived&&o.paidAt&&isToday(o.paidAt)&&shiftForTimestamp(o.paidAt)===shift);
+  if(!orders.length){showToast('Дар ин смена чекҳои пардохтшуда нест');return;}
+  if(!confirm('Ҳисоботи сменаи '+shift+'-ро маҳкам мекунед? Пас аз ин ҳисобот тағйир намеёбад.'))return;
+  const expenses=(state.expenses||[]).filter(e=>isToday(e.ts||e.createdAt)&&shiftForTimestamp(e.ts||e.createdAt)===shift);
+  const wages=wageReportForOrders(orders,shift),products=shiftProductSummary(orders);
+  const paidWages=wagePaymentsForDate(date).filter(p=>p.shift===shift);
+  const paidWageTotal=paidWages.reduce((n,p)=>n+(Number(p.amount)||0),0);
+  const closure={id:uid('shift'),kind:'shift',date,shift,shiftLabel:shiftLabel(shift),closedAt:now,closedBy:actingUsername(),
+    revenue:orders.reduce((n,o)=>n+(Number(o.total)||0),0),cash:orders.reduce((n,o)=>n+paymentSplit(o).cash,0),
+    noncash:orders.reduce((n,o)=>n+paymentSplit(o).noncash,0),checks:orders.length,orderIds:orders.map(o=>o.id),
+    expenses:sumExpenses(expenses),products,oshKg:orders.reduce((n,o)=>n+oshWeightFromItems(o.items),0),wages:wages.entries,wageTotal:wages.total,paidWages:paidWages.map(p=>({username:p.username,amount:p.amount})),paidWageTotal};
+  const next=[closure,...(state.dailyClosures||[])];
+  if(!await saveDailyClosures(next)){showToast('Сабти смена ноком шуд');return;}
+  state.dailyClosures=next;
+  await logActivity('Сменаи '+shift+' баста шуд');
+  showToast('Смена '+shift+' маҳкам шуд ва ҳисобот нигоҳ дошта шуд');render();
 }
 function renderAdminReport(){
   // Current report contains all paid orders since the last manual clear (inCurrentReportPeriod),
@@ -4379,7 +4500,7 @@ function renderAdminReport(){
     <div class="form-box" style="border-color:var(--brick);margin-bottom:18px;">
       <div style="width:100%;">
         <p style="font-size:13px;color:var(--brick);font-weight:700;margin:0 0 4px;">⚠️ Мутмаин ҳастед?</p>
-        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал ҲАМАИ таърихи ҳисобот, ҷадвали ҳисоботи чандрӯза, архив ва маблағи ҷамъшудаи маош/комиссияро пурра ва бебозгашт пок мекунад. Мизҳои фаъол дахл намеёбанд.</p>
+        <p style="font-size:12px;color:#6b5f4d;margin:0 0 10px;">Ин амал архиви ҳисобот ва ҳисобҳои ҷориро пок мекунад. Сабтҳои пардохти воқеии маош нигоҳ дошта мешаванд. Мизҳои фаъол дахл намеёбанд.</p>
         <button class="btn-pay" style="padding:8px 16px;margin-right:8px;" id="confirmClearReportBtn">Ҳа, пурра пок кун</button>
         <button class="btn-ghost" id="cancelClearReportBtn">Бекор</button>
       </div>
@@ -4419,6 +4540,11 @@ function renderAdminReport(){
     <button class="btn-ghost" style="margin-bottom:18px;" id="exportExcelBtn">📊 Содирот ба Excel</button>
     ${clearControl}
     ${closeDayControl}
+    <div class="section-title" style="margin-top:18px;">🔒 Пӯшидани сменаҳо</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+      ${[1,2].map(i=>`<button class="btn-ghost" data-closeshift="${i}" ${(state.dailyClosures||[]).some(c=>c.kind==='shift'&&c.date===todayKey()&&c.shift===i)?'disabled':''}>${(state.dailyClosures||[]).some(c=>c.kind==='shift'&&c.date===todayKey()&&c.shift===i)?'✓ Баста шуд':'🔒 Пӯшидани сменаи '+i} (${shiftLabel(i)})</button>`).join('')}
+    </div>
+    ${renderClosedShiftReports()}
     <div class="stat-row">
       <div class="stat-card"><div class="label">Даромади имрӯз</div><div class="value">${fmtMoney(revenue)}</div></div>
       <div class="stat-card"><div class="label">💵 Нақд имрӯз</div><div class="value">${fmtMoney(cashToday)}</div></div>
@@ -4436,6 +4562,7 @@ function renderAdminReport(){
     ${(state.expenses||[]).filter(e=>isToday(e.ts)).slice().reverse().map(e=>`<div class="receipt-item-row"><div><div class="l1">${escapeHtml(e.name||'Хароҷот')}</div><div class="l2">${fmtTime(e.ts)}</div></div><div>${fmtMoney(e.amount)}</div></div>`).join('')}
     <div class="section-title" style="margin-top:24px;">Ҳисоботи ҳаррӯза</div>
     ${renderDailyShiftReportTable(paidToday)}
+    ${renderDailyWageReport(paidToday)}
 
     ${active.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои фаъол</div>${activeHtml}` : ''}
     <div class="section-title" style="margin-top:24px;">Чекҳои ҷорӣ (аз охирин поккунӣ)</div>
@@ -4445,11 +4572,17 @@ function renderAdminReport(){
   `;
 }
 function renderDailyShiftReportTable(paidOrders){
-  const shifts=splitReportOrders(paidOrders), ex=splitExpenses(state.expenses||[]);
-  const make=(orders,expenses)=>{const revenue=orders.reduce((s,o)=>s+(Number(o.total)||0),0), expense=sumExpenses(expenses), cash=orders.reduce((s,o)=>s+paymentSplit(o).cash,0), noncash=orders.reduce((s,o)=>s+paymentSplit(o).noncash,0); return {revenue,expense,net:revenue-expense,cash,noncash,checks:orders.length};};
-  const d=make(shifts.day,ex.day), n=make(shifts.night,ex.night), t=make([...shifts.day,...shifts.night],[...ex.day,...ex.night]);
-  const row=(name,x)=>`<tr><td>${name}</td><td>${fmtMoney(x.revenue)}</td><td>${fmtMoney(x.expense)}</td><td>${fmtMoney(x.net)}</td><td>${x.checks}</td><td>${fmtMoney(x.cash)}</td><td>${fmtMoney(x.noncash)}</td></tr>`;
-  return `<table class="xls-table"><thead><tr><th>Баст</th><th>Даромад</th><th>Хароҷот</th><th>Холис</th><th>Чекҳо</th><th>Нақд</th><th>Ғайринақд</th></tr></thead><tbody>${row('☀️ Рӯзона 09:00–17:30',d)}${row('🌙 Шабона 17:30–00:00',n)}${row('Ҳамагӣ',t)}</tbody></table>`;
+  const shifts=splitReportOrders(paidOrders),ex=splitExpenses(state.expenses||[]);
+  const make=(orders,expenses,shift)=>{
+    const revenue=orders.reduce((s,o)=>s+(Number(o.total)||0),0),expense=sumExpenses(expenses);
+    const cash=orders.reduce((s,o)=>s+paymentSplit(o).cash,0),noncash=orders.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+    const wages=wageReportForOrders(orders,shift).total;
+    return {revenue,expense,net:revenue-expense-wages,cash,noncash,checks:orders.length,wages};
+  };
+  const d=make(shifts.day,ex.day,1),n=make(shifts.night,ex.night,2);
+  const t=make([...shifts.day,...shifts.night],[...ex.day,...ex.night],0);
+  const row=(name,x)=>`<tr><td>${name}</td><td>${fmtMoney(x.revenue)}</td><td>${fmtMoney(x.expense)}</td><td>${fmtMoney(x.wages)}</td><td>${fmtMoney(x.net)}</td><td>${x.checks}</td><td>${fmtMoney(x.cash)}</td><td>${fmtMoney(x.noncash)}</td></tr>`;
+  return `<table class="xls-table"><thead><tr><th>Смена</th><th>Даромад</th><th>Хароҷот</th><th>Маоши ҳисобшуда</th><th>Баъд аз хароҷот ва маош</th><th>Чекҳо</th><th>Нақд</th><th>Ғайринақд</th></tr></thead><tbody>${row('☀️ Смена 1 '+shiftLabel(1),d)}${row('🌙 Смена 2 '+shiftLabel(2),n)}${row('Ҳамагӣ',t)}</tbody></table>`;
 }
 function renderMonthlyArchive(){
   const a=state.reportArchive||{days:[],months:{}};
@@ -4609,6 +4742,22 @@ function renderAdminSettings(){
     <button class="btn-primary" style="flex:none;padding:10px 20px;" id="saveSettingsBtn">Нигоҳ доштан</button>
   </div>
   <p style="font-size:12px;color:#9c8f78;max-width:340px;">Барои иловаи миз, тағйири ном ё ҷои нишаст — ба варақаи «Мизҳо» гузаред.</p>
+  <div class="section-title" style="margin-top:30px;">🕒 Вақти сменаҳо ва тартиби мизҳо</div>
+  <div class="settings-form">
+    <div style="display:flex;flex-wrap:wrap;gap:14px;">
+      <div class="field"><label>Смена 1 — оғоз</label><input type="time" id="shift1StartInput" value="${state.settings.shift1Start||'09:00'}"></div>
+      <div class="field"><label>Смена 1 — анҷом</label><input type="time" id="shift1EndInput" value="${state.settings.shift1End||'17:30'}"></div>
+      <div class="field"><label>Смена 2 — оғоз</label><input type="time" id="shift2StartInput" value="${state.settings.shift2Start||'17:30'}"></div>
+      <div class="field"><label>Смена 2 — анҷом</label><input type="time" id="shift2EndInput" value="${state.settings.shift2End||'00:00'}"></div>
+    </div>
+    <div class="field"><label>Тартиби мизҳо</label><select id="tableSortInput">
+      <option value="name" ${(state.settings.tableSort||'name')==='name'?'selected':''}>Ном: А → Я (рақамҳо бо тартиб)</option>
+      <option value="nameDesc" ${state.settings.tableSort==='nameDesc'?'selected':''}>Ном: Я → А</option>
+      <option value="manual" ${state.settings.tableSort==='manual'?'selected':''}>Тартиби пешина</option>
+    </select></div>
+    <button class="btn-primary" id="saveShiftSettingsBtn">Нигоҳ доштани сменаҳо ва тартиби мизҳо</button>
+    <p style="font-size:12px;color:#6b5f4d;">Вақти ду смена набояд ба ҳам рост ояд. Ҳисоботҳои қаблан басташуда бо вақти сабтшудаи худ нигоҳ дошта мешаванд.</p>
+  </div>
   <div class="section-title" style="margin-top:32px;">📚 Архиви ҳисоботҳои моҳона</div>
   <p style="font-size:12px;color:#9c8f78;max-width:520px;">Архив танҳо барои Admin аст ва танҳо ҳангоми кушодани ин қисм аз Firebase хонда мешавад. Дар кори ҳаррӯза он хонда намешавад.</p>
   <button class="btn-ghost" id="loadReportArchiveBtn">📥 Гирифтани архив аз сервер</button>
@@ -4986,6 +5135,12 @@ function attachAdminEvents(){
     });
     const exportExcelBtn = document.getElementById('exportExcelBtn');
     if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportReportToExcel);
+    const wagePaymentBtn=document.getElementById('recordWagePaymentBtn');
+    if(wagePaymentBtn)wagePaymentBtn.addEventListener('click',recordWagePayment);
+    document.querySelectorAll('[data-closeshift]').forEach(el=>el.addEventListener('click',async()=>{
+      el.disabled=true;
+      try{await closeWorkShift(Number(el.dataset.closeshift));}finally{el.disabled=false;}
+    }));
     const closeDayBtn = document.getElementById('closeDayBtn');
     if(closeDayBtn) closeDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=true; render(); });
     const cancelCloseDayBtn = document.getElementById('cancelCloseDayBtn');
@@ -5189,6 +5344,20 @@ function attachAdminEvents(){
       await saveSettings(state.settings);
       showToast('Танзимот сабт шуд');
       render();
+    });
+    const saveShiftBtn=document.getElementById('saveShiftSettingsBtn');
+    if(saveShiftBtn) saveShiftBtn.addEventListener('click',async()=>{
+      const a=document.getElementById('shift1StartInput').value;
+      const b=document.getElementById('shift1EndInput').value;
+      const c=document.getElementById('shift2StartInput').value;
+      const d=document.getElementById('shift2EndInput').value;
+      const toMin=shiftTimeMinutes;
+      const intervals=(x,y)=>{const u=toMin(x),v=toMin(y);return u<v?[[u,v]]:[[u,1440],[0,v]];};
+      if(!a||!b||!c||!d||a===b||c===d){showToast('Вақти оғоз ва анҷоми сменаҳоро дуруст интихоб кунед');return;}
+      const overlap=intervals(a,b).some(([x,y])=>intervals(c,d).some(([u,v])=>Math.max(x,u)<Math.min(y,v)));
+      if(overlap){showToast('Вақти ду смена ба ҳам рост меояд');return;}
+      const next={...state.settings,shift1Start:a,shift1End:b,shift2Start:c,shift2End:d,tableSort:document.getElementById('tableSortInput').value};
+      if(await saveSettings(next)){state.settings=next;showToast('Сменаҳо ва тартиби мизҳо сабт шуданд');render();}
     });
     const resetBtn = document.getElementById('resetMenuBtn');
     if(resetBtn) resetBtn.addEventListener('click', ()=>{ state.confirmResetMenu = true; render(); });
