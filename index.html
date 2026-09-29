@@ -337,7 +337,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-29-V80-SALARY-SHIFTS-REPORT-FIX';
+const APP_VERSION = '2026-09-30-V81-CLOSE-DAY-FIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -4251,11 +4251,25 @@ async function clearAllReportHistory(){
 }
 
 async function closeDailyReport(){
+  // Refresh active orders from Firebase before closing so a stale browser state
+  // cannot block the close operation or hide an actually active table.
+  let active = state.orders.filter(o=>o.status==='active');
+  try{
+    const snap = await ordersCollectionRef().where('status','==','active').get();
+    const remoteActive=[];
+    snap.forEach(d=>{const x=d.data()||{}; remoteActive.push({...x,id:x.id||d.id});});
+    mergeActiveOrdersIntoState(remoteActive);
+    active = remoteActive;
+  }catch(e){
+    console.error('closeDailyReport active-order check failed',e);
+    showToast('Хатогӣ: фармоишҳои фаъолро санҷидан натавонист');
+    return;
+  }
+
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
-  const active = state.orders.filter(o=>o.status==='active');
 
   if(active.length){
-    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед');
+    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед: '+active.length);
     return;
   }
 
@@ -4307,8 +4321,15 @@ async function closeDailyReport(){
   upsertMonthlySummary(state.reportArchive,summary);
   if(state.reportArchive.days.length>366) state.reportArchive.days=state.reportArchive.days.slice(0,366);
   if(!await saveReportArchive()){ showToast('Хатогӣ: архиви ҳисобот сабт нашуд'); return; }
-  state.dailyClosures=[summary,...(state.dailyClosures||[])];
-  if(!await saveDailyClosures(state.dailyClosures)){ showToast('Хатогӣ: сабти пӯшидани рӯз нигоҳ дошта нашуд'); return; }
+
+  // Keep the daily-closure record in Firebase as well. This is the separate
+  // dailyClosures store used by the reports/history screen.
+  const nextDailyClosures=[summary,...(state.dailyClosures||[])];
+  if(!await saveDailyClosures(nextDailyClosures)){
+    showToast('Хатогӣ: сабти пӯшидани рӯз дар Firebase нашуд');
+    return;
+  }
+  state.dailyClosures=nextDailyClosures;
 
   // Mark the exact paid orders as archived instead of deleting them.
   // This survives realtime sync because the accounting record itself carries the flag.
