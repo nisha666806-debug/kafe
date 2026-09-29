@@ -4308,6 +4308,7 @@ async function closeDailyReport(){
   if(state.reportArchive.days.length>366) state.reportArchive.days=state.reportArchive.days.slice(0,366);
   if(!await saveReportArchive()){ showToast('Хатогӣ: архиви ҳисобот сабт нашуд'); return; }
   state.dailyClosures=[summary,...(state.dailyClosures||[])];
+  if(!await saveDailyClosures(state.dailyClosures)){ showToast('Хатогӣ: сабти пӯшидани рӯз нигоҳ дошта нашуд'); return; }
 
   // Mark the exact paid orders as archived instead of deleting them.
   // This survives realtime sync because the accounting record itself carries the flag.
