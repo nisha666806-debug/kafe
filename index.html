@@ -1517,7 +1517,25 @@ function serviceChargeAmount(subtotal){
   const pct = Math.max(0, Math.min(100, Number(state.settings.serviceChargePct)||0));
   return subtotal * (pct/100);
 }
+function serviceBaseFromItems(items){
+  return (items||[]).reduce((s,it)=>{
+    const m = state.menu.find(x=>x.id===it.menuId);
+    if((m && m.noService) || it.noService) return s;
+    return s + lineTotal({unit:it.unit, price:it.price}, it.qty);
+  },0);
+}
+function draftServiceBase(){
+  let t = 0;
+  Object.keys(state.draftItems).forEach(mid=>{
+    const m = state.menu.find(x=>x.id===mid);
+    if(m && !m.noService) t += lineTotal(m, state.draftItems[mid]);
+  });
+  return t;
+}
 function draftTotalWithService(){
+  return draftTotal() + serviceChargeAmount(draftServiceBase());
+}
+function draftTotalWithService_old(){
   const subtotal = draftTotal();
   return subtotal + serviceChargeAmount(subtotal);
 }
@@ -1558,11 +1576,11 @@ async function saveTicket(sendFlag){
     const m = state.menu.find(x=>x.id===mid);
     if(!m){ droppedAny = true; return null; }
     const prev = prevItems.find(p=>p.menuId===mid);
-    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, noService:!!m.noService, qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
   }).filter(Boolean);
   if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
   const subtotal = draftTotal();
-  const total = subtotal + serviceChargeAmount(subtotal);
+  const total = subtotal + serviceChargeAmount(draftServiceBase());
   let isNew = false;
   if(!order){
     isNew = true;
@@ -2172,16 +2190,16 @@ function getItemCategory(it){
 }
 
 /* ============ ADMIN: MENU CRUD ============ */
-async function addMenuItem(name, price, category, unit, recipe){
-  const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona', recipe: recipe||[]};
+async function addMenuItem(name, price, category, unit, recipe, noService){
+  const item = {id:uid('m'), name, price:Number(price), category, unit:unit||'dona', recipe: recipe||[], noService: !!noService};
   state.menu.push(item);
   await saveMenu(state.menu);
   await logActivity('Хӯроки нав илова кард: '+name);
   showToast('Хӯрок илова шуд');
 }
-async function updateMenuItem(id, name, price, category, unit, recipe){
+async function updateMenuItem(id, name, price, category, unit, recipe, noService){
   const item = state.menu.find(m=>m.id===id);
-  if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; item.recipe = recipe||[]; }
+  if(item){ item.name=name; item.price=Number(price); item.category=category; item.unit=unit||'dona'; item.recipe = recipe||[]; item.noService = !!noService; }
   await saveMenu(state.menu);
   await logActivity('Хӯрокро тағйир дод: '+name);
   showToast('Тағйирот сабт шуд');
@@ -2845,7 +2863,7 @@ async function assignScheduledToTable(orderId, tableId){
     return s + (m ? lineTotal(m, it.qty) : 0);
   }, 0);
   order.subtotal = subtotal;
-  order.serviceCharge = serviceChargeAmount(subtotal);
+  order.serviceCharge = serviceChargeAmount(serviceBaseFromItems(order.items));
   order.total = subtotal + order.serviceCharge;
   await saveOrderV2(order); // save only this order
   showToast('Ба миз гузошта шуд');
@@ -3467,7 +3485,7 @@ function renderTicketOverlay(){
     });
   }
   const subtotal = draftTotal();
-  const serviceFee = serviceChargeAmount(subtotal);
+  const serviceFee = serviceChargeAmount(draftServiceBase());
   const total = subtotal + serviceFee;
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
@@ -4034,6 +4052,7 @@ function renderAdminStaff(){
       <div class="info">
         <div class="nm">${escapeHtml(acc.username)}</div>
         <div class="cat">${roleLabel[acc.role]||acc.role}</div>
+        <div class="cat" style="text-transform:none;letter-spacing:0;color:var(--text-dim);">🔑 ${escapeHtml(String(acc.password ?? ''))}</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         ${confirming ? `
@@ -4068,7 +4087,7 @@ function renderAdminStaff(){
   const editForm = editTarget ? `
     <div class="form-box" id="editAccountForm">
       <div class="field"><label>Логин</label><input type="text" id="editAccUsername" value="${escapeHtml(editTarget.username)}"></div>
-      <div class="field small"><label>Пароли нав <span style="color:#9c5f00;font-size:11px;">(холӣ = нигоҳ доштан)</span></label><input type="password" id="editAccPassword" value="" placeholder="Пароли нав" autocomplete="new-password"></div>
+      <div class="field small"><label>Пароли нав <span style="color:#9c5f00;font-size:11px;">(холӣ = нигоҳ доштан)</span></label><input type="text" id="editAccPassword" value="${escapeHtml(String(editTarget.password ?? ''))}" placeholder="Парол" autocomplete="off"></div>
       <div class="field"><label>Нақш</label>
         <select id="editAccRole">
           <option value="waiter" ${editTarget.role==='waiter'?'selected':''}>Официант</option>
@@ -4128,7 +4147,7 @@ function renderAdminMenu(){
       <div class="item-row">
         <div class="info">
           <div class="nm">${escapeHtml(m.name)}</div>
-          <div class="cat">${m.unit==='kg'?'бо кг':'бо дона'}</div>
+          <div class="cat">${m.unit==='kg'?'бо кг':'бо дона'}${m.noService?' · бе ҳаққи хизмат':''}</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;">
           <span class="price mono">${fmtMoney(m.price)}${m.unit==='kg'?'/кг':''}</span>
@@ -4183,6 +4202,7 @@ function renderAdminMenu(){
         </select>
       </div>
       ${recipePickerHtml.replace('{{UNITLABEL}}','дона/кг')}
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;width:100%;margin-top:10px;"><input type="checkbox" id="newNoService" ${state.menuFormDraft.noService?'checked':''}> Ҳаққи хизмат ҳисоб нашавад</label>
       <button class="btn-primary" style="flex:none;padding:9px 18px;margin-top:12px;" id="submitAdd">Илова кардан</button>
       <button class="btn-ghost" id="cancelAdd">Бекор</button>
     </div>` : `<button class="btn-ghost" id="showAddBtn" style="margin-bottom:18px;">+ Иловаи хӯрок</button>`;
@@ -4202,6 +4222,7 @@ function renderAdminMenu(){
         </select>
       </div>
       ${recipePickerHtml.replace('{{UNITLABEL}}','дона/кг')}
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;width:100%;margin-top:10px;"><input type="checkbox" id="editNoService" ${state.menuFormDraft.noService?'checked':''}> Ҳаққи хизмат ҳисоб нашавад</label>
       <button class="btn-primary" style="flex:none;padding:9px 18px;margin-top:12px;" id="submitEdit">Нигоҳ доштан</button>
       <button class="btn-ghost" id="cancelEdit">Бекор</button>
     </div>` : '';
@@ -4250,7 +4271,11 @@ async function clearAllReportHistory(){
   showToast('Ҳисобот ва маош пурра пок шуд');
 }
 
+function wagePaymentsForDate(date){
+  return (state.dailyClosures||[]).filter(x=>x.kind==='wagePayment' && x.date===date);
+}
 async function closeDailyReport(){
+  await ensurePaidOrdersLoaded('report');
   // Refresh active orders from Firebase before closing so a stale browser state
   // cannot block the close operation or hide an actually active table.
   let active = state.orders.filter(o=>o.status==='active');
@@ -4268,8 +4293,9 @@ async function closeDailyReport(){
 
   const paidToday = state.orders.filter(o=>o.status==='paid' && o.paidAt && o.archived!==true && inCurrentReportPeriod(o.paidAt));
 
-  if(active.length){
-    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед: '+active.length);
+  const blocking = active.filter(o=>o.type!=='scheduled');
+  if(blocking.length){
+    showToast('Аввал ҳамаи мизҳои фаъолро пӯшед: '+blocking.length);
     return;
   }
 
@@ -5159,7 +5185,8 @@ function attachAdminEvents(){
     if(cancelCloseDayBtn) cancelCloseDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=false; render(); });
     const confirmCloseDayBtn = document.getElementById('confirmCloseDayBtn');
     if(confirmCloseDayBtn) confirmCloseDayBtn.addEventListener('click', async ()=>{
-      await closeDailyReport();
+      try{ await closeDailyReport(); }catch(e){ console.error(e); showToast('Хатогӣ: '+(e.message||e)); }
+      state.showCloseDayConfirm=false;
       render();
     });
     document.querySelectorAll('[data-delclosure]').forEach(el=>{
@@ -5297,6 +5324,7 @@ function attachAdminEvents(){
       const p = document.getElementById(prefix+'Price'); if(p) state.menuFormDraft.price = p.value;
       const c = document.getElementById(prefix+'Cat'); if(c) state.menuFormDraft.cat = c.value;
       const u = document.getElementById(prefix+'Unit'); if(u) state.menuFormDraft.unit = u.value;
+      const ns = document.getElementById(prefix+'NoService'); if(ns) state.menuFormDraft.noService = ns.checked;
     }
     const formPrefix = ()=> state.showAddForm ? 'new' : (state.editingId ? 'edit' : 'new');
 
@@ -5321,7 +5349,7 @@ function attachAdminEvents(){
       const unit = document.getElementById('newUnit').value;
       if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
       const recipe = Object.keys(state.recipeDraft).map(invId=>({invId, qty:state.recipeDraft[invId]}));
-      await addMenuItem(name, price, cat, unit, recipe);
+      await addMenuItem(name, price, cat, unit, recipe, document.getElementById('newNoService').checked);
       state.showAddForm=false; state.formOpen=false;
       state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
       render();
@@ -5331,7 +5359,7 @@ function attachAdminEvents(){
       el.addEventListener('click', ()=>{
         const item = state.menu.find(m=>m.id===el.dataset.edit);
         state.editingId = el.dataset.edit; state.formOpen=true; state.formOpenAt=Date.now();
-        state.menuFormDraft = item ? {name:item.name, price:String(item.price), cat:item.category, unit:item.unit||'dona'} : {name:'',price:'',cat:'',unit:'dona'};
+        state.menuFormDraft = item ? {name:item.name, price:String(item.price), cat:item.category, unit:item.unit||'dona', noService:!!item.noService} : {name:'',price:'',cat:'',unit:'dona'};
         state.recipeDraft = {};
         if(item && item.recipe){ item.recipe.forEach(r=>{ state.recipeDraft[r.invId] = r.qty; }); }
         render();
@@ -5360,7 +5388,7 @@ function attachAdminEvents(){
       const unit = document.getElementById('editUnit').value;
       if(!name || !price || !cat){ showToast('Ҳамаи майдонҳоро пур кунед'); return; }
       const recipe = Object.keys(state.recipeDraft).map(invId=>({invId, qty:state.recipeDraft[invId]}));
-      await updateMenuItem(state.editingId, name, price, cat, unit, recipe);
+      await updateMenuItem(state.editingId, name, price, cat, unit, recipe, document.getElementById('editNoService').checked);
       state.editingId=null; state.formOpen=false;
       state.menuFormDraft = {name:'', price:'', cat:'', unit:'dona'}; state.recipeDraft = {};
       render();
