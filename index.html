@@ -146,6 +146,12 @@
   .dot.reserved{background:var(--gold);}
   .table-card.reserved-table{border-style:dashed;border-color:var(--gold);}
   .table-card.locked-table{opacity:.55;}
+  .table-card.waiter-own{border:2px solid var(--brick);background:#FEF2F2;box-shadow:0 0 0 1px rgba(220,38,38,.18),var(--shadow-sm);}
+  .table-card.from-scheduled{border:2px solid var(--olive);background:#F0FDF4;}
+  .order-src-badge{display:block;width:max-content;max-width:100%;margin:0 0 4px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .order-src-badge.own{background:var(--brick);color:#fff;}
+  .order-src-badge.sched{background:var(--olive);color:#fff;}
+  .add-btn.ta-btn{background:var(--brick);width:auto;min-width:32px;padding:0 10px;border-radius:16px;font-size:12px;white-space:nowrap;}
   .reserve-note{font-size:10px;color:#9C7A12;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
   .reserve-detail{font-size:10px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-variant-numeric:tabular-nums;}
   .table-card .status{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);font-weight:600;}
@@ -337,7 +343,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-09-30-V81-CLOSE-DAY-FIX';
+const APP_VERSION = '2026-10-27-V82-SOBOY-CASHIER-EDIT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1504,13 +1510,64 @@ function closeTicket(){
   state.confirmCancelOrderId = null;
   render();
 }
+/* ---------- Оши собой (дар дохили чеки миз), лаълӣ, манбаи фармоиш ---------- */
+// Калиди махсус барои оши собой дар чеки миз: menuId + '__ta' (масалан 'm2__ta').
+const TA_SUFFIX = '__ta';
+function isTaKey(k){ return typeof k==='string' && k.endsWith(TA_SUFFIX); }
+function baseMenuId(k){ return isTaKey(k) ? k.slice(0, -TA_SUFFIX.length) : k; }
+function menuForKey(k){
+  const m = state.menu.find(x=>x.id===baseMenuId(k));
+  if(!m) return null;
+  if(!isTaKey(k)) return m;
+  return {...m, id:k, name:m.name+' (собой)', noService:true, takeawayOsh:true};
+}
+function roundMoney(n){ return Math.round((Number(n)||0)*100)/100; }
+// Лаълӣ (зарф) — аз он ҳаққи хизматрасонӣ гирифта намешавад ва ба он тахфиф дода намешавад.
+function isLaaliName(name){ return /ла[ъьеиӣйі'’`]л|ляган|лаган/i.test(String(name||'')); }
+function takeawayOshDiscountPct(){ return Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0)); }
+// Тахфифи собой танҳо ба ош (категорияи «Ош»), на ба нӯшокӣ, нон, лаълӣ ва ғайра.
+function isOshDiscountItem(item){ return !!item && getItemCategory(item)==='Ош' && !isLaaliName(item.name); }
+// 'own'   = фармоише, ки офитсиант худаш дар сари миз гирифтааст (ранги сурх)
+// 'sched' = фармоиши вақтдор, ки ба миз гузошта шудааст (ранги сабз)
+function orderSourceKind(o){
+  if(!o) return '';
+  if(o.type==='takeaway') return '';
+  if(o.fromScheduled || o.type==='dine-in' || o.type==='scheduled') return 'sched';
+  if(o.table===null || o.table===undefined) return '';
+  return 'own';
+}
+function orderSourceBadge(o){
+  const k = orderSourceKind(o);
+  if(k==='own') return `<span class="order-src-badge own">🔴 Фармоиши офитсиант</span>`;
+  if(k==='sched') return `<span class="order-src-badge sched">🕐 Фармоиши вақтдор</span>`;
+  return '';
+}
 function draftTotal(){
   let total = 0;
   Object.keys(state.draftItems).forEach(mid=>{
-    const item = state.menu.find(m=>m.id===mid);
+    const item = menuForKey(mid);
     if(item) total += lineTotal(item, state.draftItems[mid]);
   });
   return total;
+}
+// Тахфифи оши собойи иловагӣ дар чеки миз
+function draftDiscount(){
+  const pct = takeawayOshDiscountPct();
+  if(pct<=0) return 0;
+  let base = 0;
+  Object.keys(state.draftItems).forEach(k=>{
+    if(!isTaKey(k)) return;
+    const m = menuForKey(k);
+    if(m && isOshDiscountItem(m)) base += lineTotal(m, state.draftItems[k]);
+  });
+  return roundMoney(base * pct / 100);
+}
+function ticketDraftDirty(order){
+  if(!order) return false;
+  const items = order.items || [];
+  const keys = Object.keys(state.draftItems);
+  if(keys.length !== items.length) return true;
+  return items.some(it=> Number(state.draftItems[it.menuId]) !== Number(it.qty));
 }
 // Service charge — only for dine-in (eat-in) checks, never takeaway.
 function serviceChargeAmount(subtotal){
@@ -1519,21 +1576,21 @@ function serviceChargeAmount(subtotal){
 }
 function serviceBaseFromItems(items){
   return (items||[]).reduce((s,it)=>{
-    const m = state.menu.find(x=>x.id===it.menuId);
-    if((m && m.noService) || it.noService) return s;
+    const m = state.menu.find(x=>x.id===baseMenuId(it.menuId));
+    if((m && m.noService) || it.noService || it.takeawayOsh || isTaKey(it.menuId) || isLaaliName(it.name)) return s;
     return s + lineTotal({unit:it.unit, price:it.price}, it.qty);
   },0);
 }
 function draftServiceBase(){
   let t = 0;
   Object.keys(state.draftItems).forEach(mid=>{
-    const m = state.menu.find(x=>x.id===mid);
-    if(m && !m.noService) t += lineTotal(m, state.draftItems[mid]);
+    const m = menuForKey(mid);
+    if(m && !m.noService && !m.takeawayOsh && !isLaaliName(m.name)) t += lineTotal(m, state.draftItems[mid]);
   });
   return t;
 }
 function draftTotalWithService(){
-  return draftTotal() + serviceChargeAmount(draftServiceBase());
+  return roundMoney(Math.max(0, draftTotal() - draftDiscount()) + serviceChargeAmount(draftServiceBase()));
 }
 function draftTotalWithService_old(){
   const subtotal = draftTotal();
@@ -1566,26 +1623,35 @@ function removeDraftItem(mid){
   delete state.draftItems[mid];
   render();
 }
-async function saveTicket(sendFlag){
+async function saveTicket(sendFlag, opts){
+  opts = opts || {};
   try{
-    if(!validateCustomerArrival()) return;
+    if(!validateCustomerArrival()) return false;
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? order.items : [];
   let droppedAny = false;
   const items = Object.keys(state.draftItems).map(mid=>{
-    const m = state.menu.find(x=>x.id===mid);
+    const m = menuForKey(mid);
     if(!m){ droppedAny = true; return null; }
     const prev = prevItems.find(p=>p.menuId===mid);
-    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category, noService:!!m.noService, qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
+    return {menuId:mid, name:m.name, price:m.price, unit:m.unit||'dona', category:m.category,
+      noService:!!m.noService || isLaaliName(m.name), takeawayOsh:!!m.takeawayOsh,
+      qty:state.draftItems[mid], servedQty: prev?(prev.servedQty||0):0};
   }).filter(Boolean);
   if(droppedAny) showToast('Баъзе маҳсулот дигар дар меню нест — аз чек хориҷ шуд');
+  if(!items.length && order && state.role==='cashier'){
+    showToast('Чек холӣ шуда наметавонад — «Бекор кардани фармоиш»-ро истифода баред');
+    return false;
+  }
   const subtotal = draftTotal();
-  const total = subtotal + serviceChargeAmount(draftServiceBase());
+  const discount = draftDiscount();
+  const serviceCharge = serviceChargeAmount(draftServiceBase());
+  const total = roundMoney(Math.max(0, subtotal - discount) + serviceCharge);
   let isNew = false;
   if(!order){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
-      createdBy: actingUsername(), sentToKitchen:false,
+      createdBy: actingUsername(), sentToKitchen:false, source:'waiter',
       customerType: state.customerPhone ? 'with_order' : 'without_order',
       customerPhone: state.customerPhone || null};
     state.orders.push(order);
@@ -1594,17 +1660,21 @@ async function saveTicket(sendFlag){
     order.customerType = state.customerPhone ? 'with_order' : 'without_order';
     order.customerPhone = state.customerPhone || null;
   }
+  const editedByCashier = !isNew && !!opts.cashierEdit;
   order.items = items;
   order.total = total;
   order.subtotal = subtotal;
-  order.serviceCharge = total - subtotal;
+  order.discount = discount;
+  order.discountPct = discount>0 ? takeawayOshDiscountPct() : 0;
+  order.serviceCharge = serviceCharge;
   order.updatedAt = Date.now();
+  if(editedByCashier){ order.editedByCashier = actingUsername(); order.editedByCashierAt = Date.now(); }
   if(sendFlag){
     order.sentToKitchen = true;
     const inventoryOk = await deductForOrderDelta(order, items);
     if(inventoryOk===false){
       showToast('Анбор нав нашуд — фармоиш фиристода нашуд');
-      return;
+      return false;
     }
   }
   // Save ONLY the order being created/edited. Saving the entire orders array here
@@ -1614,13 +1684,18 @@ async function saveTicket(sendFlag){
   const saved = await saveOrderV2(order);
   if(!saved){
     showToast('Хатогӣ ҳангоми нигоҳдории фармоиш');
-    return;
+    return false;
   }
-  showToast(sendFlag ? '🍚 Ба ошпаз фиристода шуд' : 'Фармоиш захира шуд');
-  closeTicket();
+  if(editedByCashier){
+    try{ await logActivity('Кассир чекро тағйир дод: '+orderLabel(order)+' → '+fmtMoney(total)); }catch(e){}
+  }
+  if(!opts.silent) showToast(editedByCashier ? '✏️ Тағйироти чек сабт шуд' : (sendFlag ? '🍚 Ба ошпаз фиристода шуд' : 'Фармоиш захира шуд'));
+  if(!opts.keepOpen) closeTicket();
+  return true;
   }catch(e){
     console.error('saveTicket failed', e);
     showToast('Хатогӣ ҳангоми захира кардани фармоиш');
+    return false;
   }
 }
 
@@ -1674,6 +1749,11 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
 async function payTicket(cashAmount, noncashAmount){
   const order=activeOrderForTable(state.activeTable);
   if(!order) return;
+  // Агар кассир чекро тағйир дода бошад — аввал тағйирот сабт мешавад, баъд пардохт.
+  if(state.role==='cashier' && ticketDraftDirty(order)){
+    const okSave = await saveTicket(!!order.sentToKitchen, {keepOpen:true, silent:true, cashierEdit:true});
+    if(!okSave) return;
+  }
   const cash=Math.max(0,Number(cashAmount)||0);
   const noncash=Math.max(0,Number(noncashAmount)||0);
   const expected=Number(order.total||0);
@@ -1979,7 +2059,7 @@ async function adjustInventoryQty(id, delta){
 function computeInventoryDeduction(orderItems){
   const deduction = {};
   orderItems.forEach(it=>{
-    const menuItem = state.menu.find(m=>m.id===it.menuId);
+    const menuItem = state.menu.find(m=>m.id===baseMenuId(it.menuId));
     if(!menuItem || !menuItem.recipe || !menuItem.recipe.length) return;
     const soldAmount = menuItem.unit==='kg' ? (it.qty/1000) : it.qty; // recipe is "per 1kg" or "per 1 dona"
     menuItem.recipe.forEach(r=>{
@@ -2185,7 +2265,7 @@ function formatQtyLabel(it){
 }
 function getItemCategory(it){
   if(it.category) return it.category;
-  const m = state.menu.find(x=>x.id===it.menuId);
+  const m = state.menu.find(x=>x.id===baseMenuId(it.menuId));
   return m ? m.category : '';
 }
 
@@ -2457,9 +2537,12 @@ function buildTableCards(){
       if(order.createdBy) extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen) extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
     }
+    const srcKind = occ ? orderSourceKind(order) : '';
+    const srcClass = srcKind==='own' ? 'waiter-own' : (srcKind==='sched' ? 'from-scheduled' : '');
+    const srcBadge = occ ? orderSourceBadge(order) : '';
     const assignBadge = tbl.assignedTo ? `<span class="reserve-detail">👤 ${escapeHtml(tbl.assignedTo)}</span>` : '';
-    cards += `<button class="table-card ${lockedForMe?'locked-table':''}" data-table="${t}">
-      ${arrivalBadge}<div class="row1"><span class="tnum">${escapeHtml(tbl.name)}</span><span class="dot ${dotClass}"></span></div>
+    cards += `<button class="table-card ${lockedForMe?'locked-table':''} ${srcClass}" data-table="${t}">
+      ${arrivalBadge}${srcBadge}<div class="row1"><span class="tnum">${escapeHtml(tbl.name)}</span><span class="dot ${dotClass}"></span></div>
       <span class="status">${statusText} · ${tbl.seats} ҷой</span>${extra}${assignBadge}
       ${lockedForMe ? `<span class="reserve-detail" style="color:var(--brick);">🔒 танҳо ${escapeHtml(tbl.assignedTo)}</span>` : ''}
     </button>`;
@@ -2604,6 +2687,7 @@ function renderCashier(){
   const cashierTab = state.cashierTab || 'main';
   const tabBar = `<div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;">
     <button class="cat-tab ${cashierTab==='main'?'active':''}" data-cashiertab="main">🏠 Асосӣ</button>
+    <button class="cat-tab ${cashierTab==='takeaway'?'active':''}" data-cashiertab="takeaway">🥡 Собой</button>
     <button class="cat-tab ${cashierTab==='orders'?'active':''}" data-cashiertab="orders">📋 Фармоишҳо</button>
     <button class="cat-tab ${cashierTab==='salary'?'active':''}" data-cashiertab="salary">💰 Маош</button>
   </div>`;
@@ -2613,6 +2697,29 @@ function renderCashier(){
   }
   if(cashierTab==='salary'){
     return `<div class="container">${tabBar}${renderCashierSalary()}</div>`;
+  }
+  if(cashierTab==='takeaway'){
+    const taPct = takeawayOshDiscountPct();
+    const taPaid = myTakeaway.filter(o=>o.status==='paid');
+    const taSum = taPaid.reduce((s,o)=>s+(Number(o.total)||0),0);
+    const taDiscSum = taPaid.reduce((s,o)=>s+(Number(o.discount)||0),0);
+    return `
+    <div class="container">
+      ${tabBar}
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
+        <button class="btn-primary" id="openTakeawayBtn" style="padding:12px 20px;background:var(--brick);">🥡 + Фармоиши собой</button>
+        <span style="font-size:13px;color:#6b5f4d;">Тахфифи оши собой: <b style="color:var(--olive);">${taPct}%</b> · танҳо ба ош (нӯшокӣ, нон, лаълӣ ва ғ. — бе тахфиф)</span>
+      </div>
+      ${oshRemainingBadge()}
+      <div class="stat-row">
+        <div class="stat-card"><div class="label">Собойи имрӯза</div><div class="value">${taPaid.length}</div></div>
+        <div class="stat-card"><div class="label">Маблағ</div><div class="value">${fmtMoney(taSum)}</div></div>
+        <div class="stat-card"><div class="label">Тахфиф дода шуд</div><div class="value" style="color:var(--olive);">${fmtMoney(taDiscSum)}</div></div>
+      </div>
+      ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор — собой (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
+      <div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои собойи имрӯза</div>
+      ${myTakeaway.length ? takeawayHtml : `<div class="empty-state">Ҳоло фармоиши собой нест</div>`}
+    </div>`;
   }
 
   return `
@@ -2625,9 +2732,7 @@ function renderCashier(){
     <div class="section-title">Чекҳои фаъол <span class="num">${occCount} банд / ${state.tables.length} ҷами</span></div>
     <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:18px;">Мизи бандро зада, чекро бинед ва пардохт кунед</p>
     <div class="table-grid" id="tableLayoutGrid">${buildTableCards()}</div>
-    ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои вақтдор — бо худ бурдан (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
     ${pendingScheduledDinein.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои вақтдор — интизори пардохт</div>${scheduledDineinHtml}` : ''}
-    ${myTakeaway.length ? `<div class="section-title" style="margin-top:24px;">Фармоишҳои бо худ бурдани имрӯза</div>${takeawayHtml}` : ''}
   </div>`;
 }
 
@@ -2641,20 +2746,20 @@ function takeawaySubtotal(){
   return total;
 }
 function takeawayDiscountAmount(){
-  // Тахфиф танҳо барои ош (категория "Ош", unit===kg), на барои нӯшокиҳо ва дигар чизҳо
-  const pct = Math.max(0, Math.min(100, Number(state.settings.takeawayDiscountPct)||0));
+  // Тахфиф танҳо барои ош (категорияи "Ош" — кило ё порсия), на барои нӯшокиҳо, нон, лаълӣ ва дигар чизҳо
+  const pct = takeawayOshDiscountPct();
   if(pct<=0) return 0;
   let oshTotal = 0;
   Object.keys(state.takeawayItems).forEach(mid=>{
     const item = state.menu.find(m=>m.id===mid);
-    if(item && getItemCategory(item)==='Ош' && item.unit==='kg'){
+    if(item && isOshDiscountItem(item)){
       oshTotal += lineTotal(item, state.takeawayItems[mid]);
     }
   });
-  return oshTotal * (pct/100);
+  return roundMoney(oshTotal * (pct/100));
 }
 function takeawayTotal(){
-  return Math.max(0, takeawaySubtotal() - takeawayDiscountAmount());
+  return roundMoney(Math.max(0, takeawaySubtotal() - takeawayDiscountAmount()));
 }
 function openTakeaway(){
   state.takeawayOpen = true;
@@ -2706,7 +2811,9 @@ async function submitTakeaway(cashAmount, noncashAmount){
   const noncash = Math.max(0, Number(noncashAmount)||0);
   const order = {
     id: uid('ord'), table: null, type: 'takeaway', status: 'paid', takeawayNumber: todayCount+1,
-    items, total, createdAt: Date.now(), updatedAt: Date.now(),
+    items, total, subtotal: takeawaySubtotal(), discount: takeawayDiscountAmount(),
+    discountPct: takeawayDiscountAmount()>0 ? takeawayOshDiscountPct() : 0,
+    createdAt: Date.now(), updatedAt: Date.now(),
     createdBy: null, paidAt: Date.now(), paidBy: actingUsername(),
     cashAmount: cash, noncashAmount: noncash,
     paymentMethod: cash>0 && noncash>0 ? 'mixed' : (noncash>0 ? 'noncash' : 'cash'),
@@ -2854,6 +2961,7 @@ async function assignScheduledToTable(orderId, tableId){
   if(activeOrderForTable(tableId)){ showToast('Ин миз аллакай банд аст'); return; }
   order.table = tableId;
   order.type = 'dine-in';
+  order.fromScheduled = true;
   order.createdBy = actingUsername();
   order.sentToKitchen = true;
   order.updatedAt = Date.now();
@@ -2940,7 +3048,7 @@ function renderTakeawayOverlay(){
   <div class="overlay" id="takeawayOverlay">
     <div class="ticket-wrap">
       <div class="ticket-head">
-        <h2>🥡 Бо худ бурдан</h2>
+        <h2>🥡 Собой (бо худ бурдан)</h2>
         <button class="close-x" id="closeTakeaway">✕</button>
       </div>
       <div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>
@@ -2949,7 +3057,7 @@ function renderTakeawayOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек — Бо худ бурдан</div>
         ${receiptLines}
-        ${discountAmt>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line" style="color:var(--olive);"><span>Тахфиф (${state.settings.takeawayDiscountPct}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
+        ${discountAmt>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line" style="color:var(--olive);"><span>Тахфифи ош (${state.settings.takeawayDiscountPct}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
       </div>
       <div class="ticket-actions" style="flex-direction:column;align-items:stretch;">
@@ -3172,6 +3280,8 @@ function renderOrderViewOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек</div>
         ${itemsHtml}
+        ${Number(order.discount)>0 ? `<div class="receipt-line" style="color:var(--olive);"><span>Тахфифи ош${order.discountPct?(' ('+order.discountPct+'%)'):''}</span><span>−${fmtMoney(order.discount)}</span></div>` : ''}
+        ${Number(order.serviceCharge)>0 ? `<div class="receipt-line"><span>Ҳаққи хизматрасонӣ</span><span>+${fmtMoney(order.serviceCharge)}</span></div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(order.total)}</span></div>
       </div>
       ${actionBtn}
@@ -3389,13 +3499,15 @@ function attachChefEvents(){
 /* ---------- Ticket overlay ---------- */
 function renderTicketOverlay(){
   const mode = state.ticketMode || 'edit';
-  const editable = mode === 'edit';
+  // Кассир низ метавонад чекро тағйир диҳад (зиёд/кам кардани маҳсулот)
+  const cashierEditing = mode==='pay' && state.role==='cashier';
+  const editable = mode === 'edit' || cashierEditing;
   const currentOrder = activeOrderForTable(state.activeTable);
   const servedInfo = (mid, qty)=>{
     const prevItem = currentOrder ? currentOrder.items.find(p=>p.menuId===mid) : null;
     const served = prevItem ? (prevItem.servedQty||0) : 0;
     if(served<=0) return '';
-    const m = state.menu.find(x=>x.id===mid) || {unit:'dona'};
+    const m = menuForKey(mid) || {unit:'dona'};
     const remaining = Math.max(0, qty - served);
     const servedLabel = m.unit==='kg' ? formatQtyLabel({name:'',unit:'kg',qty:served}).trim() : served+'×';
     const remLabel = m.unit==='kg' ? formatQtyLabel({name:'',unit:'kg',qty:remaining}).trim() : remaining+'×';
@@ -3419,6 +3531,7 @@ function renderTicketOverlay(){
             <input type="number" class="kg-qty-input" id="kgin-${m.id}" value="500" min="10" step="50" style="width:64px;padding:6px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;">
             <span style="font-size:11px;color:#6b5f4d;">г</span>
             <button class="add-btn" data-addgrams="${m.id}">+</button>
+            ${isOshDiscountItem(m) ? `<button class="add-btn ta-btn" data-addgramsta="${m.id}" title="Оши собой (бо худ мебарад)">🥡 собой</button>` : ''}
           </div>
         </div>`;
       }
@@ -3428,7 +3541,10 @@ function renderTicketOverlay(){
           <div class="mname">${escapeHtml(m.name)}</div>
           <div class="mprice">${fmtMoney(m.price)}</div>
         </div>
-        <button class="add-btn" data-add="${m.id}">+</button>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="add-btn" data-add="${m.id}">+</button>
+          ${isOshDiscountItem(m) ? `<button class="add-btn ta-btn" data-addta="${m.id}" title="Оши собой (бо худ мебарад)">🥡 собой</button>` : ''}
+        </div>
       </div>`;
     }).join('');
     menuSection = `<div class="cat-tabs">${tabs}</div><div class="menu-list">${items}</div>`;
@@ -3440,7 +3556,7 @@ function renderTicketOverlay(){
     receiptLines = `<div class="receipt-empty">— холӣ аст —</div>`;
   } else {
     draftKeys.forEach(mid=>{
-      const m = state.menu.find(x=>x.id===mid);
+      const m = menuForKey(mid);
       if(!m) return;
       const qty = state.draftItems[mid];
       const isKg = m.unit==='kg';
@@ -3485,8 +3601,10 @@ function renderTicketOverlay(){
     });
   }
   const subtotal = draftTotal();
+  const discountAmt = draftDiscount();
   const serviceFee = serviceChargeAmount(draftServiceBase());
-  const total = subtotal + serviceFee;
+  const total = roundMoney(Math.max(0, subtotal - discountAmt) + serviceFee);
+  const hasNoServiceLines = draftKeys.some(k=>{ const mm = menuForKey(k); return mm && (mm.takeawayOsh || isLaaliName(mm.name)); });
   const disabled = draftKeys.length===0 ? 'disabled' : '';
 
   let actions = '';
@@ -3511,7 +3629,11 @@ function renderTicketOverlay(){
       <button type="button" class="btn-pay" style="flex:1;" id="sendKitchenBtn" ${disabled}>🍚 Ба ошпаз фиристодан</button>
     </div>${cancelBlock}`;
   } else if(mode==='pay'){
-    actions = `<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${renderSplitPaymentForm('paytk', total)}</div>${cancelBlock}`;
+    const dirty = cashierEditing && ticketDraftDirty(currentOrder);
+    const editNote = cashierEditing ? `<p style="padding:0 20px;margin:-6px 0 8px;font-size:12px;color:${dirty?'var(--brick)':'#9c8f78'};">${dirty?'✏️ Чек тағйир дода шуд — ҳангоми пардохт худкор сабт мешавад':'✏️ Шумо метавонед маҳсулотро зиёд ё кам кунед'}</p>` : '';
+    const saveEditBtn = dirty && draftKeys.length ? `<div style="padding:0 20px 8px;"><button type="button" class="btn-ghost" style="width:100%;" id="cashierSaveEditsBtn">💾 Сабти тағйироти чек</button></div>` : '';
+    const payBody = draftKeys.length ? renderSplitPaymentForm('paytk', total) : `<p style="text-align:center;color:var(--brick);font-size:13px;">Чек холӣ аст — маҳсулот илова кунед ё фармоишро бекор кунед</p>`;
+    actions = `${editNote}${saveEditBtn}<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${payBody}</div>${cancelBlock}`;
   }
 
   const _activeTbl = state.tables.find(t=>t.id===state.activeTable);
@@ -3524,6 +3646,7 @@ function renderTicketOverlay(){
         <button class="close-x" id="closeTicket">✕</button>
       </div>
       ${state.role!=='waiter' ? `<div style="padding:10px 20px 0;">${oshRemainingBadge()}</div>` : ''}
+      ${currentOrder && orderSourceBadge(currentOrder) ? `<div style="padding:10px 20px 0;">${orderSourceBadge(currentOrder)}</div>` : ''}
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
       ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
@@ -3535,7 +3658,10 @@ function renderTicketOverlay(){
       <div class="receipt">
         <div class="receipt-title">Чек — Миз: ${_activeTblName}</div>
         ${receiptLines}
-        ${serviceFee>0 ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div><div class="receipt-line"><span>Ҳаққи хизматрасонӣ (${state.settings.serviceChargePct}%)</span><span>+${fmtMoney(serviceFee)}</span></div>` : ''}
+        ${(serviceFee>0 || discountAmt>0) ? `<div class="receipt-line"><span>Тарҳи мобайнӣ</span><span>${fmtMoney(subtotal)}</span></div>` : ''}
+        ${discountAmt>0 ? `<div class="receipt-line" style="color:var(--olive);"><span>Тахфифи оши собой (${takeawayOshDiscountPct()}%)</span><span>−${fmtMoney(discountAmt)}</span></div>` : ''}
+        ${serviceFee>0 ? `<div class="receipt-line"><span>Ҳаққи хизматрасонӣ (${state.settings.serviceChargePct}%)</span><span>+${fmtMoney(serviceFee)}</span></div>` : ''}
+        ${(Number(state.settings.serviceChargePct)||0)>0 && hasNoServiceLines ? `<div style="font-size:11px;color:#9c8f78;padding:2px 0 4px;">* Аз оши собой ва лаълӣ ҳаққи хизматрасонӣ гирифта намешавад</div>` : ''}
         <div class="receipt-total"><span>Ҳамагӣ</span><span>${fmtMoney(total)}</span></div>
       </div>
       ${actions}
@@ -3564,7 +3690,8 @@ function attachTicketEvents(){
   if(cancelCancelOrderBtn) cancelCancelOrderBtn.addEventListener('click', ()=>{
     state.confirmCancelOrderId = null; render();
   });
-  if(mode==='edit'){
+  const cashierEditing = mode==='pay' && state.role==='cashier';
+  if(mode==='edit' || cashierEditing){
     const arrivalPhone = document.getElementById('arrivalPhone');
     if(arrivalPhone){
       arrivalPhone.addEventListener('input', e=>setCustomerPhone(e.target.value));
@@ -3574,7 +3701,7 @@ function attachTicketEvents(){
         if(!/^[0-9]$/.test(e.key)) e.preventDefault();
       });
     }
-    document.querySelectorAll('.cat-tab').forEach(el=>{
+    document.querySelectorAll('#ticketOverlay [data-cat]').forEach(el=>{
       el.addEventListener('click', ()=>{ state.activeCat = el.dataset.cat; render(); });
     });
     document.querySelectorAll('[data-add]').forEach(el=>{
@@ -3598,6 +3725,24 @@ function attachTicketEvents(){
     document.querySelectorAll('[data-removeitem]').forEach(el=>{
       el.addEventListener('click', ()=> removeDraftItem(el.dataset.removeitem));
     });
+    // Оши собой дар дохили чеки миз
+    document.querySelectorAll('[data-addta]').forEach(el=>{
+      el.addEventListener('click', ()=> changeQty(el.dataset.addta+TA_SUFFIX, 1));
+    });
+    document.querySelectorAll('[data-addgramsta]').forEach(el=>{
+      el.addEventListener('click', ()=>{
+        const input = document.getElementById('kgin-'+el.dataset.addgramsta);
+        addGrams(el.dataset.addgramsta+TA_SUFFIX, input ? input.value : 0);
+      });
+    });
+    const cashierSaveEditsBtn = document.getElementById('cashierSaveEditsBtn');
+    if(cashierSaveEditsBtn) cashierSaveEditsBtn.addEventListener('click', async e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const o = activeOrderForTable(state.activeTable);
+      const ok = await saveTicket(!!(o && o.sentToKitchen), {keepOpen:true, cashierEdit:true});
+      if(ok) render();
+    });
     const saveBtn = document.getElementById('saveTicketBtn');
     if(saveBtn) saveBtn.addEventListener('click', async e=>{
       e.preventDefault();
@@ -3610,7 +3755,8 @@ function attachTicketEvents(){
       e.stopPropagation();
       await saveTicket(true);
     });
-  } else if(mode==='pay'){
+  }
+  if(mode==='pay'){
     attachSplitPaymentEvents('paytk', draftTotalWithService(), (cash, noncash)=> payTicket(cash, noncash));
   }
 }
@@ -4849,10 +4995,10 @@ function renderAdminSettings(){
   </div>
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
-      <label>Тахфифи «Бо худ бурдан» (%)</label>
+      <label>Тахфифи «Оши собой» (%)</label>
       <input type="number" id="takeawayDiscountInput" value="${state.settings.takeawayDiscountPct||0}" min="0" max="100" step="1" style="width:120px;">
     </div>
-    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ин фоиз худкор аз ҳамаи фармоишҳои «Бо худ бурдан» кам карда мешавад (0 = бе тахфиф).</p>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ин фоиз <b>танҳо аз нархи ош</b> кам карда мешавад: дар фармоишҳои «Собой» ва ҳангоми илова кардани «🥡 собой» дар чеки миз. Нӯшокӣ, нон, салат, лаълӣ ва дигар маҳсулот бе тахфиф мемонанд. Аз оши собой ва лаълӣ ҳаққи хизматрасонӣ гирифта намешавад (0 = бе тахфиф).</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveTakeawayDiscountBtn">Сабт кардан</button>
   </div>
 
