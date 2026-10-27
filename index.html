@@ -343,7 +343,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-10-27-V82-SOBOY-CASHIER-EDIT';
+const APP_VERSION = '2026-10-27-V83-REMOVE-CASHIER-ALERT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1928,7 +1928,7 @@ function speakOrderAlert(order, baseText){
   }catch(e){}
 }
 function speakCashierAlert(order){
-  speakOrderAlert(order, state.settings.cashierAlertText);
+  // Огоҳии овозии кассир аз барнома хориҷ карда шуд
 }
 function orderLabel(o){
   if(o.type==='takeaway'){
@@ -2629,18 +2629,6 @@ function attachWaiterEvents(){
 /* ---------- Cashier view ---------- */
 function renderCashier(){
   const occCount = occupiedTableCount();
-
-  // Speak an alert when a genuinely new order becomes active — not on first render (that would
-  // announce every order already on the books when the cashier simply opens the screen).
-  const activeForCashier = state.orders.filter(o=>o.status==='active');
-  const currentCashierIds = activeForCashier.map(o=>o.id);
-  if(state.seenCashierOrderIds === null){
-    state.seenCashierOrderIds = new Set(currentCashierIds);
-  } else {
-    const newOnes = activeForCashier.filter(o=>!state.seenCashierOrderIds.has(o.id));
-    newOnes.forEach(o=> speakCashierAlert(o));
-    state.seenCashierOrderIds = new Set(currentCashierIds);
-  }
   const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) &&
     (o.status==='active' || !state.currentUser || o.paidBy===state.currentUser.username))
     .sort((a,b)=>b.createdAt-a.createdAt);
@@ -5004,14 +4992,10 @@ function renderAdminSettings(){
 
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
-      <label>Матни огоҳии овозии кассир</label>
-      <input type="text" id="cashierAlertTextInput" value="${escapeHtml(state.settings.cashierAlertText||'Фармоиши нав')}" style="width:220px;">
-    </div>
-    <div class="field">
       <label>Матни огоҳии овозии ошпаз</label>
       <input type="text" id="chefAlertTextInput" value="${escapeHtml(state.settings.chefAlertText||'Фармоиши нав')}" style="width:220px;">
     </div>
-    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ҳангоми фармоиши нав, экрани кассир ва ошпаз бо ин матн (баъд аз он миз/навъ илова мешавад) бо овоз хабар медиҳанд.</p>
+    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ҳангоми фармоиши нав, экрани ошпаз бо ин матн (баъд аз он миз/навъ илова мешавад) бо овоз хабар медиҳад.</p>
     <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveAlertTextBtn">Сабт кардан</button>
   </div>
 
@@ -5639,9 +5623,8 @@ function attachAdminEvents(){
     });
     const saveAlertTextBtn = document.getElementById('saveAlertTextBtn');
     if(saveAlertTextBtn) saveAlertTextBtn.addEventListener('click', async ()=>{
-      const cashierText = (document.getElementById('cashierAlertTextInput').value || 'Фармоиши нав').trim();
       const chefText = (document.getElementById('chefAlertTextInput').value || 'Фармоиши нав').trim();
-      state.settings = {...state.settings, cashierAlertText: cashierText, chefAlertText: chefText};
+      state.settings = {...state.settings, chefAlertText: chefText};
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
