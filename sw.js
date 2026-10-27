@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-10-27-V83-REMOVE-CASHIER-ALERT';
+const CACHE_NAME = 'kafe-shell-2026-10-27-V84-TWO-PART-CHECK-TABAQ';
 
 const APP_SHELL = [
   './',
