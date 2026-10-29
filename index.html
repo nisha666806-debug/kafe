@@ -343,7 +343,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-10-27-V84-TWO-PART-CHECK-TABAQ';
+const APP_VERSION = '2026-10-30-V85-OSH-DOP-CASHIER-REPORT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1576,6 +1576,79 @@ function orderSourceBadge(o){
   if(k==='sched') return `<span class="order-src-badge sched">🕐 Фармоиши вақтдор</span>`;
   return '';
 }
+function fmtOshQtyUnit(unit, qty){
+  const q = Math.max(0, Number(qty)||0);
+  if(unit==='kg') return q>=1000 ? (Math.round((q/1000)*100)/100)+' кг' : Math.round(q)+' г';
+  return Math.round(q)+'×';
+}
+// Муқоисаи оши фармоиши вақтдор бо миқдори ҳозира дар миз (барои муайян кардани «Оши доп» ё кам кардани ош)
+function scheduledOshDiffs(order, currentItemsOverride){
+  if(!order || orderSourceKind(order)!=='sched') return [];
+  const initList = Array.isArray(order.initialItems) && order.initialItems.length ? order.initialItems : null;
+  if(!initList) return [];
+  const curList = Array.isArray(currentItemsOverride) ? currentItemsOverride : (order.items||[]);
+  const initMap = {}, curMap = {};
+  initList.forEach(it=>{
+    const bId = baseMenuId(it.menuId);
+    const m = state.menu.find(x=>x.id===bId) || it;
+    if(!isOshDiscountItem({...m, ...it})) return;
+    if(!initMap[bId]) initMap[bId] = {menuId:bId, name:m.name||it.name||'Ош', unit:it.unit||m.unit||'dona', qty:0};
+    initMap[bId].qty += Math.max(0, Number(it.qty)||0);
+  });
+  curList.forEach(it=>{
+    const bId = baseMenuId(it.menuId);
+    const m = state.menu.find(x=>x.id===bId) || it;
+    if(!isOshDiscountItem({...m, ...it})) return;
+    if(!curMap[bId]) curMap[bId] = {menuId:bId, name:m.name||it.name||'Ош', unit:it.unit||m.unit||'dona', qty:0};
+    curMap[bId].qty += Math.max(0, Number(it.qty)||0);
+  });
+  const allIds = [...new Set([...Object.keys(initMap), ...Object.keys(curMap)])];
+  const diffs = [];
+  allIds.forEach(bId=>{
+    const inf = initMap[bId] || curMap[bId];
+    const initQty = initMap[bId] ? initMap[bId].qty : 0;
+    const curQty = curMap[bId] ? curMap[bId].qty : 0;
+    const delta = curQty - initQty;
+    if(Math.abs(delta) < 0.001) return;
+    diffs.push({
+      menuId: bId,
+      name: inf.name,
+      unit: inf.unit,
+      initQty,
+      curQty,
+      delta,
+      kind: delta > 0 ? 'dop' : 'less',
+      initLabel: fmtOshQtyUnit(inf.unit, initQty),
+      curLabel: fmtOshQtyUnit(inf.unit, curQty),
+      deltaLabel: (delta>0?'+':'−') + fmtOshQtyUnit(inf.unit, Math.abs(delta))
+    });
+  });
+  return diffs;
+}
+function renderScheduledOshDiffBanner(order, currentItemsOverride){
+  const diffs = scheduledOshDiffs(order, currentItemsOverride);
+  if(!diffs.length) return '';
+  return `<div style="margin:6px 0 10px;display:flex;flex-direction:column;gap:6px;">` + diffs.map(d=>{
+    if(d.kind==='dop'){
+      return `<div style="background:#ECFDF5;border:1.5px solid #6EE7B7;border-radius:8px;padding:7px 10px;font-size:12px;color:#065F46;font-weight:700;">
+        🍚 Оши доп: <span style="font-size:13px;color:#047857;">${escapeHtml(d.deltaLabel)}</span> ${escapeHtml(d.name)} илова шуд
+        <div style="font-size:11px;font-weight:600;color:#047857;margin-top:2px;">Вақтдор (пешакӣ): ${escapeHtml(d.initLabel)} → Ҳоло дар чек: ${escapeHtml(d.curLabel)}</div>
+      </div>`;
+    }
+    return `<div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:8px;padding:7px 10px;font-size:12px;color:#92400E;font-weight:700;">
+      ⚠️ Ош кам карда шуд: <span style="font-size:13px;color:var(--brick);">${escapeHtml(d.deltaLabel)}</span> ${escapeHtml(d.name)}
+      <div style="font-size:11px;font-weight:600;color:#B45309;margin-top:2px;">Вақтдор (пешакӣ): ${escapeHtml(d.initLabel)} → Ҳоло дар чек: ${escapeHtml(d.curLabel)}</div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+function renderScheduledOshCardBadge(order){
+  const diffs = scheduledOshDiffs(order);
+  if(!diffs.length) return '';
+  return diffs.map(d=>{
+    if(d.kind==='dop') return `<span class="reserve-detail" style="color:var(--olive);font-weight:700;">🍚 Оши доп: ${escapeHtml(d.deltaLabel)}</span>`;
+    return `<span class="reserve-detail" style="color:var(--brick);font-weight:700;">⚠️ Ош кам: ${escapeHtml(d.deltaLabel)}</span>`;
+  }).join('');
+}
 function draftTotal(){
   let total = 0;
   Object.keys(state.draftItems).forEach(mid=>{
@@ -1694,6 +1767,9 @@ async function saveTicket(sendFlag, opts){
   if(isNew && state.role==='waiter'){
     order.customerType = state.customerPhone ? 'with_order' : 'without_order';
     order.customerPhone = state.customerPhone || null;
+  }
+  if(!isNew && order && orderSourceKind(order)==='sched' && (!Array.isArray(order.initialItems) || !order.initialItems.length)){
+    order.initialItems = (prevItems||[]).map(it=>({menuId:baseMenuId(it.menuId), name:it.name, unit:it.unit||'dona', category:it.category, qty:Number(it.qty)||0}));
   }
   const editedByCashier = !isNew && !!opts.cashierEdit;
   order.items = items;
@@ -2377,10 +2453,17 @@ function render(){
         // Load data in background — onSnapshot triggers render() automatically
         if(tab==='orders') ensureScheduledOrdersLoaded().catch(console.error);
         if(tab==='salary') ensurePaidOrdersLoaded('month').catch(console.error);
+        if(tab==='report'){
+          ensurePaidOrdersLoaded('report').then(()=>ensureDailySalarySnapshot()).catch(console.error);
+          ensureReportArchiveLoaded().catch(console.error);
+        }
       });
     });
     if((state.cashierTab||'main')==='orders'){
       attachAdminOrdersEvents();
+    }
+    if((state.cashierTab||'main')==='report'){
+      attachReportEvents();
     }
     attachTableGridEvents();
     const openBtn = document.getElementById('openTakeawayBtn');
@@ -2570,6 +2653,7 @@ function buildTableCards(){
       const mins = Math.floor((Date.now()-order.createdAt)/60000);
       extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ'}</span>`;
       if(order.createdBy) extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
+      extra += renderScheduledOshCardBadge(order);
       if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen) extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
     }
     const srcKind = occ ? orderSourceKind(order) : '';
@@ -2712,11 +2796,15 @@ function renderCashier(){
     <button class="cat-tab ${cashierTab==='main'?'active':''}" data-cashiertab="main">🏠 Асосӣ</button>
     <button class="cat-tab ${cashierTab==='takeaway'?'active':''}" data-cashiertab="takeaway">🥡 Собой</button>
     <button class="cat-tab ${cashierTab==='orders'?'active':''}" data-cashiertab="orders">📋 Фармоишҳо</button>
+    <button class="cat-tab ${cashierTab==='report'?'active':''}" data-cashiertab="report">📊 Ҳисобот</button>
     <button class="cat-tab ${cashierTab==='salary'?'active':''}" data-cashiertab="salary">💰 Маош</button>
   </div>`;
 
   if(cashierTab==='orders'){
     return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
+  }
+  if(cashierTab==='report'){
+    return `<div class="container">${tabBar}${renderAdminReport()}</div>`;
   }
   if(cashierTab==='salary'){
     return `<div class="container">${tabBar}${renderCashierSalary()}</div>`;
@@ -2912,9 +3000,10 @@ async function submitScheduled(name, phone, time, deliveryType){
   if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
   // Вақт ва ном ихтиёрианд — агар нависта нашавад, холӣ мемонад
   const total = scheduledTotal();
+  const initialItems = items.map(it=>({menuId:baseMenuId(it.menuId), name:it.name, unit:it.unit||'dona', category:it.category, qty:Number(it.qty)||0}));
   const order = {
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
-    items, total, createdAt: Date.now(), updatedAt: Date.now(),
+    items, initialItems, total, createdAt: Date.now(), updatedAt: Date.now(),
     createdBy: null, readyTime: time, customerName: name||'', customerPhone: phone||'',
     deliveryType: deliveryType==='takeaway' ? 'takeaway' : 'dinein',
     prepared: false
@@ -2982,6 +3071,9 @@ async function assignScheduledToTable(orderId, tableId){
   const order = state.orders.find(o=>o.id===orderId);
   if(!order) return;
   if(activeOrderForTable(tableId)){ showToast('Ин миз аллакай банд аст'); return; }
+  if(!Array.isArray(order.initialItems) || !order.initialItems.length){
+    order.initialItems = (order.items||[]).map(it=>({menuId:baseMenuId(it.menuId), name:it.name, unit:it.unit||'dona', category:it.category, qty:Number(it.qty)||0}));
+  }
   order.table = tableId;
   order.type = 'dine-in';
   order.fromScheduled = true;
@@ -3312,6 +3404,7 @@ function renderOrderViewOverlay(){
       ${waiterLine}
       <div class="receipt">
         <div class="receipt-title">Чек</div>
+        ${renderScheduledOshDiffBanner(order)}
         ${itemsHtml}
         ${Number(order.discount)>0 ? `<div class="receipt-line" style="color:var(--olive);"><span>Тахфифи ош${order.discountPct?(' ('+order.discountPct+'%)'):''}</span><span>−${fmtMoney(order.discount)}</span></div>` : ''}
         ${Number(order.serviceCharge)>0 ? `<div class="receipt-line"><span>Ҳаққи хизматрасонӣ</span><span>+${fmtMoney(order.serviceCharge)}</span></div>` : ''}
@@ -3447,6 +3540,7 @@ function renderChef(){
     <div class="receipt" style="margin:0 0 14px;${isDone?'opacity:.55;':''}${isDelayed?'border-color:var(--brick);box-shadow:0 0 0 2px var(--brick);':''}">
       <div class="receipt-title" style="${isDelayed?'color:var(--brick);':''}">${escapeHtml(title)}${isDelayed?` · ⏰ ${ageMin} дақ дер`:''}</div>
       ${o.createdBy ? `<div style="text-align:center;font-size:11px;color:#9c8f78;margin:-6px 0 8px;">👤 ${escapeHtml(o.createdBy)}</div>` : ''}
+      ${renderScheduledOshDiffBanner(o)}
       ${itemsHtml}
       <div style="margin-top:10px;">
         <button class="${isDone?'btn-ghost':'btn-primary'}" style="padding:8px 16px;font-size:12px;" data-toggleprep="${o.id}">${isDone?'Бозгашт ба навбат':'Тайёр шуд'}</button>
@@ -3574,9 +3668,7 @@ function renderTicketOverlay(){
           <div style="display:flex;align-items:center;gap:6px;">
             <input type="number" class="kg-qty-input" id="kgin-${m.id}" value="500" min="10" step="50" style="width:64px;padding:6px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;">
             <span style="font-size:11px;color:#6b5f4d;">г</span>
-            ${activeSec==='extra'
-              ? `<button class="add-btn ta-btn" data-addgramsta="${m.id}" title="Илова ба қисми иловагӣ (бе хизматрасонӣ)">+ Иловагӣ</button>`
-              : `<button class="add-btn" data-addgrams="${m.id}" title="Илова ба қисми асосӣ">+</button><button class="add-btn ta-btn" data-addgramsta="${m.id}" title="Илова ба қисми иловагӣ (бе хизматрасонӣ)">+ Иловагӣ</button>`}
+            <button class="add-btn" style="${activeSec==='extra'?'background:var(--brick);':''}" data-${activeSec==='extra'?'addgramsta':'addgrams'}="${m.id}">+</button>
           </div>
         </div>`;
       }
@@ -3587,9 +3679,7 @@ function renderTicketOverlay(){
           <div class="mprice">${fmtMoney(m.price)}${subBadge}</div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;">
-          ${activeSec==='extra'
-            ? `<button class="add-btn ta-btn" data-addta="${m.id}" title="Илова ба қисми иловагӣ (бе хизматрасонӣ)">+ Иловагӣ</button>`
-            : `<button class="add-btn" data-add="${m.id}" title="Илова ба қисми асосӣ">+</button><button class="add-btn ta-btn" data-addta="${m.id}" title="Илова ба қисми иловагӣ (бе хизматрасонӣ)">+ Иловагӣ</button>`}
+          <button class="add-btn" style="${activeSec==='extra'?'background:var(--brick);':''}" data-${activeSec==='extra'?'addta':'add'}="${m.id}">+</button>
         </div>
       </div>`;
     }).join('');
@@ -3606,9 +3696,7 @@ function renderTicketOverlay(){
     const displayName = isExtraLine ? baseM.name : m.name;
     const qty = state.draftItems[mid];
     const isKg = m.unit==='kg';
-    const moveBtn = editable ? (isExtraLine
-      ? `<button class="qty-btn" style="width:auto;padding:0 6px;font-size:10px;" data-tomain="${mid}" title="Гузаронидан ба қисми асосӣ">↖ Асосӣ</button>`
-      : `<button class="qty-btn" style="width:auto;padding:0 6px;font-size:10px;color:var(--brick);border-color:var(--brick);" data-toextra="${mid}" title="Гузаронидан ба қисми иловагӣ (бе хизматрасонӣ)">↘ Иловагӣ</button>`) : '';
+    const moveBtn = '';
     const extraTag = (isExtraLine && isOshDiscountItem(baseM) && takeawayOshDiscountPct()>0)
       ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(−${takeawayOshDiscountPct()}% ош)</span>`
       : ((!isExtraLine && isLaaliName(baseM.name)) ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(бе хизмат.)</span>` : '');
@@ -3661,7 +3749,12 @@ function renderTicketOverlay(){
   const serviceFee = serviceChargeAmount(draftServiceBase());
   const total = roundMoney(Math.max(0, subtotal - discountAmt) + serviceFee);
   const disabled = draftKeys.length===0 ? 'disabled' : '';
-  const receiptSectionsHtml = `
+  const draftItemsList = draftKeys.map(k=>{
+    const mm = menuForKey(k);
+    return mm ? {menuId:k, name:mm.name, unit:mm.unit||'dona', category:mm.category, qty:state.draftItems[k]} : null;
+  }).filter(Boolean);
+  const schedDiffBannerHtml = currentOrder ? renderScheduledOshDiffBanner(currentOrder, draftItemsList) : '';
+  const receiptSectionsHtml = `${schedDiffBannerHtml}
     <div style="background:#F8FAFC;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
       <div style="font-size:12px;font-weight:800;color:var(--ink);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
         <span>🍽 1. Қисми асосӣ (дар миз)</span>
@@ -3681,7 +3774,7 @@ function renderTicketOverlay(){
         <span>🥡 2. Қисми иловагӣ (вақти баромадан / собой)</span>
         <span style="font-size:11px;font-weight:700;color:var(--olive);">бе ҳаққи хизматрасонӣ (0%)</span>
       </div>
-      ${extraKeys.length ? extraKeys.map(k=>renderReceiptKeyLine(k,true)).join('') : `<div class="receipt-empty" style="padding:6px 0;">— чизҳои иловагӣ нест (бо тугмаи «+ Иловагӣ» ё «↘ Иловагӣ» илова кунед) —</div>`}
+      ${extraKeys.length ? extraKeys.map(k=>renderReceiptKeyLine(k,true)).join('') : `<div class="receipt-empty" style="padding:6px 0;">— чизҳои иловагӣ нест —</div>`}
       ${extraKeys.length ? `
         <div class="receipt-line" style="border-top:1px dashed #FECACA;margin-top:4px;padding-top:6px;font-size:12px;color:#475569;">
           <span>Ҷамъи қисми иловагӣ</span><span>${fmtMoney(extraSub)}</span>
@@ -5141,6 +5234,52 @@ function renderAdminSettings(){
   </div>`;
 }
 
+function attachReportEvents(){
+  const addExpenseBtn=document.getElementById('addExpenseBtn');
+  if(addExpenseBtn) addExpenseBtn.addEventListener('click', async()=>{const name=(document.getElementById('expenseName')?.value||'').trim(); const amount=Number(document.getElementById('expenseAmount')?.value)||0; if(!name||amount<=0){showToast('Ном ва маблағи хароҷотро ворид кунед');return;} state.expenses=state.expenses||[]; state.expenses.push({id:uid('exp'),name,amount,ts:Date.now(),createdBy:actingUsername()}); await saveExpenses(state.expenses); render();});
+  document.querySelectorAll('[data-vieworder]').forEach(el=>{
+    el.addEventListener('click', ()=> openOrderView(el.dataset.vieworder, el.dataset.viewmode||'pay'));
+  });
+  const clearBtn = document.getElementById('clearReportBtn');
+  if(clearBtn) clearBtn.addEventListener('click', ()=>{ state.confirmClearReport=true; render(); });
+  const cancelClearBtn = document.getElementById('cancelClearReportBtn');
+  if(cancelClearBtn) cancelClearBtn.addEventListener('click', ()=>{ state.confirmClearReport=false; render(); });
+  const confirmClearBtn = document.getElementById('confirmClearReportBtn');
+  if(confirmClearBtn) confirmClearBtn.addEventListener('click', async ()=>{
+    await clearAllReportHistory();
+    render();
+  });
+  const exportExcelBtn = document.getElementById('exportExcelBtn');
+  if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportReportToExcel);
+  document.querySelectorAll('[data-closeshift]').forEach(el=>el.addEventListener('click',async()=>{
+    el.disabled=true;
+    try{await closeWorkShift(Number(el.dataset.closeshift));}finally{el.disabled=false;}
+  }));
+  const closeDayBtn = document.getElementById('closeDayBtn');
+  if(closeDayBtn) closeDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=true; render(); });
+  const cancelCloseDayBtn = document.getElementById('cancelCloseDayBtn');
+  if(cancelCloseDayBtn) cancelCloseDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=false; render(); });
+  const confirmCloseDayBtn = document.getElementById('confirmCloseDayBtn');
+  if(confirmCloseDayBtn) confirmCloseDayBtn.addEventListener('click', async ()=>{
+    try{ await closeDailyReport(); }catch(e){ console.error(e); showToast('Хатогӣ: '+(e.message||e)); }
+    state.showCloseDayConfirm=false;
+    render();
+  });
+  document.querySelectorAll('[data-delclosure]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = el.dataset.delclosure; render(); });
+  });
+  document.querySelectorAll('[data-confirmdelclosure]').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const id = el.dataset.confirmdelclosure;
+      state.confirmDeleteClosureId = null;
+      await deleteDailyClosure(id);
+      render();
+    });
+  });
+  document.querySelectorAll('[data-canceldelclosure]').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = null; render(); });
+  });
+}
 function attachAdminOrdersEvents(){
   const clearOshTotalBtn = document.getElementById('clearOshTotalBtn');
   if(clearOshTotalBtn) clearOshTotalBtn.addEventListener('click', async ()=>{
@@ -5391,50 +5530,7 @@ function attachAdminEvents(){
   }
 
   if(state.adminTab==='report'){
-    const addExpenseBtn=document.getElementById('addExpenseBtn');
-    if(addExpenseBtn) addExpenseBtn.addEventListener('click', async()=>{const name=(document.getElementById('expenseName')?.value||'').trim(); const amount=Number(document.getElementById('expenseAmount')?.value)||0; if(!name||amount<=0){showToast('Ном ва маблағи хароҷотро ворид кунед');return;} state.expenses=state.expenses||[]; state.expenses.push({id:uid('exp'),name,amount,ts:Date.now(),createdBy:actingUsername()}); await saveExpenses(state.expenses); render();});
-    document.querySelectorAll('[data-vieworder]').forEach(el=>{
-      el.addEventListener('click', ()=> openOrderView(el.dataset.vieworder, el.dataset.viewmode||'pay'));
-    });
-    const clearBtn = document.getElementById('clearReportBtn');
-    if(clearBtn) clearBtn.addEventListener('click', ()=>{ state.confirmClearReport=true; render(); });
-    const cancelClearBtn = document.getElementById('cancelClearReportBtn');
-    if(cancelClearBtn) cancelClearBtn.addEventListener('click', ()=>{ state.confirmClearReport=false; render(); });
-    const confirmClearBtn = document.getElementById('confirmClearReportBtn');
-    if(confirmClearBtn) confirmClearBtn.addEventListener('click', async ()=>{
-      await clearAllReportHistory();
-      render();
-    });
-    const exportExcelBtn = document.getElementById('exportExcelBtn');
-    if(exportExcelBtn) exportExcelBtn.addEventListener('click', exportReportToExcel);
-    document.querySelectorAll('[data-closeshift]').forEach(el=>el.addEventListener('click',async()=>{
-      el.disabled=true;
-      try{await closeWorkShift(Number(el.dataset.closeshift));}finally{el.disabled=false;}
-    }));
-    const closeDayBtn = document.getElementById('closeDayBtn');
-    if(closeDayBtn) closeDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=true; render(); });
-    const cancelCloseDayBtn = document.getElementById('cancelCloseDayBtn');
-    if(cancelCloseDayBtn) cancelCloseDayBtn.addEventListener('click', ()=>{ state.showCloseDayConfirm=false; render(); });
-    const confirmCloseDayBtn = document.getElementById('confirmCloseDayBtn');
-    if(confirmCloseDayBtn) confirmCloseDayBtn.addEventListener('click', async ()=>{
-      try{ await closeDailyReport(); }catch(e){ console.error(e); showToast('Хатогӣ: '+(e.message||e)); }
-      state.showCloseDayConfirm=false;
-      render();
-    });
-    document.querySelectorAll('[data-delclosure]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = el.dataset.delclosure; render(); });
-    });
-    document.querySelectorAll('[data-confirmdelclosure]').forEach(el=>{
-      el.addEventListener('click', async ()=>{
-        const id = el.dataset.confirmdelclosure;
-        state.confirmDeleteClosureId = null;
-        await deleteDailyClosure(id);
-        render();
-      });
-    });
-    document.querySelectorAll('[data-canceldelclosure]').forEach(el=>{
-      el.addEventListener('click', ()=>{ state.confirmDeleteClosureId = null; render(); });
-    });
+    attachReportEvents();
   }
 
   if(state.adminTab==='settings'){
