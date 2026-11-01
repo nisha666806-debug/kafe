@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-10-30-V86-CLEAR-MONTHLY-SALARY';
+const CACHE_NAME = 'kafe-shell-2026-11-02-V87-CUSTOM-STAFF-COMMISSION';
 
 const APP_SHELL = [
   './',
