@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-11-02-V88-TAKEAWAY-OSH-COUNT-FIX';
+const CACHE_NAME = 'kafe-shell-2026-11-02-V89-INSTANT-TAKEAWAY-LOAD';
 
 const APP_SHELL = [
   './',
@@ -57,9 +57,9 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Network first + cache fallback
+  // Network first (bypassing stale browser HTTP cache) + cache fallback
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-store' })
       .then(response => {
         if (response && response.ok) {
           const copy = response.clone();

@@ -343,7 +343,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-02-V88-TAKEAWAY-OSH-COUNT-FIX';
+const APP_VERSION = '2026-11-02-V89-INSTANT-TAKEAWAY-LOAD';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1336,10 +1336,22 @@ async function init(){
   }catch(e){
     console.error('Initial orders migration failed',e);
   }
-  // Only active orders are needed for the live operational screens at startup.
-  // Historical paid orders are loaded lazily by report/salary/client-history screens.
-  const ordersResult = await loadActiveOrdersV2();
-  const orders = ordersResult.ok ? ordersResult.value : [];
+  // Load active orders AND today's paid orders (including takeaway orders which are paid immediately) at startup.
+  const todayStartInit = new Date(); todayStartInit.setHours(0,0,0,0);
+  const repStartInit = Number(settings && settings.reportClearedAt) || 0;
+  const paidSinceInit = repStartInit > 0 ? Math.min(repStartInit, todayStartInit.getTime()) : todayStartInit.getTime();
+  const [ordersResult, paidInitResult] = await Promise.all([
+    loadActiveOrdersV2(),
+    loadPaidOrdersSinceV2(paidSinceInit)
+  ]);
+  const ordersById = new Map();
+  if(ordersResult.ok && Array.isArray(ordersResult.value)){
+    ordersResult.value.forEach(o=>{ if(o&&o.id) ordersById.set(String(o.id), o); });
+  }
+  if(paidInitResult && paidInitResult.ok && Array.isArray(paidInitResult.value)){
+    paidInitResult.value.forEach(o=>{ if(o&&o.id) ordersById.set(String(o.id), o); });
+  }
+  const orders = Array.from(ordersById.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
