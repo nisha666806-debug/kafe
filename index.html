@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-03-V91-SCROLL-FIX';
+const APP_VERSION = '2026-11-03-V92-NO-SCHED-TAKEAWAY';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -3246,7 +3246,7 @@ async function submitScheduled(name, phone, time, deliveryType){
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
     items, initialItems, total, createdAt: Date.now(), updatedAt: Date.now(),
     createdBy: null, readyTime: time, customerName: name||'', customerPhone: phone||'',
-    deliveryType: deliveryType==='takeaway' ? 'takeaway' : 'dinein',
+    deliveryType: 'dinein',
     prepared: false
   };
   state.orders.push(order);
@@ -3532,13 +3532,6 @@ function renderScheduledOverlay(){
         <div class="field"><label>Рақами телефон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
         <div class="field"><label>Вақти омадан <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime||'')}"></div>
       </div>
-      <div style="padding:12px 20px 0;">
-        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:600;display:block;margin-bottom:6px;">Навъи фармоиш</label>
-        <div style="display:flex;gap:8px;">
-          <button type="button" class="cat-tab ${state.scheduledDeliveryType!=='takeaway'?'active':''}" data-schedtype="dinein">🍽 Дар кафе (миз)</button>
-          <button type="button" class="cat-tab ${state.scheduledDeliveryType==='takeaway'?'active':''}" data-schedtype="takeaway">🥡 Бо худ бурдан</button>
-        </div>
-      </div>
       <div class="cat-tabs">${tabs}</div>
       <div class="menu-list">${items}</div>
       <div class="receipt">
@@ -3585,9 +3578,6 @@ function attachScheduledEvents(){
   });
   document.querySelectorAll('[data-sremoveitem]').forEach(el=>{
     el.addEventListener('click', ()=>{ captureScheduledFields(); removeScheduledItem(el.dataset.sremoveitem); });
-  });
-  document.querySelectorAll('[data-schedtype]').forEach(el=>{
-    el.addEventListener('click', ()=>{ captureScheduledFields(); state.scheduledDeliveryType = el.dataset.schedtype; render(); });
   });
   const submitBtn = document.getElementById('submitScheduledBtn');
   if(submitBtn) submitBtn.addEventListener('click', ()=>{
