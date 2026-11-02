@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-11-02-V87-CUSTOM-STAFF-COMMISSION';
+const CACHE_NAME = 'kafe-shell-2026-11-02-V88-TAKEAWAY-OSH-COUNT-FIX';
 
 const APP_SHELL = [
   './',
