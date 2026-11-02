@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kafe-shell-2026-11-02-V89-INSTANT-TAKEAWAY-LOAD';
+const CACHE_NAME = 'kafe-shell-2026-11-03-V90-BATCH-UPDATES';
 
 const APP_SHELL = [
   './',

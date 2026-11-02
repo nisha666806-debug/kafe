@@ -37,19 +37,20 @@
     --shadow-md:0 4px 16px rgba(15,23,42,.08);
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;overscroll-behavior-y:contain;touch-action:pan-x pan-y;}
-  input, select, textarea, button{touch-action:manipulation;}
+  html,body{margin:0;padding:0;width:100%;max-width:100vw;overflow-x:hidden;overscroll-behavior-x:none;overscroll-behavior-y:contain;touch-action:pan-y;}
+  input, select, textarea, button{touch-action:manipulation;max-width:100%;}
   body{
     background:var(--paper);
     color:var(--ink);
     font-family:'Inter', system-ui, sans-serif;
     min-height:100vh;
     -webkit-font-smoothing:antialiased;
+    position:relative;
   }
   .mono{font-family:'Inter',sans-serif;font-variant-numeric:tabular-nums;}
   .display{font-family:'Inter',sans-serif;}
 
-  #app{max-width:1100px;margin:0 auto;padding:0 0 60px;}
+  #app{width:100%;max-width:1100px;margin:0 auto;padding:0 0 60px;overflow-x:hidden;}
 
   input:focus, select:focus, textarea:focus, button:focus-visible{
     outline:2px solid var(--blue);outline-offset:1px;
@@ -299,8 +300,26 @@
   .salary-select{padding:8px 9px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:12px;background:var(--white);}
   .salary-input{width:100px;padding:8px 9px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;}
   .salary-computed{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--text-dim);margin-left:auto;}
-  .xls-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px;font-variant-numeric:tabular-nums;}
-  .xls-table th, .xls-table td{border:1px solid var(--line);padding:9px 10px;text-align:right;}
+  .xls-table{width:100%;max-width:100%;border-collapse:collapse;font-size:12px;margin-top:10px;font-variant-numeric:tabular-nums;}
+  .xls-table th, .xls-table td{border:1px solid var(--line);padding:9px 10px;text-align:right;word-break:break-word;}
+  @media(max-width:640px){
+    .container{padding:14px 12px;}
+    .topbar{padding:10px 12px;}
+    .admin-tabs{padding:0 10px;}
+    .stat-row{gap:10px;}
+    .stat-card{min-width:calc(50% - 6px);padding:12px 14px;}
+    .stat-card .value{font-size:20px;}
+    .receipt{margin:12px 12px 16px;padding:14px;}
+    .ticket-head{padding:14px 16px;}
+    .ticket-actions{padding:0 12px 18px;}
+    .menu-list{padding:8px 12px 4px;}
+    .cat-tabs{padding:10px 12px 4px;}
+    .receipt-item-row, .item-row{flex-wrap:wrap;gap:8px;}
+    .xls-table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+    .xls-table th, .xls-table td{padding:7px 8px;font-size:11px;white-space:nowrap;}
+    .field{max-width:100%;}
+    .field input, .field select{max-width:100%;}
+  }
   .xls-table th{background:var(--paper-dim);font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:var(--text-dim);font-weight:700;}
   .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-weight:600;}
   .xls-table tr:nth-child(even) td{background:var(--paper-dim);}
@@ -343,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-02-V89-INSTANT-TAKEAWAY-LOAD';
+const APP_VERSION = '2026-11-03-V90-BATCH-UPDATES';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1028,8 +1047,8 @@ function todayKey(){
 function oshOrderedKgToday(){
   let kgTotal = 0;
   const porsiyaKg = (Number(state.settings.porsiyaGrams) || 120) / 1000;
-  const clearedAt = Number(state.settings.chefQueueClearedAt) || 0;
-  state.orders.filter(o=>isToday(o.createdAt) && (o.updatedAt||o.createdAt) > clearedAt).forEach(o=>{
+  const clearedAt = Math.max(Number(state.settings.chefQueueClearedAt)||0, reportPeriodStart());
+  state.orders.filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && !o.archived && (o.updatedAt||o.createdAt) > clearedAt).forEach(o=>{
     o.items.forEach(it=>{
       if(isOshDiscountItem(it)){
         if(it.unit==='kg') kgTotal += it.qty/1000;
@@ -1092,7 +1111,8 @@ function oshKgFromOrders(filterFn){
 function oshShiftStats(shift){
   const shiftFn=shift===1?isShift1:isShift2;
   let takeaway=0, scheduledOnly=0, waiters=0;
-  (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && shiftFn(o.createdAt)).forEach(o=>{
+  const repStart = reportPeriodStart();
+  (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && !o.archived && (!repStart || Number(o.createdAt)>repStart) && shiftFn(o.createdAt)).forEach(o=>{
     (o.items||[]).forEach(it=>{
       const kg = itemOshKg(it);
       if(kg<=0) return;
@@ -1173,34 +1193,59 @@ function oshWeightFromItems(items){
 function takeawayOshStatsForOrders(orders){
   let directKg = 0, tableExtraKg = 0, directCount = 0, tableExtraCount = 0, directRev = 0, tableExtraRev = 0, discTotal = 0;
   const taPct = takeawayOshDiscountPct();
-  (orders||[]).filter(o=>o && o.status!=='cancelled').forEach(o=>{
+  const prodMap = {};
+  const recordProduct = (it, itemRev, sourceTag)=>{
+    const cleanName = String(it && it.name || 'Маҳсулот').replace(/\s*\(иловагӣ\)\s*$/i, '').trim();
+    const key = cleanName + '|' + String(it.unit||'dona');
+    if(!prodMap[key]){
+      prodMap[key] = {name: cleanName, unit: it.unit||'dona', qty: 0, revenue: 0, isOsh: isOshDiscountItem(it), directQty: 0, extraQty: 0};
+    }
+    const q = Math.max(0, Number(it.qty)||0);
+    prodMap[key].qty += q;
+    prodMap[key].revenue += itemRev;
+    if(sourceTag==='direct') prodMap[key].directQty += q;
+    else prodMap[key].extraQty += q;
+  };
+  (orders||[]).filter(o=>o && o.status!=='cancelled' && !o.archived).forEach(o=>{
+    const pctUsed = Number(o.discountPct)!==undefined && Number(o.discountPct)>0 ? Number(o.discountPct) : (Number(o.discount)>0 ? taPct : 0);
     if(o.type==='takeaway'){
       directCount++;
-      (o.items||[]).forEach(it=>{ directKg += itemOshKg(it); });
+      (o.items||[]).forEach(it=>{
+        directKg += itemOshKg(it);
+        const sub = lineTotal({unit:it.unit, price:it.price}, it.qty);
+        const disc = isOshDiscountItem(it) && pctUsed>0 ? roundMoney(sub * (pctUsed/100)) : 0;
+        const rev = Math.max(0, sub - disc);
+        recordProduct(it, rev, 'direct');
+      });
       if(o.status==='paid'){
         directRev += Number(o.total)||0;
         discTotal += Number(o.discount)||0;
       }
     } else if(o.type==='scheduled' && o.deliveryType==='takeaway'){
-      (o.items||[]).forEach(it=>{ directKg += itemOshKg(it); });
+      (o.items||[]).forEach(it=>{
+        directKg += itemOshKg(it);
+        const sub = lineTotal({unit:it.unit, price:it.price}, it.qty);
+        recordProduct(it, sub, 'direct');
+      });
     } else {
       const extraItems = (o.items||[]).filter(it=>isTaKey(it.menuId) || it.isExtra || it.takeawayOsh);
       if(extraItems.length){
         tableExtraCount++;
         extraItems.forEach(it=>{
           tableExtraKg += itemOshKg(it);
+          const sub = lineTotal({unit:it.unit, price:it.price}, it.qty);
+          const disc = isOshDiscountItem(it) && pctUsed>0 ? roundMoney(sub * (pctUsed/100)) : 0;
+          const rev = Math.max(0, sub - disc);
+          recordProduct(it, rev, 'extra');
           if(o.status==='paid'){
-            const sub = lineTotal({unit:it.unit, price:it.price}, it.qty);
-            const disc = isOshDiscountItem(it) && (Number(o.discount)>0 || taPct>0)
-              ? roundMoney(sub * ((Number(o.discountPct)||taPct)/100))
-              : 0;
-            tableExtraRev += Math.max(0, sub - disc);
+            tableExtraRev += rev;
           }
         });
         if(o.status==='paid') discTotal += Number(o.discount)||0;
       }
     }
   });
+  const soldProducts = Object.values(prodMap).sort((a,b)=>b.revenue - a.revenue);
   return {
     directKg,
     tableExtraKg,
@@ -1210,7 +1255,8 @@ function takeawayOshStatsForOrders(orders){
     totalRevenue: directRev + tableExtraRev,
     directRevenue: directRev,
     tableExtraRevenue: tableExtraRev,
-    totalDiscount: discTotal
+    totalDiscount: discTotal,
+    soldProducts
   };
 }
 function oshWeightForShift(orders, shift){
@@ -1891,7 +1937,7 @@ async function saveTicket(sendFlag, opts){
   if(editedByCashier){
     try{ await logActivity('Кассир чекро тағйир дод: '+orderLabel(order)+' → '+fmtMoney(total)); }catch(e){}
   }
-  if(!opts.silent) showToast(editedByCashier ? '✏️ Тағйироти чек сабт шуд' : (sendFlag ? '🍚 Ба ошпаз фиристода шуд' : 'Фармоиш захира шуд'));
+  if(!opts.silent) showToast(editedByCashier ? '✏️ Тағйироти чек сабт шуд' : 'Фармоиш захира шуд');
   if(!opts.keepOpen) closeTicket();
   return true;
   }catch(e){
@@ -1927,12 +1973,15 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
       }
 
       const now=Date.now();
+      const isSchedTakeaway = remote.type==='scheduled' && remote.deliveryType==='takeaway';
       const paid={
         ...remote,
+        type: isSchedTakeaway ? 'takeaway' : remote.type,
+        prepared: (remote.type==='takeaway' || isSchedTakeaway) ? true : remote.prepared,
         status:'paid',
         paidAt:now,
         paidBy:actingUsername(),
-        receivedAt: remote.type==='scheduled' ? now : (remote.receivedAt || null),
+        receivedAt: (remote.type==='scheduled' || remote.type==='takeaway') ? now : (remote.receivedAt || null),
         cashAmount:cash,
         noncashAmount:noncash,
         paymentMethod:cash>0&&noncash>0?'mixed':(noncash>0?'noncash':'cash'),
@@ -2110,6 +2159,7 @@ function playChefAlertSound(){
 // Note: a Tajik voice is rarely available on phones, so this uses the closest available voice
 // (usually Russian, since it shares the Cyrillic alphabet) — pronunciation may sound accented.
 function speakOrderAlert(order, baseText){
+  return; // Матни огоҳии овозии ошпаз аз барнома хориҷ карда шуд
   try{
     if(!('speechSynthesis' in window)) return;
     const lead = (baseText || 'Фармоиши нав').trim();
@@ -2799,7 +2849,6 @@ function buildTableCards(){
       extra += `<span class="reserve-detail" style="color:${mins>=60?'var(--brick)':'#8a7c64'};">⏱ ${mins < 60 ? mins+' дақ' : Math.floor(mins/60)+' соат '+(mins%60)+' дақ'}</span>`;
       if(order.createdBy) extra += `<span class="reserve-detail">👤 ${escapeHtml(order.createdBy)}</span>`;
       extra += renderScheduledOshCardBadge(order);
-      if(order.type!=='takeaway' && order.type!=='scheduled' && !order.sentToKitchen) extra += `<span class="reserve-detail" style="color:var(--brick);">⏳ ба ошпаз нафиристода шуд</span>`;
     }
     const srcKind = occ ? orderSourceKind(order) : '';
     const srcClass = srcKind==='own' ? 'waiter-own' : (srcKind==='sched' ? 'from-scheduled' : '');
@@ -2893,7 +2942,8 @@ function attachWaiterEvents(){
 /* ---------- Cashier view ---------- */
 function renderCashier(){
   const occCount = occupiedTableCount();
-  const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) && o.status!=='cancelled')
+  const repStart = reportPeriodStart();
+  const myTakeaway = state.orders.filter(o=>o.type==='takeaway' && isToday(o.createdAt) && o.status!=='cancelled' && !o.archived && (!repStart || Number(o.createdAt)>repStart))
     .sort((a,b)=>b.createdAt-a.createdAt);
   const takeawayHtml = myTakeaway.length ? myTakeaway.map(o=>{
     const oshKg = oshWeightFromItems(o.items);
@@ -2905,7 +2955,7 @@ function renderCashier(){
       </div>
       <div style="text-align:right;">
         <div>${fmtMoney(o.total)}</div>
-        <div class="l2">${o.status==='active' ? '⏳ интизори пардохт' : (o.prepared?'✅ тайёр':'🍚 дар навбат')}</div>
+        <div class="l2">${o.status==='active' ? '⏳ интизори пардохт' : '✅ пардохт ва қабул шуд'}</div>
       </div>
     </div>`;
   }).join('') : '';
@@ -2920,21 +2970,21 @@ function renderCashier(){
       </div>
       <div style="text-align:right;">
         <div>${fmtMoney(o.total)}</div>
-        <div class="l2">${o.prepared?'тайёр':'дар навбат'}</div>
+        <div class="l2">⏳ интизори пардохт</div>
       </div>
     </div>`).join('') : '';
 
   const pendingScheduledTakeaway = state.orders.filter(o=>o.type==='scheduled' && o.status==='active' && o.deliveryType==='takeaway')
     .sort((a,b)=>(a.readyTime||'').localeCompare(b.readyTime||''));
   const scheduledTakeawayHtml = pendingScheduledTakeaway.length ? pendingScheduledTakeaway.map(o=>`
-    <div class="receipt-item-row">
+    <div class="receipt-item-row" data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;">
       <div>
         <div class="l1">🥡 ${orderLabel(o)}</div>
         <div class="l2">${o.items.map(i=>formatQtyLabel(i)).join(', ')}</div>
       </div>
       <div style="text-align:right;display:flex;align-items:center;gap:10px;">
         <div>${fmtMoney(o.total)}</div>
-        <button class="btn-ghost" style="padding:6px 12px;font-size:12px;" data-sendschedtakeaway="${o.id}">🍚 Ба ошпаз фиристодан</button>
+        <button class="btn-primary" style="padding:6px 12px;font-size:12px;flex:none;" data-vieworder="${o.id}" data-viewmode="pay">💵 Пардохт ва қабул</button>
       </div>
     </div>`).join('') : '';
 
@@ -2958,7 +3008,7 @@ function renderCashier(){
   }
   if(cashierTab==='takeaway'){
     const taPct = takeawayOshDiscountPct();
-    const todayOrders = (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled');
+    const todayOrders = (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && !o.archived && (!repStart || Number(o.createdAt)>repStart));
     const taStats = takeawayOshStatsForOrders(todayOrders);
     const taPaid = myTakeaway.filter(o=>o.status==='paid');
     const tableWithExtraOrders = todayOrders.filter(o=>o.type!=='takeaway' && o.type!=='scheduled' && (o.items||[]).some(it=>isTaKey(it.menuId)||it.isExtra||it.takeawayOsh))
@@ -2966,34 +3016,60 @@ function renderCashier(){
     const tableExtraHtml = tableWithExtraOrders.map(o=>{
       const exItems = (o.items||[]).filter(it=>isTaKey(it.menuId)||it.isExtra||it.takeawayOsh);
       const exOshKg = oshWeightFromItems(exItems);
+      const pctUsed = Number(o.discountPct)!==undefined && Number(o.discountPct)>0 ? Number(o.discountPct) : (Number(o.discount)>0 ? taPct : 0);
+      const exSum = exItems.reduce((s,it)=>{
+        const sub = lineTotal({unit:it.unit, price:it.price}, it.qty);
+        const disc = isOshDiscountItem(it) && pctUsed>0 ? roundMoney(sub*(pctUsed/100)) : 0;
+        return s + Math.max(0, sub - disc);
+      }, 0);
       return `<div class="receipt-item-row" ${o.status==='active' ? `data-vieworder="${o.id}" data-viewmode="pay" style="cursor:pointer;"` : ''}>
         <div>
-          <div class="l1">${orderLabel(o)} · <span style="color:var(--brick);font-weight:700;">🥡 Қисми иловагӣ (собой)${exOshKg>0 ? ` · 🍚 ${exOshKg.toFixed(2)} кг ош` : ''}</span></div>
+          <div class="l1">${orderLabel(o)} · <span style="color:var(--brick);font-weight:700;">🥡 Фурӯши иловагӣ (собой)${exOshKg>0 ? ` · 🍚 ${exOshKg.toFixed(2)} кг ош` : ''}</span></div>
           <div class="l2">${exItems.map(i=>formatQtyLabel(i)).join(', ')}</div>
         </div>
         <div style="text-align:right;">
+          <div>${fmtMoney(exSum)}</div>
           <div class="l2">${o.status==='paid' ? '✅ пардохт шуд' : '⏳ дар миз фаъол'}</div>
         </div>
       </div>`;
     }).join('');
+    const soldProductsRows = (taStats.soldProducts||[]).map(p=>{
+      const qtyLbl = p.unit==='kg' ? (p.qty>=1000 ? (Math.round((p.qty/1000)*100)/100)+' кг' : Math.round(p.qty)+' г') : (p.qty+' дона');
+      return `<tr>
+        <td>${escapeHtml(p.name)}${p.isOsh ? ' <span style="color:var(--brick);font-weight:700;">(ош)</span>' : ''}</td>
+        <td><b>${qtyLbl}</b></td>
+        <td class="total-cell">${fmtMoney(p.revenue)}</td>
+      </tr>`;
+    }).join('');
+    const soldProductsTableHtml = `
+      <div class="section-title" style="margin-top:20px;">📦 Рӯйхати маҳсулоти фурӯхташуда (собой ва иловагӣ)</div>
+      ${soldProductsRows ? `
+        <table class="xls-table">
+          <thead><tr><th>Маҳсулот</th><th>Миқдор</th><th>Маблағ</th></tr></thead>
+          <tbody>
+            ${soldProductsRows}
+            <tr><td><b>Ҳамагӣ</b></td><td><b>${taStats.soldProducts.length} намуд</b></td><td class="total-cell"><b>${fmtMoney(taStats.totalRevenue)}</b></td></tr>
+          </tbody>
+        </table>
+      ` : `<div class="empty-state" style="padding:20px;">Ҳоло дар бахши собой ва иловагӣ чизе фурӯхта нашудааст</div>`}`;
     return `
     <div class="container">
       ${tabBar}
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
-        <button class="btn-primary" id="openTakeawayBtn" style="padding:12px 20px;background:var(--brick);">🥡 + Фармоиши собой</button>
-        <span style="font-size:13px;color:#6b5f4d;">Тахфифи оши собой: <b style="color:var(--olive);">${taPct}%</b> · танҳо ба ош (нӯшокӣ, нон, лаълӣ ва ғ. — бе тахфиф)</span>
+        <button class="btn-primary" id="openTakeawayBtn" style="padding:12px 20px;background:var(--brick);flex:none;">🥡 + Фармоиши собой</button>
+        ${taPct>0 ? `<span style="font-size:13px;color:#6b5f4d;">Тахфифи оши собой: <b style="color:var(--olive);">${taPct}%</b></span>` : ''}
       </div>
       ${oshRemainingBadge()}
       <div class="stat-row">
         <div class="stat-card"><div class="label">🍚 Оши собой (имрӯз)</div><div class="value" style="color:var(--brick);">${taStats.totalKg.toFixed(2)} кг</div><div style="font-size:11px;color:#64748B;margin-top:4px;">Мустақим: ${taStats.directKg.toFixed(2)} кг · Дар миз: ${taStats.tableExtraKg.toFixed(2)} кг</div></div>
-        <div class="stat-card"><div class="label">🥡 Чекҳои собой</div><div class="value">${taPaid.length}${taStats.tableExtraCount ? ` <span style="font-size:13px;color:#64748B;">(+${taStats.tableExtraCount} миз)</span>` : ''}</div></div>
-        <div class="stat-card"><div class="label">💵 Маблағи собой</div><div class="value">${fmtMoney(taStats.totalRevenue)}</div></div>
-        <div class="stat-card"><div class="label">🏷 Тахфиф дода шуд</div><div class="value" style="color:var(--olive);">${fmtMoney(taStats.totalDiscount)}</div></div>
+        <div class="stat-card"><div class="label">🥡 Чекҳои собой ва иловагӣ</div><div class="value">${taPaid.length}${taStats.tableExtraCount ? ` <span style="font-size:13px;color:#64748B;">(+${taStats.tableExtraCount} миз)</span>` : ''}</div></div>
+        <div class="stat-card"><div class="label">💵 Маблағи фурӯш (собой + иловагӣ)</div><div class="value">${fmtMoney(taStats.totalRevenue)}</div></div>
       </div>
-      ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор — собой (ҳанӯз ба ошпаз нафиристода)</div>${scheduledTakeawayHtml}` : ''}
-      <div class="section-title" style="margin-top:24px;">🥡 Фармоишҳои собойи имрӯза</div>
-      ${myTakeaway.length ? takeawayHtml : `<div class="empty-state">Ҳоло фармоиши собой нест</div>`}
-      ${tableWithExtraOrders.length ? `<div class="section-title" style="margin-top:24px;">🍽 Собой дар дохили чеки мизҳо (қисми иловагӣ)</div>${tableExtraHtml}` : ''}
+      ${soldProductsTableHtml}
+      ${pendingScheduledTakeaway.length ? `<div class="section-title" style="margin-top:24px;">🕐 Фармоишҳои вақтдор — собой (интизори пардохт)</div>${scheduledTakeawayHtml}` : ''}
+      <div class="section-title" style="margin-top:24px;">🥡 Чекҳои собойи мустақим</div>
+      ${myTakeaway.length ? takeawayHtml : `<div class="empty-state" style="padding:24px;">Ҳоло чеки собойи мустақим нест</div>`}
+      ${tableWithExtraOrders.length ? `<div class="section-title" style="margin-top:24px;">🍽 Фурӯшҳои иловагӣ дар дохили чеки мизҳо</div>${tableExtraHtml}` : ''}
     </div>`;
   }
 
@@ -3093,14 +3169,15 @@ async function submitTakeaway(cashAmount, noncashAmount){
     cashAmount: cash, noncashAmount: noncash,
     paymentMethod: cash>0 && noncash>0 ? 'mixed' : (noncash>0 ? 'noncash' : 'cash'),
     receivedAt: Date.now(),
-    prepared: false
+    prepared: true,
+    sentToKitchen: false
   };
   state.orders.push(order);
   state.__lastKnownOrderIds = state.__lastKnownOrderIds || new Set();
   state.__lastKnownOrderIds.add(order.id);
   await deductForOrderDelta(order, items);
   await saveOrderV2(order); // save only this one order, not the whole array
-  showToast('Фармоиш пардохт шуд ва ба ошпаз фиристода шуд');
+  showToast('Фармоиши собой пардохт ва қабул шуд');
   closeTakeaway();
 }
 
@@ -3649,17 +3726,17 @@ function renderChef(){
     if((o.updatedAt||o.createdAt) <= chefClearedAt) return false;
     if(o.prepared) return false;
     if(!hasOsh(o)) return false;
-    if(o.type==='takeaway') return o.status==='paid' || o.sentToKitchen===true;
-    if(o.type==='scheduled') return false; // hidden until sent to kitchen (assigned to a table, or sent as takeaway)
-    return o.status==='active' && o.sentToKitchen===true;
+    if(o.type==='takeaway') return false; // Закази собой ба навбати ошпаз партофта намешавад
+    if(o.type==='scheduled') return false;
+    return o.status==='active';
   }).sort((a,b)=>a.createdAt-b.createdAt);
   const done = state.orders.filter(o=>{
     if((o.updatedAt||o.createdAt) <= chefClearedAt) return false;
     if(!o.prepared) return false;
     if(!hasOsh(o)) return false;
-    if(o.type==='takeaway') return isToday(o.createdAt);
+    if(o.type==='takeaway') return false;
     if(o.type==='scheduled') return false;
-    return o.status==='active' && o.sentToKitchen===true;
+    return o.status==='active';
   }).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
 
   const hasStock = state.oshStock && state.oshStock.date === todayKey();
@@ -3721,7 +3798,6 @@ function renderChef(){
     const newArrivals = pending.filter(o=>!state.seenPendingIds.has(o.id));
     if(newArrivals.length){
       playChefAlertSound();
-      newArrivals.forEach(o=> speakOrderAlert(o, state.settings.chefAlertText));
     }
     state.seenPendingIds = new Set(currentIds);
   }
@@ -3962,13 +4038,8 @@ function renderTicketOverlay(){
     </div>` : `<div style="padding:8px 20px 0;"><button class="btn-ghost" style="color:var(--brick);border-color:var(--brick);width:100%;" id="cancelOrderBtn">✕ Бекор кардани фармоиш (мизоҷ рад кард)</button></div>`
   ) : '';
   if(mode==='edit'){
-    const alreadySent = currentOrder && currentOrder.sentToKitchen;
-    const statusLine = currentOrder
-      ? `<p style="padding:0 20px;margin:-6px 0 8px;font-size:12px;color:${alreadySent?'var(--olive)':'#9c8f78'};">${alreadySent?'✅ Ба ошпаз фиристода шудааст':'⏳ Ҳанӯз ба ошпаз фиристода нашудааст'}</p>`
-      : '';
-    actions = `${statusLine}<div class="ticket-actions" style="gap:8px;">
-      <button type="button" class="btn-ghost" style="flex:1;" id="saveTicketBtn" ${disabled}>Захира</button>
-      <button type="button" class="btn-pay" style="flex:1;" id="sendKitchenBtn" ${disabled}>🍚 Ба ошпаз фиристодан</button>
+    actions = `<div class="ticket-actions" style="gap:8px;">
+      <button type="button" class="btn-primary" style="flex:1;" id="saveTicketBtn" ${disabled}>💾 Захира</button>
     </div>${cancelBlock}`;
   } else if(mode==='pay'){
     const dirty = cashierEditing && ticketDraftDirty(currentOrder);
@@ -4092,12 +4163,6 @@ function attachTicketEvents(){
     });
     const saveBtn = document.getElementById('saveTicketBtn');
     if(saveBtn) saveBtn.addEventListener('click', async e=>{
-      e.preventDefault();
-      e.stopPropagation();
-      await saveTicket(false);
-    });
-    const sendKitchenBtn = document.getElementById('sendKitchenBtn');
-    if(sendKitchenBtn) sendKitchenBtn.addEventListener('click', async e=>{
       e.preventDefault();
       e.stopPropagation();
       await saveTicket(true);
@@ -4754,39 +4819,55 @@ function renderAdminMenu(){
 }
 
 async function clearAllReportHistory(){
-  const now=Date.now();
-  const actor=actingUsername()||'?';
-  const paidToClear=(state.orders||[]).filter(o=>o.status==='paid' && o.archived!==true && o.paidAt);
+  const now = Date.now();
+  // Keep ONLY currently active table orders and active scheduled orders; delete all paid/takeaway/cancelled orders
+  const ordersToDelete = (state.orders||[]).filter(o => o.status !== 'active' || o.type === 'takeaway');
+  const localIdsToDelete = new Set(ordersToDelete.map(o => String(o.id)));
 
-  // First publish the reset marker so every device knows the report cutoff.
-  // The marker is shared through Firebase settings and is also kept in the local state.
-  state.settings={...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now};
-  const settingsOk=await saveSettings(state.settings);
-  if(settingsOk===false) return;
-
-  // Archive only the paid orders that existed at the moment of the clear.
-  const ids=new Set(paidToClear.map(o=>o.id));
-  state.orders=(state.orders||[]).map(o=>ids.has(o.id)
-    ? {...o, archived:true, archivedAt:now, archivedBy:actor, updatedAt:now}
-    : o);
-  // Save each archived order individually (not the whole array) to minimise writes
-  const toSave=state.orders.filter(o=>ids.has(o.id));
-  for(const o of toSave){ await saveOrderV2(o); }
-  const ok=true;
-
-  // Clear all manual bonuses so salary resets to zero along with the report.
+  // 1. Update local state and re-render IMMEDIATELY so the button responds in < 10ms!
+  state.orders = (state.orders||[]).filter(o => !localIdsToDelete.has(String(o.id)));
+  state.__lastKnownOrderIds = new Set(state.orders.map(o => o.id));
+  state.settings = {...state.settings, reportClearedAt:now, reportClosedAt:now, salaryResetAt:now, oshTotalResetAt:now};
   state.bonuses = [];
-  await saveBonuses([]);
-
-  state.dailyClosures=(state.dailyClosures||[]).filter(x=>x.kind==='wagePayment');
-  await saveDailyClosures(state.dailyClosures);
-  state.reportArchive={days:[],months:{}};
-  await saveReportArchive();
-  state.dailyReportRows=[];
-  state.confirmClearReport=false;
+  state.expenses = [];
+  state.dailyClosures = (state.dailyClosures||[]).filter(x=>x.kind==='wagePayment');
+  state.reportArchive = {days:[],months:{}};
+  state.dailyReportRows = [];
+  state.confirmClearReport = false;
   render();
-  await logActivity('Ҳисобот, бонусҳо ва маоши кормандон пурра пок карда шуд');
-  showToast('Ҳисобот ва маош пурра пок шуд');
+  showToast('Ҳисобот ва собой пурра пок шуд');
+
+  // 2. Delete all non-active / takeaway orders from Firestore in fast batches + save reset state in parallel
+  const batchDeleteOrdersFromDb = async ()=>{
+    if(!db) return;
+    try{
+      const snap = await ordersCollectionRef().get();
+      const refsToDelete = [];
+      snap.forEach(d=>{
+        const data = d.data() || {};
+        if(data.status !== 'active' || data.type === 'takeaway' || localIdsToDelete.has(String(d.id))){
+          refsToDelete.push(d.ref);
+        }
+      });
+      for(let i=0; i<refsToDelete.length; i+=400){
+        const batch = db.batch();
+        refsToDelete.slice(i, i+400).forEach(ref => batch.delete(ref));
+        await batch.commit();
+      }
+    }catch(e){
+      console.error('batchDeleteOrdersFromDb failed', e);
+    }
+  };
+
+  await Promise.all([
+    saveSettings(state.settings),
+    batchDeleteOrdersFromDb(),
+    saveBonuses([]),
+    saveExpenses([]),
+    saveDailyClosures(state.dailyClosures),
+    saveReportArchive()
+  ]);
+  logActivity('Ҳисобот, собой ва чекҳои пардохтшуда аз база пурра пок карда шуд').catch(()=>{});
 }
 
 function wagePaymentsForDate(date){
@@ -5434,15 +5515,6 @@ function renderAdminSettings(){
 
   <div class="settings-form" style="margin-top:18px;">
     <div class="field">
-      <label>Матни огоҳии овозии ошпаз</label>
-      <input type="text" id="chefAlertTextInput" value="${escapeHtml(state.settings.chefAlertText||'Фармоиши нав')}" style="width:220px;">
-    </div>
-    <p style="font-size:12px;color:#9c8f78;margin:-8px 0 0;">Ҳангоми фармоиши нав, экрани ошпаз бо ин матн (баъд аз он миз/навъ илова мешавад) бо овоз хабар медиҳад.</p>
-    <button class="btn-ghost" style="flex:none;padding:9px 16px;align-self:flex-start;" id="saveAlertTextBtn">Сабт кардан</button>
-  </div>
-
-  <div class="settings-form" style="margin-top:18px;">
-    <div class="field">
       <label>Ҳаққи хизматрасонӣ (%)</label>
       <input type="number" id="serviceChargeInput" value="${state.settings.serviceChargePct||0}" min="0" max="100" step="1" style="width:120px;">
     </div>
@@ -6066,14 +6138,6 @@ function attachAdminEvents(){
     if(saveTakeawayDiscountBtn) saveTakeawayDiscountBtn.addEventListener('click', async ()=>{
       const pct = Math.max(0, Math.min(100, Number(document.getElementById('takeawayDiscountInput').value) || 0));
       state.settings = {...state.settings, takeawayDiscountPct: pct};
-      await saveSettings(state.settings);
-      showToast('Сабт шуд');
-      render();
-    });
-    const saveAlertTextBtn = document.getElementById('saveAlertTextBtn');
-    if(saveAlertTextBtn) saveAlertTextBtn.addEventListener('click', async ()=>{
-      const chefText = (document.getElementById('chefAlertTextInput').value || 'Фармоиши нав').trim();
-      state.settings = {...state.settings, chefAlertText: chefText};
       await saveSettings(state.settings);
       showToast('Сабт шуд');
       render();
