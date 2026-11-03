@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-03-V92-NO-SCHED-TAKEAWAY';
+const APP_VERSION = '2026-11-03-V93-PAYMENT-FIX';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -509,10 +509,19 @@ async function loadOrdersV2(){
     return {ok:true,value:orders};
   }catch(e){console.error('loadOrdersV2 failed',e);return {ok:false,value:null};}
 }
+function stripUndefinedDeep(v){
+  if(Array.isArray(v)) return v.map(stripUndefinedDeep);
+  if(v && typeof v==='object' && Object.getPrototypeOf(v)===Object.prototype){
+    const out={};
+    Object.keys(v).forEach(k=>{ if(v[k]!==undefined) out[k]=stripUndefinedDeep(v[k]); });
+    return out;
+  }
+  return v;
+}
 async function saveOrderV2(order){
   if(!db || !order || !order.id) return false;
   const ref=orderDocRef(order.id);
-  const clean={...order};
+  const clean=stripUndefinedDeep({...order});
   delete clean._migratedAt;
   clean.updatedAt=Date.now();
 
@@ -1977,7 +1986,7 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
       const paid={
         ...remote,
         type: isSchedTakeaway ? 'takeaway' : remote.type,
-        prepared: (remote.type==='takeaway' || isSchedTakeaway) ? true : remote.prepared,
+        prepared: (remote.type==='takeaway' || isSchedTakeaway) ? true : !!remote.prepared,
         status:'paid',
         paidAt:now,
         paidBy:actingUsername(),
@@ -1988,8 +1997,9 @@ async function commitPaidOrderAtomic(orderId, cashAmount, noncashAmount){
         lockedAt:now,
         updatedAt:now
       };
-      tx.set(ref,paid,{merge:true});
-      return {ok:true,order:paid};
+      const paidClean=stripUndefinedDeep(paid);
+      tx.set(ref,paidClean,{merge:true});
+      return {ok:true,order:paidClean};
     });
   }catch(e){
     console.error('commitPaidOrderAtomic failed:',e);
