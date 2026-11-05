@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-03-V93-PAYMENT-FIX';
+const APP_VERSION = '2026-11-06-V94-OSH-SHIFTS-AND-LOCK';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -998,6 +998,7 @@ let state = {
   scheduledPhone:'',
   scheduledTime:'',
   scheduledDeliveryType:'dinein',
+  scheduledOshShift:1,
   viewingOrderId:null,
   viewingMode:null,
   previewUsername:null,     // when admin is previewing AS a specific staff account
@@ -1117,26 +1118,65 @@ function oshKgFromOrders(filterFn){
   });
   return kg;
 }
+function shiftForTimeStr(timeStr){
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr||'').trim());
+  if(!m) return null;
+  const mins = Number(m[1])*60 + Number(m[2]);
+  for(let i=1;i<=2;i++){
+    const c=shiftConfig(i),a=shiftTimeMinutes(c.start),b=shiftTimeMinutes(c.end);
+    if(a===b) continue;
+    if((a<b && mins>=a && mins<b) || (a>b && (mins>=a || mins<b))) return i;
+  }
+  const s1End = shiftTimeMinutes(shiftConfig(1).end) || (17*60+30);
+  return mins < s1End ? 1 : 2;
+}
+function activeOshShift(){
+  if(state.oshStock && state.oshStock.date===todayKey()){
+    const sh = Number(state.oshStock.activeShift);
+    if(sh===1 || sh===2) return sh;
+  }
+  return currentShift();
+}
+function orderOshShift(o){
+  if(!o) return 1;
+  const explicit = Number(o.oshShift);
+  if(explicit===1 || explicit===2) return explicit;
+  if((o.type==='scheduled' || o.fromScheduled) && o.readyTime){
+    const byReady = shiftForTimeStr(o.readyTime);
+    if(byReady===1 || byReady===2) return byReady;
+  }
+  return shiftForTimestamp(o.createdAt || Date.now());
+}
+function isOrderInTodayOshScope(o){
+  if(!o || o.status==='cancelled' || o.archived) return false;
+  const repStart = Math.max(reportPeriodStart(), Number(state.settings && state.settings.oshTotalResetAt)||0);
+  if(repStart && Number(o.createdAt)<=repStart && o.status!=='active') return false;
+  if(o.status==='active') return true;
+  return isToday(o.createdAt) || (o.paidAt && isToday(o.paidAt));
+}
 function oshShiftStats(shift){
-  const shiftFn=shift===1?isShift1:isShift2;
   let takeaway=0, scheduledOnly=0, waiters=0;
-  const repStart = reportPeriodStart();
-  (state.orders||[]).filter(o=>isToday(o.createdAt) && o.status!=='cancelled' && !o.archived && (!repStart || Number(o.createdAt)>repStart) && shiftFn(o.createdAt)).forEach(o=>{
+  let takeawayCount=0, scheduledCount=0, waiterCount=0;
+  (state.orders||[]).filter(o=>isOrderInTodayOshScope(o) && orderOshShift(o)===shift).forEach(o=>{
+    let hasTa=false, hasSched=false, hasWaiter=false;
     (o.items||[]).forEach(it=>{
       const kg = itemOshKg(it);
       if(kg<=0) return;
-      if(isTakeawayOrderItem(o, it)) takeaway += kg;
-      else if(o.type==='scheduled') scheduledOnly += kg;
-      else waiters += kg;
+      if(isTakeawayOrderItem(o, it)){ takeaway += kg; hasTa=true; }
+      else if(o.type==='scheduled' || o.fromScheduled){ scheduledOnly += kg; hasSched=true; }
+      else { waiters += kg; hasWaiter=true; }
     });
+    if(hasTa) takeawayCount++;
+    if(hasSched) scheduledCount++;
+    if(hasWaiter) waiterCount++;
   });
   const scheduled = takeaway + scheduledOnly;
   const total = takeaway + scheduledOnly + waiters;
   const hasStock = state.oshStock && state.oshStock.date===todayKey();
   const stock = hasStock ? normalizeOshStock(state.oshStock) : {lunchKg:0, eveningKg:0};
   const cooked = shift===1 ? (Number(stock.lunchKg)||0) : (Number(stock.eveningKg)||0);
-  const remaining = Math.max(0, cooked - total);
-  return {cooked, takeaway, scheduledOnly, scheduled, waiters, total, remaining};
+  const remaining = cooked - total;
+  return {cooked, takeaway, scheduledOnly, scheduled, waiters, total, remaining, takeawayCount, scheduledCount, waiterCount};
 }
 function renderOshShiftTable(){
   const s1=oshShiftStats(1),s2=oshShiftStats(2);
@@ -1188,11 +1228,13 @@ function normalizeOshStock(stock){
   const lunchKg = Number(x.lunchKg);
   const eveningKg = Number(x.eveningKg);
   const hasShiftFields = Object.prototype.hasOwnProperty.call(x,'lunchKg') || Object.prototype.hasOwnProperty.call(x,'eveningKg');
+  const actShift = Number(x.activeShift);
   return {
     date: x.date || '',
     kg: hasShiftFields ? Math.max(0, (Number.isFinite(lunchKg)?lunchKg:0) + (Number.isFinite(eveningKg)?eveningKg:0)) : legacyKg,
     lunchKg: hasShiftFields ? Math.max(0, Number.isFinite(lunchKg)?lunchKg:0) : legacyKg,
-    eveningKg: hasShiftFields ? Math.max(0, Number.isFinite(eveningKg)?eveningKg:0) : 0
+    eveningKg: hasShiftFields ? Math.max(0, Number.isFinite(eveningKg)?eveningKg:0) : 0,
+    activeShift: (actShift===1 || actShift===2) ? actShift : currentShift()
   };
 }
 function oshShiftForTimestamp(ts){return shiftForTimestamp(ts)===1?'lunch':'evening';}
@@ -1334,20 +1376,25 @@ function oshRemainingBadge(){
   const s1 = oshShiftStats(1), s2 = oshShiftStats(2);
   const totalTakeawayKg = s1.takeaway + s2.takeaway;
   const totalWaitersKg = s1.waiters + s2.waiters;
+  const totalSchedKg = s1.scheduledOnly + s2.scheduledOnly;
   const totalAllKg = s1.total + s2.total;
+  const actSh = activeOshShift();
   if(!hasStock){
-    return `<div style="display:flex;flex-wrap:wrap;gap:12px;padding:8px 14px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;margin:0 0 10px;font-size:12px;">
-      <span>🍚 <b>Ҳамагӣ оши имрӯз:</b> ${totalAllKg.toFixed(2)} кг</span>
-      <span style="color:var(--brick);">🥡 <b>Оши собой:</b> ${totalTakeawayKg.toFixed(2)} кг</span>
-      <span>🍽 <b>Дар мизҳо:</b> ${totalWaitersKg.toFixed(2)} кг</span>
+    return `<div style="display:flex;flex-wrap:wrap;gap:12px;padding:10px 14px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;margin:0 0 12px;font-size:12px;align-items:center;">
+      <span>🍚 <b>Оши рафта (имрӯз):</b> ${totalAllKg.toFixed(2)} кг</span>
+      <span>🕐 <b>Брон:</b> ${totalSchedKg.toFixed(2)} кг</span>
+      <span>🍽 <b>Мизҳо:</b> ${totalWaitersKg.toFixed(2)} кг</span>
+      <span style="color:var(--brick);">🥡 <b>Собой:</b> ${totalTakeawayKg.toFixed(2)} кг</span>
+      <span style="color:#9c8f78;">(Миқдори оши пухташуда дар бахши «🍚 Ош / Бастҳо» ворид нашудааст)</span>
     </div>`;
   }
   const stock = normalizeOshStock(state.oshStock);
   const lr = stock.lunchKg - s1.total, er = stock.eveningKg - s2.total;
-  return `<div style="display:flex;flex-wrap:wrap;gap:12px;padding:8px 14px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;margin:0 0 10px;font-size:12px;">
-    <span>☀️ <b>Нисфирӯзӣ:</b> ${lr.toFixed(2)} кг боқӣ <span style="color:#64748B;">(рафт: ${s1.total.toFixed(2)} кг)</span></span>
-    <span>🌙 <b>Шом:</b> ${er.toFixed(2)} кг боқӣ <span style="color:#64748B;">(рафт: ${s2.total.toFixed(2)} кг)</span></span>
-    <span style="color:var(--brick);">🥡 <b>Оши собой (имрӯз):</b> ${totalTakeawayKg.toFixed(2)} кг</span>
+  const totRem = (stock.lunchKg + stock.eveningKg) - totalAllKg;
+  return `<div style="display:flex;flex-wrap:wrap;gap:12px;padding:10px 14px;background:var(--card);border:1.5px solid var(--line);border-radius:10px;margin:0 0 12px;font-size:12px;align-items:center;">
+    <span style="padding:3px 8px;border-radius:6px;background:${actSh===1?'var(--blue-tint)':'transparent'};">☀️ <b>Басти 1:</b> <b style="color:${lr<=0?'var(--brick)':'var(--olive)'};">${lr.toFixed(2)} кг боқӣ</b> <span style="color:#64748B;">(аз ${stock.lunchKg.toFixed(1)} кг · рафт ${s1.total.toFixed(2)} кг)</span></span>
+    <span style="padding:3px 8px;border-radius:6px;background:${actSh===2?'var(--blue-tint)':'transparent'};">🌙 <b>Басти 2:</b> <b style="color:${er<=0?'var(--brick)':'var(--olive)'};">${er.toFixed(2)} кг боқӣ</b> <span style="color:#64748B;">(аз ${stock.eveningKg.toFixed(1)} кг · рафт ${s2.total.toFixed(2)} кг)</span></span>
+    <span>🍚 <b>Умумӣ боқӣ:</b> <b style="color:${totRem<=0?'var(--brick)':'var(--ink)'};">${totRem.toFixed(2)} кг</b></span>
   </div>`;
 }
 function oshWeightForOrdersTab(){
@@ -1637,7 +1684,15 @@ function openTable(t){
   }
   if(state.role==='cashier' && !existing){ showToast('Ин миз озод аст — фармоише нест'); return; }
   if(state.role==='admin' && !existing){ showToast('Ин миз озод аст'); return; }
-  state.ticketMode = state.role==='waiter' ? 'edit' : (state.role==='cashier' ? 'pay' : 'view');
+  if(state.role==='waiter'){
+    state.ticketMode = existing ? 'view' : 'edit';
+  } else if(state.role==='cashier'){
+    state.ticketMode = 'pay';
+  } else if(state.role==='admin'){
+    state.ticketMode = 'edit';
+  } else {
+    state.ticketMode = 'view';
+  }
   state.activeTable = t;
   state.draftItems = {};
   if(!existing && state.role==='waiter'){
@@ -1882,6 +1937,10 @@ async function saveTicket(sendFlag, opts){
   try{
     if(!validateCustomerArrival()) return false;
   let order = activeOrderForTable(state.activeTable);
+  if(order && state.role==='waiter'){
+    showToast('Чеки қабулшударо танҳо Кассир ё Админ тағйир дода метавонад');
+    return false;
+  }
   const prevItems = order ? order.items : [];
   let droppedAny = false;
   const items = Object.keys(state.draftItems).map(mid=>{
@@ -1906,6 +1965,7 @@ async function saveTicket(sendFlag, opts){
     isNew = true;
     order = {id:uid('ord'), table:state.activeTable, status:'active', items:[], total:0, createdAt:Date.now(),
       createdBy: actingUsername(), sentToKitchen:false, source:'waiter',
+      oshShift: activeOshShift(),
       customerType: state.customerPhone ? 'with_order' : 'without_order',
       customerPhone: state.customerPhone || null};
     state.orders.push(order);
@@ -1954,6 +2014,28 @@ async function saveTicket(sendFlag, opts){
     showToast('Хатогӣ ҳангоми захира кардани фармоиш');
     return false;
   }
+}
+
+
+async function moveOrderToTable(orderId, targetTableId){
+  const order = state.orders.find(o=>o.id===orderId && o.status==='active');
+  if(!order){ showToast('Фармоиши фаъол ёфт нашуд'); return false; }
+  const targetId = Number(targetTableId);
+  if(!targetId || targetId === Number(order.table)){ showToast('Мизи навро интихоб кунед'); return false; }
+  if(activeOrderForTable(targetId)){ showToast('Ин миз аллакай банд аст'); return false; }
+  const oldTbl = state.tables.find(t=>t.id===order.table);
+  const newTbl = state.tables.find(t=>t.id===targetId);
+  const oldName = oldTbl ? oldTbl.name : ('Мизи №'+order.table);
+  const newName = newTbl ? newTbl.name : ('Мизи №'+targetId);
+  order.table = targetId;
+  order.updatedAt = Date.now();
+  const ok = await saveOrderV2(order);
+  if(!ok){ showToast('Хатогӣ ҳангоми кӯчонидани миз'); return false; }
+  if(state.activeTable !== null) state.activeTable = targetId;
+  try{ await logActivity('Фармоишро аз '+oldName+' ба '+newName+' кӯчонид'); }catch(e){}
+  showToast('🔄 Фармоиш ба '+newName+' кӯчонида шуд');
+  render();
+  return true;
 }
 
 /* ---------- PAYMENT SAFETY v11 ----------
@@ -2661,6 +2743,9 @@ function render(){
         }
       });
     });
+    if((state.cashierTab||'main')==='osh'){
+      attachOshShiftsEvents();
+    }
     if((state.cashierTab||'main')==='orders'){
       attachAdminOrdersEvents();
     }
@@ -3001,12 +3086,16 @@ function renderCashier(){
   const cashierTab = state.cashierTab || 'main';
   const tabBar = `<div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;">
     <button class="cat-tab ${cashierTab==='main'?'active':''}" data-cashiertab="main">🏠 Асосӣ</button>
+    <button class="cat-tab ${cashierTab==='osh'?'active':''}" data-cashiertab="osh">🍚 Ош / Бастҳо</button>
     <button class="cat-tab ${cashierTab==='takeaway'?'active':''}" data-cashiertab="takeaway">🥡 Собой</button>
     <button class="cat-tab ${cashierTab==='orders'?'active':''}" data-cashiertab="orders">📋 Фармоишҳо</button>
     <button class="cat-tab ${cashierTab==='report'?'active':''}" data-cashiertab="report">📊 Ҳисобот</button>
     <button class="cat-tab ${cashierTab==='salary'?'active':''}" data-cashiertab="salary">💰 Маош</button>
   </div>`;
 
+  if(cashierTab==='osh'){
+    return `<div class="container">${tabBar}${renderOshShiftsSection()}</div>`;
+  }
   if(cashierTab==='orders'){
     return `<div class="container">${tabBar}${renderAdminOrders()}</div>`;
   }
@@ -3179,6 +3268,7 @@ async function submitTakeaway(cashAmount, noncashAmount){
     cashAmount: cash, noncashAmount: noncash,
     paymentMethod: cash>0 && noncash>0 ? 'mixed' : (noncash>0 ? 'noncash' : 'cash'),
     receivedAt: Date.now(),
+    oshShift: activeOshShift(),
     prepared: true,
     sentToKitchen: false
   };
@@ -3205,6 +3295,7 @@ function openScheduled(){
   state.scheduledItems = {};
   state.scheduledCat = (state.menu[0] && state.menu[0].category) || null;
   state.scheduledDeliveryType = 'dinein';
+  state.scheduledOshShift = activeOshShift();
   state.formOpen = true; state.formOpenAt = Date.now();
   render();
 }
@@ -3240,7 +3331,7 @@ function removeScheduledItem(mid){
   delete state.scheduledItems[mid];
   render();
 }
-async function submitScheduled(name, phone, time, deliveryType){
+async function submitScheduled(name, phone, time, deliveryType, oshShift){
   let droppedAny = false;
   const items = Object.keys(state.scheduledItems).map(mid=>{
     const m = state.menu.find(x=>x.id===mid);
@@ -3251,12 +3342,14 @@ async function submitScheduled(name, phone, time, deliveryType){
   if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
   // Вақт ва ном ихтиёрианд — агар нависта нашавад, холӣ мемонад
   const total = scheduledTotal();
+  const chosenShift = (Number(oshShift)===1 || Number(oshShift)===2) ? Number(oshShift) : (shiftForTimeStr(time) || activeOshShift());
   const initialItems = items.map(it=>({menuId:baseMenuId(it.menuId), name:it.name, unit:it.unit||'dona', category:it.category, qty:Number(it.qty)||0}));
   const order = {
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
     items, initialItems, total, createdAt: Date.now(), updatedAt: Date.now(),
     createdBy: null, readyTime: time, customerName: name||'', customerPhone: phone||'',
     deliveryType: 'dinein',
+    oshShift: chosenShift,
     prepared: false
   };
   state.orders.push(order);
@@ -3542,6 +3635,13 @@ function renderScheduledOverlay(){
         <div class="field"><label>Рақами телефон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
         <div class="field"><label>Вақти омадан <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime||'')}"></div>
       </div>
+      <div style="padding:12px 20px 0;">
+        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:700;display:block;margin-bottom:6px;">🍚 Ба кадом баст (смена) тақсим шавад:</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="cat-tab ${(state.scheduledOshShift||1)===1?'active':''}" data-schedshift="1">☀️ Басти 1 (${shiftLabel(1)}) · боқӣ: ${oshShiftStats(1).remaining.toFixed(2)} кг</button>
+          <button type="button" class="cat-tab ${state.scheduledOshShift===2?'active':''}" data-schedshift="2">🌙 Басти 2 (${shiftLabel(2)}) · боқӣ: ${oshShiftStats(2).remaining.toFixed(2)} кг</button>
+        </div>
+      </div>
       <div class="cat-tabs">${tabs}</div>
       <div class="menu-list">${items}</div>
       <div class="receipt">
@@ -3589,13 +3689,20 @@ function attachScheduledEvents(){
   document.querySelectorAll('[data-sremoveitem]').forEach(el=>{
     el.addEventListener('click', ()=>{ captureScheduledFields(); removeScheduledItem(el.dataset.sremoveitem); });
   });
+  document.querySelectorAll('[data-schedshift]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      captureScheduledFields();
+      state.scheduledOshShift = Number(el.dataset.schedshift)||1;
+      render();
+    });
+  });
   const submitBtn = document.getElementById('submitScheduledBtn');
   if(submitBtn) submitBtn.addEventListener('click', ()=>{
     const name = document.getElementById('schedNameInput').value.trim();
     const phone = document.getElementById('schedPhoneInput').value.trim();
     const timeEl = document.getElementById('schedTimeInput');
     const time = timeEl ? timeEl.value : '';
-    submitScheduled(name, phone, time, state.scheduledDeliveryType);
+    submitScheduled(name, phone, time, state.scheduledDeliveryType, state.scheduledOshShift);
   });
 }
 
@@ -4025,8 +4132,28 @@ function renderTicketOverlay(){
         </div>` : ''}
     </div>`;
 
+  const freeTablesForMove = currentOrder ? sortedTables().filter(t=>t.id!==currentOrder.table && !activeOrderForTable(t.id)) : [];
+  const moveTableBlock = currentOrder ? `
+    <div style="margin:10px 20px 0;padding:10px 12px;background:#F8FAFC;border:1.5px solid var(--line);border-radius:10px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;">
+      <span style="font-size:12px;font-weight:700;color:var(--ink);">🔄 Кӯчонидан ба дигар миз:</span>
+      ${freeTablesForMove.length ? `
+        <div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;">
+          <select id="moveOrderTableSelect" style="padding:7px 10px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;background:var(--white);">
+            ${freeTablesForMove.map(t=>`<option value="${t.id}">${escapeHtml(t.name)} (${t.seats} ҷой)</option>`).join('')}
+          </select>
+          <button type="button" class="btn-primary" id="moveOrderTableBtn" style="flex:none;padding:7px 14px;font-size:12px;">Кӯчонидан</button>
+        </div>
+      ` : `<span style="font-size:12px;color:#9c8f78;">мизи озод нест</span>`}
+    </div>` : '';
+
+  const waiterLockedBanner = (currentOrder && state.role==='waiter') ? `
+    <div style="margin:10px 20px 0;padding:10px 12px;background:#FEF2F2;border:1.5px solid #FECACA;border-radius:10px;font-size:12px;color:var(--brick);font-weight:700;">
+      🔒 Заказ аллакай қабул шудааст — официант онро тағйир дода наметавонад. Ислоҳи чек танҳо барои Кассир ва Админ дастрас аст.
+    </div>` : '';
+
   let actions = '';
-  const cancelBlock = currentOrder ? (
+  const canCancelOrder = currentOrder && (state.role==='cashier' || state.role==='admin');
+  const cancelBlock = canCancelOrder ? (
     state.confirmCancelOrderId===currentOrder.id ? `
     <div class="form-box" style="border-color:var(--brick);margin:10px 20px 0;width:auto;">
       <div style="width:100%;">
@@ -4047,6 +4174,8 @@ function renderTicketOverlay(){
     const saveEditBtn = dirty && draftKeys.length ? `<div style="padding:0 20px 8px;"><button type="button" class="btn-ghost" style="width:100%;" id="cashierSaveEditsBtn">💾 Сабти тағйироти чек</button></div>` : '';
     const payBody = draftKeys.length ? renderSplitPaymentForm('paytk', total) : `<p style="text-align:center;color:var(--brick);font-size:13px;">Чек холӣ аст — маҳсулот илова кунед ё фармоишро бекор кунед</p>`;
     actions = `${editNote}${saveEditBtn}<div class="ticket-actions" style="flex-direction:column;align-items:stretch;">${payBody}</div>${cancelBlock}`;
+  } else {
+    actions = `${cancelBlock}`;
   }
 
   const _activeTbl = state.tables.find(t=>t.id===state.activeTable);
@@ -4062,6 +4191,8 @@ function renderTicketOverlay(){
       ${currentOrder && orderSourceBadge(currentOrder) ? `<div style="padding:10px 20px 0;">${orderSourceBadge(currentOrder)}</div>` : ''}
       ${currentOrder && currentOrder.createdBy ? `<p style="padding:10px 20px 0;font-size:12px;color:#9c8f78;margin:0;">👤 официант: ${escapeHtml(currentOrder.createdBy)}</p>` : ''}
       ${currentOrder && currentOrder.customerPhone ? `<p style="padding:4px 20px 0;font-size:12px;color:#9c8f78;margin:0;">📞 ${escapeHtml(String(currentOrder.customerPhone).replace(/\D/g,'').slice(0,9))}</p>` : ''}
+      ${waiterLockedBanner}
+      ${moveTableBlock}
       ${mode==='edit' && !currentOrder && state.role==='waiter' ? `
        <div class="form-box" style="margin:10px 20px 14px;display:block;">
          <div style="font-weight:700;font-size:13px;margin-bottom:10px;">📞 Рақами телефони клиент (9 рақам)</div>
@@ -4082,6 +4213,16 @@ function attachTicketEvents(){
   const overlay = document.getElementById('ticketOverlay');
   overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeTicket(); });
   document.getElementById('closeTicket').addEventListener('click', closeTicket);
+  const moveOrderTableBtn = document.getElementById('moveOrderTableBtn');
+  if(moveOrderTableBtn){
+    moveOrderTableBtn.addEventListener('click', async ()=>{
+      const o = activeOrderForTable(state.activeTable);
+      const sel = document.getElementById('moveOrderTableSelect');
+      if(o && sel && sel.value){
+        await moveOrderToTable(o.id, Number(sel.value));
+      }
+    });
+  }
   const cancelOrderBtn = document.getElementById('cancelOrderBtn');
   if(cancelOrderBtn) cancelOrderBtn.addEventListener('click', ()=>{
     const o = activeOrderForTable(state.activeTable);
@@ -4165,7 +4306,8 @@ function attachTicketEvents(){
     if(saveBtn) saveBtn.addEventListener('click', async e=>{
       e.preventDefault();
       e.stopPropagation();
-      await saveTicket(true);
+      const existingOrd = activeOrderForTable(state.activeTable);
+      await saveTicket(true, existingOrd ? {cashierEdit:true} : {});
     });
   }
   if(mode==='pay'){
@@ -4177,6 +4319,7 @@ function attachTicketEvents(){
 function renderAdmin(){
   let body = '';
   if(state.adminTab==='tables') body = renderAdminTables();
+  else if(state.adminTab==='osh') body = renderOshShiftsSection();
   else if(state.adminTab==='orders') body = renderAdminOrders();
   else if(state.adminTab==='menu') body = renderAdminMenu();
   else if(state.adminTab==='inventory') body = renderAdminInventory();
@@ -4188,6 +4331,7 @@ function renderAdmin(){
   return `
   <div class="admin-tabs">
     <button class="admin-tab ${state.adminTab==='tables'?'active':''}" data-atab="tables">Мизҳо</button>
+    <button class="admin-tab ${state.adminTab==='osh'?'active':''}" data-atab="osh">🍚 Ош / Бастҳо</button>
     <button class="admin-tab ${state.adminTab==='orders'?'active':''}" data-atab="orders">Фармоишҳо</button>
     <button class="admin-tab ${state.adminTab==='menu'?'active':''}" data-atab="menu">Меню</button>
     <button class="admin-tab ${state.adminTab==='inventory'?'active':''}" data-atab="inventory">Анбор</button>
@@ -4328,6 +4472,150 @@ async function deleteClientRecord(delType, delId){
   }
   showToast('Сабт нест шуд');
 }
+
+async function setOrderOshShift(orderId, shift){
+  const sh = Number(shift)===2 ? 2 : 1;
+  const o = state.orders.find(x=>x.id===orderId);
+  if(!o) return;
+  o.oshShift = sh;
+  o.updatedAt = Date.now();
+  await saveOrderV2(o);
+  showToast('Ба Басти '+sh+' гузаронида шуд');
+  render();
+}
+async function setActiveOshShift(shift){
+  const sh = Number(shift)===2 ? 2 : 1;
+  const cur = normalizeOshStock(state.oshStock && state.oshStock.date===todayKey() ? state.oshStock : {date:todayKey(), lunchKg:0, eveningKg:0});
+  state.oshStock = {...cur, date:todayKey(), activeShift:sh};
+  await saveOshStock(state.oshStock);
+  showToast('Басти фаъол: Басти '+sh);
+  render();
+}
+function renderOshShiftsSection(){
+  const hasStock = state.oshStock && state.oshStock.date===todayKey();
+  const stock = hasStock ? normalizeOshStock(state.oshStock) : {lunchKg:0, eveningKg:0, activeShift:currentShift()};
+  const actShift = activeOshShift();
+  const s1 = oshShiftStats(1);
+  const s2 = oshShiftStats(2);
+  const totalCooked = stock.lunchKg + stock.eveningKg;
+  const totalUsed = s1.total + s2.total;
+  const totalRem = totalCooked - totalUsed;
+
+  const todayOrders = (state.orders||[]).filter(o=>isOrderInTodayOshScope(o) && oshWeightFromItems(o.items)>0)
+    .sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  const schedOrders = todayOrders.filter(o=>o.type==='scheduled' || o.fromScheduled);
+  const waiterOrders = todayOrders.filter(o=>o.type!=='takeaway' && o.type!=='scheduled' && !o.fromScheduled);
+  const takeawayOrders = todayOrders.filter(o=>o.type==='takeaway');
+
+  const renderShiftOrderRow = (o)=>{
+    const kg = oshWeightFromItems(o.items);
+    const sh = orderOshShift(o);
+    const oshDesc = (o.items||[]).filter(it=>itemOshKg(it)>0).map(i=>formatQtyLabel(i)).join(', ');
+    const statusBadge = o.status==='paid'
+      ? '<span style="color:var(--olive);font-weight:700;">✅ пардохт шуд</span>'
+      : (o.table ? '<span style="color:var(--blue);font-weight:700;">🍽 дар миз фаъол</span>' : '<span style="color:#c07f00;font-weight:700;">⏳ брон (интизор)</span>');
+    return `<div class="receipt-item-row" style="flex-wrap:wrap;gap:10px;">
+      <div>
+        <div class="l1">${orderLabel(o)} · <b style="color:var(--brick);">🍚 ${kg.toFixed(2)} кг ош</b></div>
+        <div class="l2">${oshDesc} · ${statusBadge}${o.createdBy ? ' · 👤 '+escapeHtml(o.createdBy) : ''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="cat-tab ${sh===1?'active':''}" style="padding:5px 10px;font-size:11px;" data-orderoshshift="${o.id}|1">☀️ Басти 1</button>
+        <button type="button" class="cat-tab ${sh===2?'active':''}" style="padding:5px 10px;font-size:11px;" data-orderoshshift="${o.id}|2">🌙 Басти 2</button>
+      </div>
+    </div>`;
+  };
+
+  return `
+    <div class="section-title">🍚 Идораи оши имрӯза — 2 баст (смена)</div>
+    <p style="color:#6b5f4d;font-size:13px;margin-top:-8px;margin-bottom:14px;">
+      Дар ин бахш миқдори оши пухташудаи имрӯзаро барои <b>Басти 1</b> ва <b>Басти 2</b> ворид кунед. Ҳангоми қабули ҳар гуна заказ (брон, мизҳои официантон ё собой) миқдори ош <b>дарҳол</b> аз басти дахлдор кам мешавад.
+    </p>
+
+    <div class="form-box" style="flex-direction:column;align-items:stretch;margin-bottom:18px;border:2px solid var(--blue);">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+        <div style="font-weight:800;font-size:15px;color:var(--ink);">🍳 Ворид кардани оши пухташуда (имрӯз)</div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:12px;color:#64748B;font-weight:600;">Басти фаъол барои заказҳои нави миз/собой:</span>
+          <button type="button" class="cat-tab ${actShift===1?'active':''}" data-setactiveoshshift="1" style="padding:6px 12px;">☀️ Басти 1</button>
+          <button type="button" class="cat-tab ${actShift===2?'active':''}" data-setactiveoshshift="2" style="padding:6px 12px;">🌙 Басти 2</button>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+        <div class="field"><label>☀️ Басти 1 — пухта шуд (кг)</label><input type="number" id="oshSecLunchInput" value="${hasStock ? stock.lunchKg : ''}" min="0" step="0.5" placeholder="масалан: 20"></div>
+        <div class="field"><label>🌙 Басти 2 — пухта шуд (кг)</label><input type="number" id="oshSecEveningInput" value="${hasStock ? stock.eveningKg : ''}" min="0" step="0.5" placeholder="масалан: 50"></div>
+        <button class="btn-primary" style="flex:none;padding:10px 22px;" id="saveOshSecStockBtn">💾 Сабти оши пухташуда</button>
+        <button class="btn-ghost" style="flex:none;padding:10px 16px;" id="openSchedFromOshBtn">🕐 + Закази брон (вақтдор)</button>
+      </div>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat-card" style="border:2px solid ${actShift===1?'var(--blue)':'var(--line)'};">
+        <div class="label">☀️ БАСТИ 1 (${shiftLabel(1)}) ${actShift===1?'· ФАЪОЛ':''}</div>
+        <div class="value" style="color:${s1.remaining<=0?'var(--brick)':'var(--olive)'};">${s1.remaining.toFixed(2)} кг боқӣ</div>
+        <div style="font-size:12px;color:#475569;margin-top:6px;line-height:1.5;">
+          🍳 Пухта шуд: <b>${s1.cooked.toFixed(2)} кг</b><br>
+          📉 Ҳамагӣ рафт: <b>${s1.total.toFixed(2)} кг</b><br>
+          <span style="font-size:11px;color:#64748B;">🕐 Брон: ${s1.scheduledOnly.toFixed(2)} кг · 🍽 Официантҳо: ${s1.waiters.toFixed(2)} кг · 🥡 Собой: ${s1.takeaway.toFixed(2)} кг</span>
+        </div>
+      </div>
+      <div class="stat-card" style="border:2px solid ${actShift===2?'var(--blue)':'var(--line)'};">
+        <div class="label">🌙 БАСТИ 2 (${shiftLabel(2)}) ${actShift===2?'· ФАЪОЛ':''}</div>
+        <div class="value" style="color:${s2.remaining<=0?'var(--brick)':'var(--olive)'};">${s2.remaining.toFixed(2)} кг боқӣ</div>
+        <div style="font-size:12px;color:#475569;margin-top:6px;line-height:1.5;">
+          🍳 Пухта шуд: <b>${s2.cooked.toFixed(2)} кг</b><br>
+          📉 Ҳамагӣ рафт: <b>${s2.total.toFixed(2)} кг</b><br>
+          <span style="font-size:11px;color:#64748B;">🕐 Брон: ${s2.scheduledOnly.toFixed(2)} кг · 🍽 Официантҳо: ${s2.waiters.toFixed(2)} кг · 🥡 Собой: ${s2.takeaway.toFixed(2)} кг</span>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="label">🍚 ҲАМАГӢ ИМРӮЗ (БАСТИ 1 + 2)</div>
+        <div class="value" style="color:${totalRem<=0?'var(--brick)':'var(--ink)'};">${totalRem.toFixed(2)} кг боқӣ</div>
+        <div style="font-size:12px;color:#475569;margin-top:6px;line-height:1.5;">
+          🍳 Умумӣ пухта: <b>${totalCooked.toFixed(2)} кг</b><br>
+          📉 Умумӣ рафт: <b>${totalUsed.toFixed(2)} кг</b>
+        </div>
+      </div>
+    </div>
+
+    ${renderOshShiftTable()}
+
+    <div class="section-title" style="margin-top:24px;">🕐 Заказҳои брон (вақтдор) — тақсим ба бастҳо (${schedOrders.length})</div>
+    <p style="color:#6b5f4d;font-size:12px;margin-top:-8px;margin-bottom:10px;">Шумо метавонед ҳар як закази бронро ба <b>Басти 1</b> ё <b>Басти 2</b> гузаронед — миқдори ош дарҳол аз ҳамон баст ҳисоб мешавад.</p>
+    ${schedOrders.length ? schedOrders.map(renderShiftOrderRow).join('') : '<div class="empty-state" style="padding:18px;">Ҳоло закази брон бо ош нест</div>'}
+
+    <div class="section-title" style="margin-top:24px;">🍽 Заказҳои официантон дар мизҳо (${waiterOrders.length})</div>
+    ${waiterOrders.length ? waiterOrders.map(renderShiftOrderRow).join('') : '<div class="empty-state" style="padding:18px;">Ҳоло дар мизҳо закази ош нест</div>'}
+
+    ${takeawayOrders.length ? `<div class="section-title" style="margin-top:24px;">🥡 Заказҳои собой бо ош (${takeawayOrders.length})</div>${takeawayOrders.map(renderShiftOrderRow).join('')}` : ''}
+  `;
+}
+function attachOshShiftsEvents(){
+  const saveBtn = document.getElementById('saveOshSecStockBtn');
+  if(saveBtn) saveBtn.addEventListener('click', async ()=>{
+    const lunchKg = Math.max(0, Number(document.getElementById('oshSecLunchInput')?.value) || 0);
+    const eveningKg = Math.max(0, Number(document.getElementById('oshSecEveningInput')?.value) || 0);
+    const actShift = activeOshShift();
+    state.oshStock = {date: todayKey(), kg: lunchKg + eveningKg, lunchKg, eveningKg, activeShift: actShift};
+    await saveOshStock(state.oshStock);
+    showToast('✅ Миқдори оши Басти 1 ва Басти 2 сабт шуд');
+    render();
+  });
+  const openSchedBtn = document.getElementById('openSchedFromOshBtn');
+  if(openSchedBtn) openSchedBtn.addEventListener('click', openScheduled);
+  document.querySelectorAll('[data-setactiveoshshift]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      setActiveOshShift(Number(el.dataset.setactiveoshshift));
+    });
+  });
+  document.querySelectorAll('[data-orderoshshift]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const [ordId, sh] = el.dataset.orderoshshift.split('|');
+      setOrderOshShift(ordId, Number(sh));
+    });
+  });
+}
+
 function renderAdminOrders(){
   const clientQuery = (state.clientSearchQuery||'').trim().toLowerCase();
   const allClients = allKnownClients();
@@ -5965,6 +6253,9 @@ function attachAdminEvents(){
     });
   }
 
+  if(state.adminTab==='osh'){
+    attachOshShiftsEvents();
+  }
   if(state.adminTab==='orders'){
     attachAdminOrdersEvents();
   }

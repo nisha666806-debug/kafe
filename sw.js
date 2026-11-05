@@ -1,4 +1,4 @@
-const CACHE_NAME = 'oshi-foram-2026-11-03-V93-PAYMENT-FIX';
+const CACHE_NAME = 'oshi-foram-2026-11-06-V94-OSH-SHIFTS-AND-LOCK';
 const CORE_ASSETS = [
   './',
   './index.html',
