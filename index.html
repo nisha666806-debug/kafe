@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-06-V94-OSH-SHIFTS-AND-LOCK';
+const APP_VERSION = '2026-11-06-V95-WAITER-ADD-ONLY';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1685,7 +1685,7 @@ function openTable(t){
   if(state.role==='cashier' && !existing){ showToast('Ин миз озод аст — фармоише нест'); return; }
   if(state.role==='admin' && !existing){ showToast('Ин миз озод аст'); return; }
   if(state.role==='waiter'){
-    state.ticketMode = existing ? 'view' : 'edit';
+    state.ticketMode = 'edit';
   } else if(state.role==='cashier'){
     state.ticketMode = 'pay';
   } else if(state.role==='admin'){
@@ -1908,9 +1908,20 @@ function draftTotalWithService_old(){
 function lineTotal(menuItem, amount){
   return menuItem.unit==='kg' ? menuItem.price * (amount/1000) : menuItem.price * amount;
 }
+function committedTicketItemQty(mid){
+  const ord = activeOrderForTable(state.activeTable);
+  if(!ord || !Array.isArray(ord.items)) return 0;
+  const found = ord.items.find(it=>it.menuId===mid);
+  return found ? Math.max(0, Number(found.qty)||0) : 0;
+}
 function changeQty(mid, delta){
   const cur = state.draftItems[mid] || 0;
-  const next = Math.max(0, cur + delta);
+  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
+  if(delta < 0 && state.role==='waiter' && cur + delta < minQty){
+    showToast('Официант маҳсулоти қабулшударо кам ё нест карда наметавонад');
+    return;
+  }
+  const next = Math.max(minQty, cur + delta);
   if(next === 0) delete state.draftItems[mid];
   else state.draftItems[mid] = next;
   render();
@@ -1924,11 +1935,26 @@ function addGrams(mid, grams){
 }
 function setGrams(mid, grams){
   const g = Math.max(0, Number(grams)||0);
+  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
+  if(state.role==='waiter' && g < minQty){
+    showToast('Официант миқдори қабулшударо кам карда наметавонад');
+    state.draftItems[mid] = Math.max(curQtyOrMin(mid, minQty), minQty);
+    render();
+    return;
+  }
   if(g<=0) delete state.draftItems[mid];
   else state.draftItems[mid] = g;
   render();
 }
+function curQtyOrMin(mid, minQty){
+  return Math.max(Number(state.draftItems[mid])||0, minQty);
+}
 function removeDraftItem(mid){
+  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
+  if(state.role==='waiter' && minQty > 0){
+    showToast('Официант маҳсулоти қабулшударо нест карда наметавонад');
+    return;
+  }
   delete state.draftItems[mid];
   render();
 }
@@ -1937,11 +1963,19 @@ async function saveTicket(sendFlag, opts){
   try{
     if(!validateCustomerArrival()) return false;
   let order = activeOrderForTable(state.activeTable);
+  const prevItems = order ? (order.items || []) : [];
   if(order && state.role==='waiter'){
-    showToast('Чеки қабулшударо танҳо Кассир ё Админ тағйир дода метавонад');
-    return false;
+    for(const p of prevItems){
+      const curQ = Number(state.draftItems[p.menuId]) || 0;
+      const prevQ = Number(p.qty) || 0;
+      if(curQ < prevQ){
+        showToast('Официант маҳсулоти қабулшударо кам ё нест карда наметавонад');
+        state.draftItems[p.menuId] = prevQ;
+        render();
+        return false;
+      }
+    }
   }
-  const prevItems = order ? order.items : [];
   let droppedAny = false;
   const items = Object.keys(state.draftItems).map(mid=>{
     const m = menuForKey(mid);
@@ -1988,6 +2022,11 @@ async function saveTicket(sendFlag, opts){
   if(editedByCashier){ order.editedByCashier = actingUsername(); order.editedByCashierAt = Date.now(); }
   if(sendFlag){
     order.sentToKitchen = true;
+    const prevOshKg = oshWeightFromItems(prevItems);
+    const nextOshKg = oshWeightFromItems(items);
+    if(nextOshKg > prevOshKg + 0.001){
+      order.prepared = false;
+    }
     const inventoryOk = await deductForOrderDelta(order, items);
     if(inventoryOk===false){
       showToast('Анбор нав нашуд — фармоиш фиристода нашуд');
@@ -4047,17 +4086,20 @@ function renderTicketOverlay(){
     const extraTag = (isExtraLine && isOshDiscountItem(baseM) && takeawayOshDiscountPct()>0)
       ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(−${takeawayOshDiscountPct()}% ош)</span>`
       : ((!isExtraLine && isLaaliName(baseM.name)) ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(бе хизмат.)</span>` : '');
+    const minCommitted = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
+    const canDec = state.role!=='waiter' || qty > minCommitted;
+    const canRem = state.role!=='waiter' || minCommitted === 0;
     if(editable && isKg){
       return `
       <div class="receipt-line" style="flex-direction:column;align-items:stretch;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
         <span>${escapeHtml(displayName)}${extraTag}</span>
         <div class="qty-ctrl">
-          <input type="number" class="kg-edit-input" data-editgrams="${mid}" value="${qty}" min="0" step="10" style="width:60px;padding:4px 6px;border:1px solid var(--ink);border-radius:6px;font-family:inherit;font-size:12px;">
+          <input type="number" class="kg-edit-input" data-editgrams="${mid}" value="${qty}" min="${minCommitted}" step="10" style="width:60px;padding:4px 6px;border:1px solid var(--ink);border-radius:6px;font-family:inherit;font-size:12px;">
           <span>г</span>
           <span style="min-width:56px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
           ${moveBtn}
-          <button class="qty-btn" data-removeitem="${mid}">✕</button>
+          ${canRem ? `<button class="qty-btn" data-removeitem="${mid}">✕</button>` : `<span title="Нест кардан танҳо барои Кассир/Админ" style="font-size:11px;color:#94A3B8;padding:0 4px;">🔒</span>`}
         </div>
       </div>
       ${servedInfo(mid, qty)}
@@ -4068,12 +4110,12 @@ function renderTicketOverlay(){
       <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
         <span>${escapeHtml(displayName)}${extraTag}</span>
         <div class="qty-ctrl">
-          <button class="qty-btn" data-dec="${mid}">−</button>
+          ${canDec ? `<button class="qty-btn" data-dec="${mid}">−</button>` : `<button class="qty-btn" disabled style="opacity:.35;cursor:not-allowed;" title="Кам кардан танҳо барои Кассир/Админ">−</button>`}
           <span>${qty}×</span>
           <button class="qty-btn" data-inc="${mid}">+</button>
           <span style="min-width:56px;text-align:right;">${fmtMoney(lineTotal(m,qty))}</span>
           ${moveBtn}
-          <button class="qty-btn" data-removeitem="${mid}">✕</button>
+          ${canRem ? `<button class="qty-btn" data-removeitem="${mid}">✕</button>` : `<span title="Нест кардан танҳо барои Кассир/Админ" style="font-size:11px;color:#94A3B8;padding:0 4px;">🔒</span>`}
         </div>
       </div>
       ${servedInfo(mid, qty)}
@@ -4147,8 +4189,8 @@ function renderTicketOverlay(){
     </div>` : '';
 
   const waiterLockedBanner = (currentOrder && state.role==='waiter') ? `
-    <div style="margin:10px 20px 0;padding:10px 12px;background:#FEF2F2;border:1.5px solid #FECACA;border-radius:10px;font-size:12px;color:var(--brick);font-weight:700;">
-      🔒 Заказ аллакай қабул шудааст — официант онро тағйир дода наметавонад. Ислоҳи чек танҳо барои Кассир ва Админ дастрас аст.
+    <div style="margin:10px 20px 0;padding:8px 12px;background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:10px;font-size:12px;color:var(--blue-dim);font-weight:600;">
+      ➕ Шумо метавонед ба чек маҳсулоти нав илова кунед, аммо кам ё нест кардани маҳсулоти қабулшуда (🔒) танҳо барои Кассир ва Админ дастрас аст.
     </div>` : '';
 
   let actions = '';
@@ -4307,7 +4349,7 @@ function attachTicketEvents(){
       e.preventDefault();
       e.stopPropagation();
       const existingOrd = activeOrderForTable(state.activeTable);
-      await saveTicket(true, existingOrd ? {cashierEdit:true} : {});
+      await saveTicket(true, (existingOrd && state.role!=='waiter') ? {cashierEdit:true} : {});
     });
   }
   if(mode==='pay'){
