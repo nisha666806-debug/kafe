@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-06-V95-WAITER-ADD-ONLY';
+const APP_VERSION = '2026-11-06-V96-SCHED-SHIFT2-AND-HEAD-WAITER';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -998,7 +998,7 @@ let state = {
   scheduledPhone:'',
   scheduledTime:'',
   scheduledDeliveryType:'dinein',
-  scheduledOshShift:1,
+  scheduledOshShift:2,
   viewingOrderId:null,
   viewingMode:null,
   previewUsername:null,     // when admin is previewing AS a specific staff account
@@ -1139,12 +1139,11 @@ function activeOshShift(){
 }
 function orderOshShift(o){
   if(!o) return 1;
+  if(o.type==='scheduled' || o.fromScheduled){
+    return Number(o.oshShiftManual)===1 ? 1 : 2;
+  }
   const explicit = Number(o.oshShift);
   if(explicit===1 || explicit===2) return explicit;
-  if((o.type==='scheduled' || o.fromScheduled) && o.readyTime){
-    const byReady = shiftForTimeStr(o.readyTime);
-    if(byReady===1 || byReady===2) return byReady;
-  }
   return shiftForTimestamp(o.createdAt || Date.now());
 }
 function isOrderInTodayOshScope(o){
@@ -1908,6 +1907,18 @@ function draftTotalWithService_old(){
 function lineTotal(menuItem, amount){
   return menuItem.unit==='kg' ? menuItem.price * (amount/1000) : menuItem.price * amount;
 }
+function isHeadWaiterAccount(accOrUsername){
+  const acc = (typeof accOrUsername === 'string')
+    ? (state.accounts||[]).find(a=>a.username===accOrUsername)
+    : accOrUsername;
+  return !!(acc && acc.role==='waiter' && acc.isHeadWaiter);
+}
+function isCurrentHeadWaiter(){
+  return state.role==='waiter' && isHeadWaiterAccount(actingUsername());
+}
+function waiterLockedFromReducing(){
+  return state.role==='waiter' && !isCurrentHeadWaiter();
+}
 function committedTicketItemQty(mid){
   const ord = activeOrderForTable(state.activeTable);
   if(!ord || !Array.isArray(ord.items)) return 0;
@@ -1916,9 +1927,9 @@ function committedTicketItemQty(mid){
 }
 function changeQty(mid, delta){
   const cur = state.draftItems[mid] || 0;
-  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
-  if(delta < 0 && state.role==='waiter' && cur + delta < minQty){
-    showToast('Официант маҳсулоти қабулшударо кам ё нест карда наметавонад');
+  const minQty = waiterLockedFromReducing() ? committedTicketItemQty(mid) : 0;
+  if(delta < 0 && waiterLockedFromReducing() && cur + delta < minQty){
+    showToast('Танҳо Сарофитсиант, Кассир ё Админ маҳсулоти қабулшударо кам карда метавонад');
     return;
   }
   const next = Math.max(minQty, cur + delta);
@@ -1935,9 +1946,9 @@ function addGrams(mid, grams){
 }
 function setGrams(mid, grams){
   const g = Math.max(0, Number(grams)||0);
-  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
-  if(state.role==='waiter' && g < minQty){
-    showToast('Официант миқдори қабулшударо кам карда наметавонад');
+  const minQty = waiterLockedFromReducing() ? committedTicketItemQty(mid) : 0;
+  if(waiterLockedFromReducing() && g < minQty){
+    showToast('Танҳо Сарофитсиант, Кассир ё Админ миқдори қабулшударо кам карда метавонад');
     state.draftItems[mid] = Math.max(curQtyOrMin(mid, minQty), minQty);
     render();
     return;
@@ -1950,9 +1961,9 @@ function curQtyOrMin(mid, minQty){
   return Math.max(Number(state.draftItems[mid])||0, minQty);
 }
 function removeDraftItem(mid){
-  const minQty = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
-  if(state.role==='waiter' && minQty > 0){
-    showToast('Официант маҳсулоти қабулшударо нест карда наметавонад');
+  const minQty = waiterLockedFromReducing() ? committedTicketItemQty(mid) : 0;
+  if(waiterLockedFromReducing() && minQty > 0){
+    showToast('Танҳо Сарофитсиант, Кассир ё Админ маҳсулоти қабулшударо нест карда метавонад');
     return;
   }
   delete state.draftItems[mid];
@@ -1964,17 +1975,21 @@ async function saveTicket(sendFlag, opts){
     if(!validateCustomerArrival()) return false;
   let order = activeOrderForTable(state.activeTable);
   const prevItems = order ? (order.items || []) : [];
-  if(order && state.role==='waiter'){
+  if(order && waiterLockedFromReducing()){
     for(const p of prevItems){
       const curQ = Number(state.draftItems[p.menuId]) || 0;
       const prevQ = Number(p.qty) || 0;
       if(curQ < prevQ){
-        showToast('Официант маҳсулоти қабулшударо кам ё нест карда наметавонад');
+        showToast('Танҳо Сарофитсиант, Кассир ё Админ маҳсулоти қабулшударо кам карда метавонад');
         state.draftItems[p.menuId] = prevQ;
         render();
         return false;
       }
     }
+  }
+  if(!Object.keys(state.draftItems).length && order && isCurrentHeadWaiter()){
+    showToast('Чек холӣ шуда наметавонад — «Бекор кардани фармоиш»-ро истифода баред');
+    return false;
   }
   let droppedAny = false;
   const items = Object.keys(state.draftItems).map(mid=>{
@@ -2561,6 +2576,15 @@ async function saveAccountCommissionPct(id, pctValue){
   showToast('Фоизи '+acc.username+': '+pct+'% сабт шуд');
   return true;
 }
+async function toggleHeadWaiter(id){
+  const acc = (state.accounts||[]).find(a=>a.id===id);
+  if(!acc || acc.role!=='waiter') return false;
+  acc.isHeadWaiter = !acc.isHeadWaiter;
+  await saveAccounts(state.accounts);
+  await logActivity((acc.isHeadWaiter ? 'Сарофитсиант таъин кард: ' : 'Аз сарофитсиантӣ гирифт: ') + acc.username);
+  showToast(acc.isHeadWaiter ? ('⭐ '+acc.username+' Сарофитсиант таъин шуд') : (acc.username+' официанти оддӣ шуд'));
+  return true;
+}
 async function deleteAccount(id){
   const acc = state.accounts.find(a=>a.id===id);
   if(acc && acc.role==='admin' && state.accounts.filter(a=>a.role==='admin').length<=1){
@@ -2863,7 +2887,7 @@ function renderTopbar(){
     <div class="top-right">
       <span class="clock">${dateStr} · ${timeStr}</span>
       ${nameLabel}
-      <span class="role-pill">${state.role==='waiter'?'👤 Официант':state.role==='cashier'?'💰 Кассир':state.role==='chef'?'👨‍🍳 Ошпаз':'🛠 Админ'}</span>
+      <span class="role-pill">${state.role==='waiter'?(isCurrentHeadWaiter()?'⭐ Сарофитсиант':'👤 Официант'):state.role==='cashier'?'💰 Кассир':state.role==='chef'?'👨‍🍳 Ошпаз':'🛠 Админ'}</span>
       ${previewing ? `<button class="btn-ghost" id="backToAdminBtn">🛠 Бозгашт ба Админ</button>` : ''}
       <button class="btn-ghost" id="hardRefreshBtn" title="Тоза кардани кэш ва навсозӣ">🔄</button>
       <button class="btn-ghost" id="logoutBtn">Баромадан</button>
@@ -3334,7 +3358,7 @@ function openScheduled(){
   state.scheduledItems = {};
   state.scheduledCat = (state.menu[0] && state.menu[0].category) || null;
   state.scheduledDeliveryType = 'dinein';
-  state.scheduledOshShift = activeOshShift();
+  state.scheduledOshShift = 2;
   state.formOpen = true; state.formOpenAt = Date.now();
   render();
 }
@@ -3381,7 +3405,7 @@ async function submitScheduled(name, phone, time, deliveryType, oshShift){
   if(!items.length){ showToast('Аввал маҳсулот илова кунед'); return; }
   // Вақт ва ном ихтиёрианд — агар нависта нашавад, холӣ мемонад
   const total = scheduledTotal();
-  const chosenShift = (Number(oshShift)===1 || Number(oshShift)===2) ? Number(oshShift) : (shiftForTimeStr(time) || activeOshShift());
+  const chosenShift = 2;
   const initialItems = items.map(it=>({menuId:baseMenuId(it.menuId), name:it.name, unit:it.unit||'dona', category:it.category, qty:Number(it.qty)||0}));
   const order = {
     id: uid('ord'), table: null, type: 'scheduled', status: 'active',
@@ -3674,11 +3698,9 @@ function renderScheduledOverlay(){
         <div class="field"><label>Рақами телефон <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="tel" id="schedPhoneInput" value="${escapeHtml(state.scheduledPhone)}" placeholder="масалан: 900123456"></div>
         <div class="field"><label>Вақти омадан <span style="font-size:10px;color:#9c8f78;">(ихтиёрӣ)</span></label><input type="time" id="schedTimeInput" value="${escapeHtml(state.scheduledTime||'')}"></div>
       </div>
-      <div style="padding:12px 20px 0;">
-        <label style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b5f4d;font-weight:700;display:block;margin-bottom:6px;">🍚 Ба кадом баст (смена) тақсим шавад:</label>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="cat-tab ${(state.scheduledOshShift||1)===1?'active':''}" data-schedshift="1">☀️ Басти 1 (${shiftLabel(1)}) · боқӣ: ${oshShiftStats(1).remaining.toFixed(2)} кг</button>
-          <button type="button" class="cat-tab ${state.scheduledOshShift===2?'active':''}" data-schedshift="2">🌙 Басти 2 (${shiftLabel(2)}) · боқӣ: ${oshShiftStats(2).remaining.toFixed(2)} кг</button>
+      <div style="padding:10px 20px 0;">
+        <div style="padding:8px 12px;background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:10px;font-size:12px;color:var(--blue-dim);font-weight:700;">
+          🌙 Оши фармоиши вақтдор ба таври автоматӣ аз <b>Басти 2</b> кам карда мешавад (боқимондаи Басти 2: <b>${oshShiftStats(2).remaining.toFixed(2)} кг</b>)
         </div>
       </div>
       <div class="cat-tabs">${tabs}</div>
@@ -4086,9 +4108,9 @@ function renderTicketOverlay(){
     const extraTag = (isExtraLine && isOshDiscountItem(baseM) && takeawayOshDiscountPct()>0)
       ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(−${takeawayOshDiscountPct()}% ош)</span>`
       : ((!isExtraLine && isLaaliName(baseM.name)) ? ` <span style="font-size:10px;color:var(--olive);font-weight:700;">(бе хизмат.)</span>` : '');
-    const minCommitted = state.role==='waiter' ? committedTicketItemQty(mid) : 0;
-    const canDec = state.role!=='waiter' || qty > minCommitted;
-    const canRem = state.role!=='waiter' || minCommitted === 0;
+    const minCommitted = waiterLockedFromReducing() ? committedTicketItemQty(mid) : 0;
+    const canDec = !waiterLockedFromReducing() || qty > minCommitted;
+    const canRem = !waiterLockedFromReducing() || minCommitted === 0;
     if(editable && isKg){
       return `
       <div class="receipt-line" style="flex-direction:column;align-items:stretch;">
@@ -4188,13 +4210,18 @@ function renderTicketOverlay(){
       ` : `<span style="font-size:12px;color:#9c8f78;">мизи озод нест</span>`}
     </div>` : '';
 
-  const waiterLockedBanner = (currentOrder && state.role==='waiter') ? `
+  const waiterLockedBanner = (currentOrder && state.role==='waiter') ? (
+    isCurrentHeadWaiter() ? `
+    <div style="margin:10px 20px 0;padding:8px 12px;background:#ECFDF5;border:1.5px solid #6EE7B7;border-radius:10px;font-size:12px;color:#065F46;font-weight:700;">
+      ⭐ Шумо <b>Сарофитсиант</b> ҳастед — метавонед маҳсулоти чекро ҳам илова (+) ва ҳам кам ё нест (− / ✕) кунед.
+    </div>` : `
     <div style="margin:10px 20px 0;padding:8px 12px;background:#EFF6FF;border:1.5px solid #BFDBFE;border-radius:10px;font-size:12px;color:var(--blue-dim);font-weight:600;">
-      ➕ Шумо метавонед ба чек маҳсулоти нав илова кунед, аммо кам ё нест кардани маҳсулоти қабулшуда (🔒) танҳо барои Кассир ва Админ дастрас аст.
-    </div>` : '';
+      ➕ Шумо метавонед ба чек маҳсулоти нав илова кунед, аммо кам ё нест кардани маҳсулоти қабулшуда (🔒) танҳо барои Сарофитсиант, Кассир ва Админ дастрас аст.
+    </div>`
+  ) : '';
 
   let actions = '';
-  const canCancelOrder = currentOrder && (state.role==='cashier' || state.role==='admin');
+  const canCancelOrder = currentOrder && (state.role==='cashier' || state.role==='admin' || isCurrentHeadWaiter());
   const cancelBlock = canCancelOrder ? (
     state.confirmCancelOrderId===currentOrder.id ? `
     <div class="form-box" style="border-color:var(--brick);margin:10px 20px 0;width:auto;">
@@ -4520,6 +4547,7 @@ async function setOrderOshShift(orderId, shift){
   const o = state.orders.find(x=>x.id===orderId);
   if(!o) return;
   o.oshShift = sh;
+  o.oshShiftManual = sh;
   o.updatedAt = Date.now();
   await saveOrderV2(o);
   showToast('Ба Басти '+sh+' гузаронида шуд');
@@ -4951,14 +4979,20 @@ function renderAdminStaff(){
     const isOnlyAdmin = acc.role==='admin' && state.accounts.filter(a=>a.role==='admin').length<=1;
     const pct = accountCommissionPct(acc);
     const showCommControl = (acc.role==='waiter' || acc.role==='cashier');
+    const isHead = acc.role==='waiter' && !!acc.isHeadWaiter;
     return `
-    <div class="item-row" style="flex-wrap:wrap;gap:10px;">
+    <div class="item-row" style="flex-wrap:wrap;gap:10px;${isHead?'border-color:var(--gold);background:#FFFBEB;':''}">
       <div class="info" style="min-width:160px;">
-        <div class="nm">${escapeHtml(acc.username)}</div>
-        <div class="cat">${roleLabel[acc.role]||acc.role}${showCommControl ? ` · <b style="color:var(--olive);">💰 ${pct}% аз чек</b>` : ''}</div>
+        <div class="nm">${escapeHtml(acc.username)} ${isHead ? `<span style="background:var(--gold);color:#fff;font-size:11px;padding:2px 8px;border-radius:12px;font-weight:800;margin-left:4px;">⭐ Сарофитсиант</span>` : ''}</div>
+        <div class="cat">${isHead ? '⭐ Сарофитсиант (илова + кам/нест дар чек)' : (roleLabel[acc.role]||acc.role)}${showCommControl ? ` · <b style="color:var(--olive);">💰 ${pct}% аз чек</b>` : ''}</div>
         <div class="cat" style="text-transform:none;letter-spacing:0;color:var(--text-dim);">🔑 ${escapeHtml(String(acc.password ?? ''))}</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        ${acc.role==='waiter' ? `
+          <button type="button" class="${isHead?'btn-primary':'btn-ghost'}" style="flex:none;padding:6px 12px;font-size:12px;${isHead?'background:var(--gold);border-color:var(--gold);':''}" data-toggleheadwaiter="${acc.id}">
+            ${isHead ? '⭐ Сарофитсиант (фаъол)' : '☆ Таъин кардани Сарофитсиант'}
+          </button>
+        ` : ''}
         ${showCommControl ? `
           <div style="display:flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:4px 8px;">
             <span style="font-size:12px;color:#475569;font-weight:600;">Фоиз (%):</span>
@@ -6086,6 +6120,12 @@ function attachAdminEvents(){
       render();
     });
 
+    document.querySelectorAll('[data-toggleheadwaiter]').forEach(el=>{
+      el.addEventListener('click', async ()=>{
+        await toggleHeadWaiter(el.dataset.toggleheadwaiter);
+        render();
+      });
+    });
     document.querySelectorAll('[data-saveacccomm]').forEach(el=>{
       el.addEventListener('click', async ()=>{
         const id = el.dataset.saveacccomm;
