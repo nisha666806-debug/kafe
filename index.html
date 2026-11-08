@@ -380,7 +380,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-09-V99-MOBILE-WIDTH-FIT';
+const APP_VERSION = '2026-11-09-V100-LOW-FIRESTORE-READS';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -464,31 +464,43 @@ function mergePaidOrdersIntoState(paidOrders, sinceTs){
 }
 async function ensurePaidOrdersLoaded(scope){
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const todayMs = todayStart.getTime();
   const repStart = reportPeriodStart();
-  const reportOrTodayStart = repStart > 0 ? Math.min(repStart, todayStart.getTime()) : 0;
-  const start = scope==='month'
-    ? new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime()
-    : reportOrTodayStart;
-  const startNum = Math.max(0, Number(start)||0);
-  const key=String(startNum);
+  let start = todayMs;
+  if(scope==='month'){
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+    const salReset = salaryMonthResetAt();
+    start = salReset > 0 ? Math.max(monthStart, salReset) : monthStart;
+  } else if(scope==='report'){
+    start = repStart > 0 ? repStart : todayMs;
+  } else {
+    // 'today' scope: only today's paid orders (never accumulates past days!)
+    start = repStart > todayMs ? repStart : todayMs;
+  }
+  const startNum = Math.max(todayMs - 31*24*3600*1000, Number(start)||todayMs);
+  const key = String(startNum);
   if(state.__paidOrdersLoadedSince!==null && state.__paidOrdersLoadedSince!==undefined && Number(state.__paidOrdersLoadedSince)<=startNum) return true;
   if(state.__dataLoadPromises.paid) return await state.__dataLoadPromises.paid;
-  state.__dataLoadPromises.paid=(async()=>{
-    const result=await loadPaidOrdersSinceV2(startNum);
-    if(!result.ok) return false;
-    mergePaidOrdersIntoState(result.value, startNum);
+  state.__dataLoadPromises.paid = new Promise((resolve)=>{
     if(state.__paidOrdersUnsub){try{state.__paidOrdersUnsub();}catch(e){}}
+    let firstResolved = false;
     try{
-      state.__paidOrdersUnsub=ordersCollectionRef().where('paidAt','>=',startNum).onSnapshot(snap=>{
+      state.__paidOrdersUnsub = ordersCollectionRef().where('paidAt','>=',startNum).onSnapshot(snap=>{
         const paid=[];
         snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;if(x.status==='paid')paid.push({...x,id:x.id||d.id});});
         mergePaidOrdersIntoState(paid, startNum);
-        if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
-      },err=>console.error('Paid orders realtime error',err));
-    }catch(e){console.error('Paid orders listener attach failed',e);}
-    state.__paidOrdersLoadedSince=key;
-    return true;
-  })();
+        state.__paidOrdersLoadedSince = key;
+        if(!firstResolved){ firstResolved = true; resolve(true); }
+        if(state.role && state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField()) render();
+      },err=>{
+        console.error('Paid orders realtime error',err);
+        if(!firstResolved){ firstResolved = true; resolve(false); }
+      });
+    }catch(e){
+      console.error('Paid orders listener attach failed',e);
+      if(!firstResolved){ firstResolved = true; resolve(false); }
+    }
+  });
   try{return await state.__dataLoadPromises.paid;}finally{delete state.__dataLoadPromises.paid;}
 }
 async function ensureScheduledOrdersLoaded(){
@@ -503,17 +515,8 @@ async function ensureScheduledOrdersLoaded(){
       const byId=new Map(keep.map(o=>[String(o.id),o]));
       scheduled.forEach(o=>byId.set(String(o.id),o));
       state.orders=Array.from(byId.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-      if(state.__scheduledOrdersUnsub){try{state.__scheduledOrdersUnsub();}catch(e){}}
-      state.__scheduledOrdersUnsub=ordersCollectionRef().where('type','==','scheduled').onSnapshot(snap2=>{
-        const incoming=[];
-        snap2.forEach(d=>{const x=d.data()||{};delete x._migratedAt;incoming.push({...x,id:x.id||d.id});});
-        const keep=(state.orders||[]).filter(o=>o.type!=='scheduled');
-        const m=new Map(keep.map(o=>[String(o.id),o]));
-        incoming.forEach(o=>m.set(String(o.id),o));
-        state.orders=Array.from(m.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
-        if(state.role && state.activeTable===null && !isActivelyEditingFormField()) render();
-      });
       state.__scheduledOrdersLoaded=true;
+      if(state.role && state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField()) render();
       return true;
     }catch(e){console.error('Scheduled orders load failed',e);return false;}
   })();
@@ -682,18 +685,20 @@ async function loadAll(){
     try{ out[outKey] = r.value ? JSON.parse(r.value) : null; }
     catch(e){ out.failed[outKey] = true; }
   };
-  await parseField('menu', 'menu');
-  await parseField('settings', 'settings');
-  await parseField('reservations', 'reservations');
-  await parseField('tables', 'tables');
-  await parseField('oshStock', 'oshStock');
-  await parseField('accounts', 'accounts');
-  await parseField('inventory', 'inventory');
-  await parseField('activityLog', 'activityLog');
-  await parseField('bonuses', 'bonuses');
-  await parseField('expenses', 'expenses');
-  await parseField('technicalStaff', 'technicalStaff');
-  await parseField('dailySalaryLedger', 'dailySalaryLedger');
+  await Promise.all([
+    parseField('menu', 'menu'),
+    parseField('settings', 'settings'),
+    parseField('reservations', 'reservations'),
+    parseField('tables', 'tables'),
+    parseField('oshStock', 'oshStock'),
+    parseField('accounts', 'accounts'),
+    parseField('inventory', 'inventory'),
+    parseField('activityLog', 'activityLog'),
+    parseField('bonuses', 'bonuses'),
+    parseField('expenses', 'expenses'),
+    parseField('technicalStaff', 'technicalStaff'),
+    parseField('dailySalaryLedger', 'dailySalaryLedger')
+  ]);
   return out;
 }
 async function saveMenu(menu){
@@ -850,7 +855,7 @@ async function logActivity(actionText){
   if(state.activityLog.length > 200) state.activityLog = state.activityLog.slice(0, 200);
   // Debounce: flush at most once every 5 seconds to avoid a write per action.
   clearTimeout(__logFlushTimer);
-  __logFlushTimer = setTimeout(()=> saveActivityLog(state.activityLog), 5000);
+  __logFlushTimer = setTimeout(()=> saveActivityLog(state.activityLog), 20000);
 }
 async function saveBonuses(bonuses){
   const ok = await fsSet('bonuses', JSON.stringify(bonuses));
@@ -1472,22 +1477,9 @@ async function init(){
   }catch(e){
     console.error('Initial orders migration failed',e);
   }
-  // Load active orders AND today's paid orders (including takeaway orders which are paid immediately) at startup.
-  const todayStartInit = new Date(); todayStartInit.setHours(0,0,0,0);
-  const repStartInit = Number(settings && settings.reportClearedAt) || 0;
-  const paidSinceInit = repStartInit > 0 ? Math.min(repStartInit, todayStartInit.getTime()) : todayStartInit.getTime();
-  const [ordersResult, paidInitResult] = await Promise.all([
-    loadActiveOrdersV2(),
-    loadPaidOrdersSinceV2(paidSinceInit)
-  ]);
-  const ordersById = new Map();
-  if(ordersResult.ok && Array.isArray(ordersResult.value)){
-    ordersResult.value.forEach(o=>{ if(o&&o.id) ordersById.set(String(o.id), o); });
-  }
-  if(paidInitResult && paidInitResult.ok && Array.isArray(paidInitResult.value)){
-    paidInitResult.value.forEach(o=>{ if(o&&o.id) ordersById.set(String(o.id), o); });
-  }
-  const orders = Array.from(ordersById.values()).sort((a,b)=>(Number(a.createdAt)||0)-(Number(b.createdAt)||0));
+  // Load active orders once at startup; paid orders are loaded without duplication by setupRealtimeSync() only for roles that need them.
+  const ordersResult = await loadActiveOrdersV2();
+  const orders = (ordersResult.ok && Array.isArray(ordersResult.value)) ? ordersResult.value : [];
 
   // EVERY field must load successfully before we touch anything. A failed read must NEVER be
   // treated as "this data doesn't exist yet" — that is exactly what caused real staff/order/
@@ -1613,7 +1605,7 @@ function isActivelyEditingFormField(){
 }
 function setupRealtimeSync(){
   teardownRealtimeSync();
-  // Migration runs once in init() — no need to repeat it here.
+  if(!state.role) return;
   try{
     const unsub=ordersCollectionRef().where('status','==','active').onSnapshot(snap=>{
       if(!state.role)return;
@@ -1623,14 +1615,17 @@ function setupRealtimeSync(){
       if(state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField())render();
     },err=>{
       console.error('Orders realtime error',err);
-      clearTimeout(__resubscribeTimer);
-      __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
     });
     __realtimeUnsubs.push(unsub);
   }catch(e){console.error('orders listener attach failed',e);}
-  ensurePaidOrdersLoaded('report').catch(console.error);
-  ensureScheduledOrdersLoaded().catch(console.error);
-  const fields=[['menu','menu'],['settings','settings'],['reservations','reservations'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['activityLog','activityLog'],['bonuses','bonuses'],['dailyClosures','dailyClosures'],['technicalStaff','technicalStaff'],['dailySalaryLedger','dailySalaryLedger']];
+  // Waiters do not need paid orders at all; Cashier/Admin/Chef only load TODAY's paid orders at startup (not old days)
+  if(state.role==='cashier' || state.role==='admin' || state.role==='chef'){
+    ensurePaidOrdersLoaded('today').catch(console.error);
+  }
+  const isWaiterOrChef = (state.role==='waiter' || state.role==='chef') && !(state.currentUser && state.currentUser.role==='admin');
+  const fields = isWaiterOrChef
+    ? [['menu','menu'],['settings','settings'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory']]
+    : [['menu','menu'],['settings','settings'],['tables','tables'],['oshStock','oshStock'],['accounts','accounts'],['inventory','inventory'],['bonuses','bonuses'],['dailyClosures','dailyClosures'],['technicalStaff','technicalStaff'],['dailySalaryLedger','dailySalaryLedger']];
   fields.forEach(([key,stateKey])=>{
     try{
       const unsub=docRef(key).onSnapshot(snap=>{
@@ -1638,8 +1633,6 @@ function setupRealtimeSync(){
         try{state[stateKey]=stateKey==='oshStock' ? normalizeOshStock(JSON.parse(snap.data().value)) : JSON.parse(snap.data().value);if(state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField())render();}catch(e){}
       },err=>{
         console.error('Realtime listener error for',key,err);
-        clearTimeout(__resubscribeTimer);
-        __resubscribeTimer=setTimeout(()=>{if(state.role)setupRealtimeSync();},2000);
       });
       __realtimeUnsubs.push(unsub);
     }catch(e){console.error('listener attach failed',key,e);}
@@ -3031,6 +3024,7 @@ function attachLoginEvents(){
     state.role = acc.role;
     state.loginError = null;
     saveSession({username:acc.username, role:acc.role});
+    setupRealtimeSync();
     render();
   };
   const btn = document.getElementById('loginSubmitBtn');
@@ -3049,6 +3043,7 @@ function attachCommonEvents(){
   });
   const logoutBtn = document.getElementById('logoutBtn');
   if(logoutBtn) logoutBtn.addEventListener('click', ()=>{
+    teardownRealtimeSync();
     clearSession();
     state.role=null; state.currentUser=null; state.activeTable=null; state.formOpen=false;
     state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
@@ -6144,7 +6139,8 @@ function attachAdminEvents(){
       if(nextTab==='report'){ ensurePaidOrdersLoaded('report').then(()=>ensureDailySalarySnapshot()).catch(console.error); ensureReportArchiveLoaded().catch(console.error); }
       else if(nextTab==='salary'){ ensurePaidOrdersLoaded('month').catch(console.error); }
       else if(nextTab==='settings'){ /* archive remains lazy; it is loaded only by the Admin button */ }
-      else if(nextTab==='orders'){ ensureScheduledOrdersLoaded().catch(console.error); }
+      else if(nextTab==='orders'){ state.__scheduledOrdersLoaded=false; ensureScheduledOrdersLoaded().catch(console.error); }
+      else if(nextTab==='staff'){ fsGet('activityLog').then(r=>{ if(r.ok && r.value){ try{ state.activityLog=JSON.parse(r.value)||[]; render(); }catch(e){} } }).catch(()=>{}); }
       state.adminTab = nextTab; state.showAddForm=false; state.editingId=null; state.confirmDeleteId=null; state.confirmResetMenu=false; state.confirmDeleteOldOrders=false;
       state.showAddTableForm=false; state.editingTableId=null; state.confirmDeleteTableId=null;
       state.showAddAccountForm=false; state.editingAccountId=null; state.confirmDeleteAccountId=null;
@@ -6717,11 +6713,9 @@ document.addEventListener('visibilitychange', ()=>{
 // The browser fires this the moment it detects the connection is back after being down —
 // catch up immediately rather than waiting for the next watchdog tick.
 window.addEventListener('online', ()=>{
-  // Connection restored: re-attach realtime listeners so Firestore reconnects cleanly.
-  // A full pollRefresh() here caused a spike of reads every network reconnect.
+  // Firestore onSnapshot listeners automatically resume on network reconnect without re-reading unchanged docs.
   if(state.role && state.loaded && !state.loadError && !state.needsSetup){
-    teardownRealtimeSync();
-    setupRealtimeSync();
+    render();
   }
 });
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'oshi-foram-2026-11-09-V99-MOBILE-WIDTH-FIT';
+const CACHE_NAME = 'oshi-foram-2026-11-09-V100-LOW-FIRESTORE-READS';
 const CORE_ASSETS = [
   './',
   './index.html',
