@@ -302,23 +302,41 @@
   .salary-computed{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--text-dim);margin-left:auto;}
   .xls-table{width:100%;max-width:100%;border-collapse:collapse;font-size:12px;margin-top:10px;font-variant-numeric:tabular-nums;}
   .xls-table th, .xls-table td{border:1px solid var(--line);padding:9px 10px;text-align:right;word-break:break-word;}
+  .ticket-wrap{overflow-x:hidden;}
+  .container, .receipt, .form-box, .stat-card, .item-row, .receipt-item-row, .menu-row{max-width:100%;overflow-x:clip;}
+  .menu-row{gap:8px;}
+  .menu-row > div:first-child{min-width:0;flex:1;overflow-wrap:break-word;word-break:break-word;}
+  .receipt-line{flex-wrap:wrap;gap:4px 8px;max-width:100%;}
+  .receipt-line > span:first-child{min-width:0;flex:1 1 120px;overflow-wrap:break-word;word-break:break-word;}
+  .receipt-line .qty-ctrl{flex-wrap:wrap;max-width:100%;justify-content:flex-end;}
+  .receipt-item-row > div, .item-row > div{min-width:0;max-width:100%;overflow-wrap:break-word;word-break:break-word;}
+  select, input, button{max-width:100%;box-sizing:border-box;}
   @media(max-width:640px){
-    .container{padding:14px 12px;}
-    .topbar{padding:10px 12px;}
-    .admin-tabs{padding:0 10px;}
-    .stat-row{gap:10px;}
-    .stat-card{min-width:calc(50% - 6px);padding:12px 14px;}
-    .stat-card .value{font-size:20px;}
-    .receipt{margin:12px 12px 16px;padding:14px;}
-    .ticket-head{padding:14px 16px;}
-    .ticket-actions{padding:0 12px 18px;}
-    .menu-list{padding:8px 12px 4px;}
-    .cat-tabs{padding:10px 12px 4px;}
-    .receipt-item-row, .item-row{flex-wrap:wrap;gap:8px;}
-    .xls-table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;}
-    .xls-table th, .xls-table td{padding:7px 8px;font-size:11px;white-space:nowrap;}
-    .field{max-width:100%;}
-    .field input, .field select{max-width:100%;}
+    .container{padding:12px 10px;}
+    .topbar{padding:10px 10px;gap:6px;}
+    .admin-tabs{padding:0 8px;}
+    .admin-tab{padding:12px 8px;font-size:13px;}
+    .table-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+    .table-card{min-width:0;padding:12px 10px;}
+    .table-card .tnum{max-width:100%;}
+    .stat-row{gap:8px;}
+    .stat-card{min-width:calc(50% - 6px);padding:12px;max-width:100%;}
+    .stat-card .value{font-size:19px;word-break:break-word;}
+    .receipt{margin:10px 10px 14px;padding:12px;}
+    .ticket-head{padding:12px 14px;}
+    .ticket-actions{padding:0 10px 16px;flex-wrap:wrap;}
+    .menu-list{padding:8px 10px 4px;}
+    .cat-tabs{padding:10px 10px 4px;}
+    .cat-tab[data-cashiertab]{flex:1 1 calc(33.33% - 6px);text-align:center;padding:8px 6px;font-size:12px;overflow:hidden;text-overflow:ellipsis;}
+    .receipt-item-row, .item-row{flex-wrap:wrap;gap:8px;padding:10px 12px;}
+    .salary-row{padding:10px 12px;gap:8px;}
+    .salary-row .salary-computed{margin-left:0;width:100%;}
+    .xls-table{display:table;width:100%;table-layout:fixed;}
+    .xls-table th, .xls-table td{padding:6px 4px;font-size:11px;white-space:normal;word-break:break-word;overflow-wrap:anywhere;}
+    .form-box{padding:12px;gap:8px;}
+    .field{flex:1 1 130px;min-width:0;max-width:100%;}
+    .field.small{flex:1 1 95px;min-width:0;}
+    .field input, .field select{width:100%;max-width:100%;min-width:0;}
   }
   .xls-table th{background:var(--paper-dim);font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:var(--text-dim);font-weight:700;}
   .xls-table td:first-child, .xls-table th:first-child{text-align:left;font-weight:600;}
@@ -362,7 +380,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-09-V98-FIX-SCHED-PHONE-AND-CHECK-SCROLL';
+const APP_VERSION = '2026-11-09-V99-MOBILE-WIDTH-FIT';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -4142,9 +4160,9 @@ function renderTicketOverlay(){
     const secSwitch = `
       <div style="padding:10px 20px 0;">
         <div style="font-size:11px;font-weight:700;color:#6b5f4d;margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px;">Ба кадом қисми чек илова шавад:</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button type="button" class="cat-tab ${activeSec==='main'?'active':''}" data-ticketsec="main" style="flex:1;min-width:140px;text-align:center;">🍽 Қисми асосӣ (бо хизматрасонӣ)</button>
-          <button type="button" class="cat-tab ${activeSec==='extra'?'active':''}" data-ticketsec="extra" style="flex:1;min-width:140px;text-align:center;${activeSec==='extra'?'background:var(--brick);border-color:var(--brick);color:#fff;':''}">🥡 Қисми иловагӣ (бе хизматрасонӣ)</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="cat-tab ${activeSec==='main'?'active':''}" data-ticketsec="main" style="flex:1 1 135px;min-width:0;white-space:normal;line-height:1.25;padding:8px 10px;text-align:center;">🍽 Қисми асосӣ (бо хизматрасонӣ)</button>
+          <button type="button" class="cat-tab ${activeSec==='extra'?'active':''}" data-ticketsec="extra" style="flex:1 1 135px;min-width:0;white-space:normal;line-height:1.25;padding:8px 10px;text-align:center;${activeSec==='extra'?'background:var(--brick);border-color:var(--brick);color:#fff;':''}">🥡 Қисми иловагӣ (бе хизматрасонӣ)</button>
         </div>
       </div>`;
     const tabs = cats.map(c=>`<button class="cat-tab ${c===state.activeCat?'active':''}" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('');
@@ -4292,10 +4310,10 @@ function renderTicketOverlay(){
       <span style="font-size:12px;font-weight:700;color:var(--ink);">🔄 Кӯчонидан ба дигар миз ва ивази официант:</span>
       ${freeTablesForMove.length ? `
         <div style="display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;flex-wrap:wrap;">
-          <select id="moveOrderTableSelect" title="Мизи нав" style="padding:7px 10px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;background:var(--white);">
+          <select id="moveOrderTableSelect" title="Мизи нав" style="flex:1 1 125px;min-width:0;max-width:100%;padding:7px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;background:var(--white);">
             ${freeTablesForMove.map(t=>`<option value="${t.id}" data-assigned="${escapeHtml(t.assignedTo||'')}">${escapeHtml(t.name)} (${t.seats} ҷой)${t.assignedTo ? ' · 👤 '+escapeHtml(t.assignedTo) : ''}</option>`).join('')}
           </select>
-          <select id="moveOrderWaiterSelect" title="Официанти нав" style="padding:7px 10px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;background:var(--white);">
+          <select id="moveOrderWaiterSelect" title="Официанти нав" style="flex:1 1 125px;min-width:0;max-width:100%;padding:7px 8px;border:1.5px solid var(--ink);border-radius:8px;font-family:inherit;font-size:13px;background:var(--white);">
             ${waitersForMove.length
               ? waitersForMove.map(w=>`<option value="${escapeHtml(w.username)}" ${w.username===defaultMoveWaiter?'selected':''}>👤 Официант: ${escapeHtml(w.username)}</option>`).join('')
               : `<option value="${escapeHtml(defaultMoveWaiter||'')}">👤 ${escapeHtml(defaultMoveWaiter||'Официант')}</option>`}
@@ -4826,7 +4844,7 @@ function renderAdminOrders(){
 
   return `
     <div class="section-title">📋 Фармоишҳо</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:16px;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px;margin-bottom:16px;">
       <div class="stat-card" style="min-width:0;"><div class="label">☀️ Сменаи 1 · ${shiftLabel(1)}</div><div class="value">${oshShiftStats(1).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
       <div class="stat-card" style="min-width:0;"><div class="label">🌙 Сменаи 2 · ${shiftLabel(2)}</div><div class="value">${oshShiftStats(2).total.toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
       <div class="stat-card" style="min-width:0;"><div class="label">🍚 Ҳамагӣ имрӯз</div><div class="value">${(oshShiftStats(1).total + oshShiftStats(2).total).toFixed(2)} кг</div><div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Ош заказшуда</div></div>
@@ -5091,7 +5109,7 @@ function renderAdminStaff(){
     const isHead = acc.role==='waiter' && !!acc.isHeadWaiter;
     return `
     <div class="item-row" style="flex-wrap:wrap;gap:10px;${isHead?'border-color:var(--gold);background:#FFFBEB;':''}">
-      <div class="info" style="min-width:160px;">
+      <div class="info" style="min-width:120px;flex:1;">
         <div class="nm">${escapeHtml(acc.username)} ${isHead ? `<span style="background:var(--gold);color:#fff;font-size:11px;padding:2px 8px;border-radius:12px;font-weight:800;margin-left:4px;">⭐ Сарофитсиант</span>` : ''}</div>
         <div class="cat">${isHead ? '⭐ Сарофитсиант (илова + кам/нест дар чек)' : (roleLabel[acc.role]||acc.role)}${showCommControl ? ` · <b style="color:var(--olive);">💰 ${pct}% аз чек</b>` : ''}</div>
         <div class="cat" style="text-transform:none;letter-spacing:0;color:var(--text-dim);">🔑 ${escapeHtml(String(acc.password ?? ''))}</div>
