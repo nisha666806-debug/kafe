@@ -1,4 +1,4 @@
-const CACHE_NAME = 'oshi-foram-2026-11-07-V97-TABLE-MOVE-WAITER-AND-SEATED-OSH';
+const CACHE_NAME = 'oshi-foram-2026-11-09-V98-FIX-SCHED-PHONE-AND-CHECK-SCROLL';
 const CORE_ASSETS = [
   './',
   './index.html',

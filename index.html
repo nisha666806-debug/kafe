@@ -362,7 +362,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-07-V97-TABLE-MOVE-WAITER-AND-SEATED-OSH';
+const APP_VERSION = '2026-11-09-V98-FIX-SCHED-PHONE-AND-CHECK-SCROLL';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -1602,7 +1602,7 @@ function setupRealtimeSync(){
       const parsed=[];
       snap.forEach(d=>{const x=d.data()||{};delete x._migratedAt;parsed.push({...x,id:x.id||d.id});});
       mergeActiveOrdersIntoState(parsed);
-      if(state.activeTable===null && !isActivelyEditingFormField())render();
+      if(state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField())render();
     },err=>{
       console.error('Orders realtime error',err);
       clearTimeout(__resubscribeTimer);
@@ -1617,7 +1617,7 @@ function setupRealtimeSync(){
     try{
       const unsub=docRef(key).onSnapshot(snap=>{
         if(!state.role||!snap.exists)return;
-        try{state[stateKey]=stateKey==='oshStock' ? normalizeOshStock(JSON.parse(snap.data().value)) : JSON.parse(snap.data().value);if(state.activeTable===null && !isActivelyEditingFormField())render();}catch(e){}
+        try{state[stateKey]=stateKey==='oshStock' ? normalizeOshStock(JSON.parse(snap.data().value)) : JSON.parse(snap.data().value);if(state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField())render();}catch(e){}
       },err=>{
         console.error('Realtime listener error for',key,err);
         clearTimeout(__resubscribeTimer);
@@ -2779,6 +2779,24 @@ async function deleteMenuItem(id){
 /* ============ RENDER ============ */
 function render(){
   const app = document.getElementById('app');
+  if(state.scheduledOpen && document.getElementById('scheduledOverlay')){
+    captureScheduledFields();
+  }
+  const _savedScroll = {
+    winY: window.scrollY || document.documentElement.scrollTop || 0,
+    adminTabsX: (document.querySelector('.admin-tabs') || {}).scrollLeft || 0,
+    ticketWrapY: (document.querySelector('#ticketOverlay .ticket-wrap') || {}).scrollTop || 0,
+    ticketCatsX: (document.querySelector('#ticketOverlay .cat-tabs') || {}).scrollLeft || 0,
+    schedWrapY: (document.querySelector('#scheduledOverlay .ticket-wrap') || {}).scrollTop || 0,
+    schedCatsX: (document.querySelector('#scheduledOverlay .cat-tabs') || {}).scrollLeft || 0,
+    twWrapY: (document.querySelector('#takeawayOverlay .ticket-wrap') || {}).scrollTop || 0,
+    twCatsX: (document.querySelector('#takeawayOverlay .cat-tabs') || {}).scrollLeft || 0,
+    viewWrapY: (document.querySelector('#viewOrderOverlay .ticket-wrap') || {}).scrollTop || 0
+  };
+  const _savedKgInputs = {};
+  document.querySelectorAll('.kg-qty-input').forEach(inp=>{
+    if(inp && inp.id) _savedKgInputs[inp.id] = inp.value;
+  });
   if(!state.loaded){
     app.innerHTML = `<div class="empty-state"><div class="big">☕</div><div class="mono">Бор карда истодааст…</div></div>`;
     return;
@@ -2891,6 +2909,29 @@ function render(){
       app.appendChild(div4.firstElementChild);
       attachOrderViewEvents();
     }
+  }
+  Object.keys(_savedKgInputs).forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.value = _savedKgInputs[id];
+  });
+  const admTabs = document.querySelector('.admin-tabs');
+  if(admTabs && _savedScroll.adminTabsX) admTabs.scrollLeft = _savedScroll.adminTabsX;
+  const tkWrap = document.querySelector('#ticketOverlay .ticket-wrap');
+  if(tkWrap && _savedScroll.ticketWrapY) tkWrap.scrollTop = _savedScroll.ticketWrapY;
+  const tkCats = document.querySelector('#ticketOverlay .cat-tabs');
+  if(tkCats && _savedScroll.ticketCatsX) tkCats.scrollLeft = _savedScroll.ticketCatsX;
+  const scWrap = document.querySelector('#scheduledOverlay .ticket-wrap');
+  if(scWrap && _savedScroll.schedWrapY) scWrap.scrollTop = _savedScroll.schedWrapY;
+  const scCats = document.querySelector('#scheduledOverlay .cat-tabs');
+  if(scCats && _savedScroll.schedCatsX) scCats.scrollLeft = _savedScroll.schedCatsX;
+  const twWrap = document.querySelector('#takeawayOverlay .ticket-wrap');
+  if(twWrap && _savedScroll.twWrapY) twWrap.scrollTop = _savedScroll.twWrapY;
+  const twCats = document.querySelector('#takeawayOverlay .cat-tabs');
+  if(twCats && _savedScroll.twCatsX) twCats.scrollLeft = _savedScroll.twCatsX;
+  const vwWrap = document.querySelector('#viewOrderOverlay .ticket-wrap');
+  if(vwWrap && _savedScroll.viewWrapY) vwWrap.scrollTop = _savedScroll.viewWrapY;
+  if(_savedScroll.winY){
+    window.scrollTo(0, _savedScroll.winY);
   }
 }
 
@@ -3381,6 +3422,9 @@ function scheduledTotal(){
 function openScheduled(){
   state.scheduledOpen = true;
   state.scheduledItems = {};
+  state.scheduledName = '';
+  state.scheduledPhone = '';
+  state.scheduledTime = '';
   state.scheduledCat = (state.menu[0] && state.menu[0].category) || null;
   state.scheduledDeliveryType = 'dinein';
   state.scheduledOshShift = 2;
@@ -3751,6 +3795,21 @@ function attachScheduledEvents(){
   const overlay = document.getElementById('scheduledOverlay');
   overlay.addEventListener('click', (e)=>{ if(e.target===overlay) closeScheduled(); });
   document.getElementById('closeScheduled').addEventListener('click', closeScheduled);
+  const nameInp = document.getElementById('schedNameInput');
+  if(nameInp){
+    nameInp.addEventListener('input', ()=>{ state.scheduledName = nameInp.value; });
+    nameInp.addEventListener('change', ()=>{ state.scheduledName = nameInp.value; });
+  }
+  const phoneInp = document.getElementById('schedPhoneInput');
+  if(phoneInp){
+    phoneInp.addEventListener('input', ()=>{ state.scheduledPhone = phoneInp.value; });
+    phoneInp.addEventListener('change', ()=>{ state.scheduledPhone = phoneInp.value; });
+  }
+  const timeInp = document.getElementById('schedTimeInput');
+  if(timeInp){
+    timeInp.addEventListener('input', ()=>{ state.scheduledTime = timeInp.value; });
+    timeInp.addEventListener('change', ()=>{ state.scheduledTime = timeInp.value; });
+  }
   document.querySelectorAll('[data-scat]').forEach(el=>{
     el.addEventListener('click', ()=>{ captureScheduledFields(); state.scheduledCat = el.dataset.scat; render(); });
   });
@@ -6617,7 +6676,9 @@ function attachAdminEvents(){
 // so the screen reflects whatever came in while it was deferred.
 document.addEventListener('focusout', ()=>{
   setTimeout(()=>{
-    if(state.role && !isActivelyEditingFormField()) render();
+    if(state.role && state.activeTable===null && !state.scheduledOpen && !state.takeawayOpen && !state.viewingOrderId && !isActivelyEditingFormField()){
+      render();
+    }
   }, 50);
 }, true);
 
