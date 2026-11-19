@@ -380,7 +380,7 @@ const CAFE_ID = getCafeId();
 // Bumped on every deploy — used to detect when a device is running stale JS (e.g. the PWA
 // has been open since before a fix shipped) so it can prompt a reload instead of silently
 // staying out of date until someone thinks to close and reopen the app.
-const APP_VERSION = '2026-11-20-V101-OSHBAR-AND-KITCHEN-QUEUE';
+const APP_VERSION = '2026-11-20-V102-REPORT-SERVICE-CHARGE-CARD';
 function docRef(key){
   return CAFE_ID
     ? db.collection('cafes').doc(CAFE_ID).collection('data').doc(key)
@@ -5774,6 +5774,7 @@ function renderAdminReport(){
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+  const serviceChargeToday = paidToday.reduce((s,o)=>s+(Number(o.serviceCharge)||0),0);
   const active = state.orders.filter(o=>o.status==='active');
 
   const receiptsHtml = paidToday.length ? paidToday
@@ -5853,6 +5854,7 @@ function renderAdminReport(){
       <div class="stat-card"><div class="label">Даромади имрӯз</div><div class="value">${fmtMoney(revenue)}</div></div>
       <div class="stat-card"><div class="label">💵 Нақд имрӯз</div><div class="value">${fmtMoney(cashToday)}</div></div>
       <div class="stat-card"><div class="label">💳 Ғайринақд имрӯз</div><div class="value">${fmtMoney(noncashToday)}</div></div>
+      <div class="stat-card"><div class="label">🍽 Ҳаққи хизматрасонӣ</div><div class="value" style="color:var(--olive);">${fmtMoney(serviceChargeToday)}</div></div>
       <div class="stat-card"><div class="label">Шумораи чекҳо</div><div class="value">${paidToday.length}</div></div>
     </div>
 
@@ -5994,6 +5996,7 @@ function exportReportToExcel(){
   const revenue = paidToday.reduce((s,o)=>s+o.total,0);
   const cashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).cash,0);
   const noncashToday = paidToday.reduce((s,o)=>s+paymentSplit(o).noncash,0);
+  const serviceChargeToday = paidToday.reduce((s,o)=>s+(Number(o.serviceCharge)||0),0);
 
   const wb = XLSX.utils.book_new();
 
@@ -6003,6 +6006,7 @@ function exportReportToExcel(){
     ['Даромади имрӯз (смн)', Number(revenue.toFixed(2))],
     ['Нақд (смн)', Number(cashToday.toFixed(2))],
     ['Ғайринақд (смн)', Number(noncashToday.toFixed(2))],
+    ['Ҳаққи хизматрасонӣ (смн)', Number(serviceChargeToday.toFixed(2))],
     ['Шумораи чекҳо', paidToday.length]
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryRows), 'Хулоса');

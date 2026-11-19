@@ -1,4 +1,4 @@
-const CACHE_NAME = 'oshi-foram-2026-11-20-V101-OSHBAR-AND-KITCHEN-QUEUE';
+const CACHE_NAME = 'oshi-foram-2026-11-20-V102-REPORT-SERVICE-CHARGE-CARD';
 const CORE_ASSETS = [
   './',
   './index.html',
