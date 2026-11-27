@@ -1,4 +1,4 @@
-const CACHE_NAME = 'oshi-foram-2026-11-23-V103-PHONE-SEARCH-ALL-AND-CALL-WAITER';
+const CACHE_NAME = 'oshi-foram-2026-11-28-V104-OSHI-FORAM-SPLASH-ANIMATION';
 const CORE_ASSETS = [
   './',
   './index.html',
